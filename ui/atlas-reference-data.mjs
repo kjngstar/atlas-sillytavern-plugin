@@ -2,6 +2,7 @@
 import { visibleWorkbenchMaps } from './atlas-workbench-data.mjs';
 import { projectReferenceFlows } from './atlas-reference-flows.mjs';
 import { projectMapContext } from './atlas-map-context.mjs';
+import { projectSpaceNavigation } from './atlas-space-navigation.mjs';
 
 export const REFERENCE_LEVELS = [
   ['world','L0','世界'],['region','L1','地区'],['city','L2','城市'],['district','L3','街区'],
@@ -29,7 +30,7 @@ const CONTAINER_NAV_KIND = {region:'region',city:'city',district:'district',buil
  * P06：中性场所标签。`kind` 必须仍取合法结构 key（导航处理器认这些），
  * 展示层用 categoryLabel 说人话，避免把「庭院」显示成「地区/建筑」。
  */
-const NEUTRAL_CATEGORY_LABELS = {other:'场所'};
+const NEUTRAL_CATEGORY_LABELS = {other:'场所',vehicle:'载具',natural:'自然区域'};
 function navigationCategoryLabel(map) {
   return NEUTRAL_CATEGORY_LABELS[text(map?.containerLocationKind)] ?? null;
 }
@@ -197,16 +198,18 @@ export function referenceGeometry(map, document, {viewMode='author',visibleLocat
      */
     const sceneUnits=document?.units==='meters'?'meters':'cells';
     const metersPerCell=Number.isFinite(map.metersPerCell)&&map.metersPerCell>0?map.metersPerCell:null;
-    for(const p of (map.points??[]).filter(p=>p.mobility==='mobile')){
+    const represented=new Set(rawPins.map(p=>text(p.entityId??p.id)));
+    for(const p of (map.points??[]).filter(p=>p.mobility==='mobile'||p.kind==='character'||p.kind==='item')){
       // POV 下隐藏载具既不进画面，也不产生诊断（诊断同样可能泄露实体身份）。
-      if(p.hidden===true)continue;
+      if((viewMode==='pov'||p.mobility==='mobile')&&p.hidden===true||represented.has(text(p.entityId)))continue;
       const converted=toScenePoint(p,'cells',sceneUnits,metersPerCell);
       if(!converted){
         unitDiagnostics.push({code:'POINT_UNIT_UNCONVERTIBLE',entityId:text(p.entityId),mapId:p.mapId??null,
-          message:'载具坐标是格制，但当前场景是米制且没有有效的米/格尺度：保留目录身份，不把错误坐标塞进画面或范围。'});
+          message:'点位坐标是格制，但当前场景是米制且没有有效的米/格尺度：保留目录身份，不把错误坐标塞进画面或范围。'});
         continue;
       }
-      rawPins.push({...p,x:converted.x,y:converted.y,id:p.entityId,type:'location'});
+      rawPins.push({...p,x:converted.x,y:converted.y,id:p.entityId,type:p.kind==='character'?'person':p.kind==='item'?'item':'location'});
+      represented.add(text(p.entityId));
     }
   }
   const uniquePins=[...new Map(rawPins.filter(finite).map(p=>[`${p.type}:${p.entityId??p.id}`,p])).values()];
@@ -228,6 +231,7 @@ export function referenceGeometry(map, document, {viewMode='author',visibleLocat
     geo={districts:(layout.districts??[]).filter(d=>d.polygon?.length>=3&&d.polygon.every(finite)).map((d,i)=>({id:d.id,name:d.name,c:COLORS[i%COLORS.length],pts:d.polygon.map(xy)})),
       river:river?Array.from({length:41},(_,i)=>{const y=(river.height??b.h)*i/40;return xy({x:river.cx+Math.sin((y/(river.height||b.h)*2-.35)*Math.PI)*river.amplitude,y});}):null,
       riverWidth:river?.width?river.width*scale:null,wallPoints:(layout.wall??[]).filter(finite).map(xy),
+      cityBuildings:(layout.buildings??[]).filter(p=>!p.decorative).map(r=>({...rect(r),id:r.id,name:r.name})),
       avenues:(layout.roads??[]).filter(r=>finite(r.from??r.a)&&finite(r.to??r.b)).map(r=>({from:xy(r.from??r.a),to:xy(r.to??r.b)})),pois:[]};
   } else if(layout?.kind==='overview') {
     // A SQL overview already contains validated geometry. Keep its paths and
@@ -296,6 +300,7 @@ export function referenceGeometry(map, document, {viewMode='author',visibleLocat
       })};
   } else if(layout?.kind==='floor') {
     kind='floor';const corridor=rect(layout.corridor);
+    const hostArea=layout.hostArea??(map.containerLocationKind==='room'&&!(layout.rooms??[]).some(r=>r.id===map.containerLocationId)?{...b,id:map.containerLocationId,name:map.name}:null);
     /**
      * M6-03②：家具保留**真实 local id / type / roomId**。
      *
@@ -314,6 +319,7 @@ export function referenceGeometry(map, document, {viewMode='author',visibleLocat
       // 绘制/点击/导航共用同一个 ID。不可见的走廊在 POV 过滤时已被剥掉 entityId/name。
       entityId:layout.corridor?.entityId??null,name:text(layout.corridor?.name)||null,
       y:corridor.y+corridor.h/2},
+      hostArea:hostArea?{...rect(hostArea),id:hostArea.id,name:hostArea.name}:null,
       rooms:(layout.rooms??[]).map((r,i)=>({...rect(r),id:r.id,name:r.name,kind:r.id===map.containerLocationId&&map.containerLocationKind==='vehicle'?'vehicle':'room',
         role:r.role??'indoor',
         status:text(r.status)||null,
@@ -372,7 +378,7 @@ export function projectReferenceData({state={},mapView,sceneView,catalogView,tas
     // P06：other 容器用中性场所标签展示；结构 key 仍是合法层级。
     const categoryLabel=navigationCategoryLabel(m);
     nodes.set(m.mapId,{id:m.mapId,mapId:m.mapId,name:m.name||m.mapId,code:level.code,tag:categoryLabel??level.name,categoryLabel,description:saved?'已保存的空间布局':'当前 SQL 地图概览；尚无已保存空间布局',
-      children:[],...g,renderKind:g.kind,kind:navKind,host:true,containerLocationId:m.containerLocationId??null,
+      children:[],...g,renderKind:g.kind,kind:navKind,host:true,containerLocationId:m.containerLocationId??null,containerLocationKind:m.containerLocationKind??null,
       parentMapId:m.parentMapId??null,connectionQuality:m.connectionQuality??null,
       topologyIssueCodes:Array.isArray(m.topologyIssueCodes)?[...m.topologyIssueCodes]:[],
       hasLayout:!!saved,sceneStatus:saved?'ready':'missing'});
@@ -451,6 +457,7 @@ export function projectReferenceData({state={},mapView,sceneView,catalogView,tas
     for(const mark of n.marks){if(mark.type==='poi'){const location=locationMap.get(mark.id),target=nodes.get(location?.childMapIds[0]);mark.node=target&&target!==n?{id:target.id,known:target.known!==false}:null;mark.placeId=mark.id;if(mobileIds.has(mark.id)){mark.type='vehicle';mark.sub=location.anchorLocationId?'停靠载具':'载具位置';}}}
   }
   projectMapContext(nodes,out.LOCATIONS,{inTransit});
+  projectSpaceNavigation(nodes,out.LOCATIONS,{scenes});
   const mapAt=id=>locationMap.get(id)?.childMapIds[0]??locationMap.get(id)?.mapId??null;
   out.CAST=catalog.filter(c=>c.entityKind==='character').map((c,i)=>{const p=pointIndex.get(c.entityId);return {id:c.entityId,name:c.name,initial:Array.from(c.name??'人').at(-1)||'人',role:p?.isProtagonist?'主角':'人物',c:COLORS[i%COLORS.length],
     state:c.locationId?'present':'unknown',tag:'已记录',locationId:c.locationId,mapNodeId:p?.mapId??mapAt(c.locationId)??c.mapId,description:c.summary??'',doing:'尚无行动记录',mind:'尚无后台想法记录',carry:[],known:true,

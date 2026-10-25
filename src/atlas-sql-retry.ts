@@ -81,9 +81,10 @@ async function retry(session: SqlSession, input: RetryInput): Promise<RetryResul
   const request = buildStagePrompt({ phase: 'repair', allowedOps, repairRefs: collectEntityRefs(tables, session.branchId, knownRefs.filter(ref=>!ref.alias.startsWith('new:'))).join('\n'),
     repairTickets: tickets.promptLines.join('\n'), sourceSnapshot: sources, batchId: 'retry_' + tickets.batchId, repairOfBatchId: tickets.batchId });
   request.anchor = anchor; request.sourceSnapshot = sources;
+  request.workClass=context?.phase==='decision'?'characters':context?.phase==='outcome'?'outcomes':context?.phase==='geography'?'construction':'observe';
   const generationOptions=normalizeGenerationOptions(await session.modelPort.generationOptions?.());
   assertCurrent();
-  const budget=createGenerationBudget({diagnosticAnchor:anchor,limit:generationOptions.batching.requestsPerOperation??0,workBatching:generationOptions.workBatching,workUsage:history.work_usage??undefined});
+  const budget=createGenerationBudget({diagnosticAnchor:anchor,limit:generationOptions.batching.requestsPerOperation??0,workBatching:generationOptions.workBatching,workUsage:history.work_usage??undefined,requestAudit:receipt.requestAudit});
   const response = await bindModelBudget(session.modelPort, budget, 'repair').request(request);
   assertCurrent();
   if (revision !== session.repo.internal.currentRevision() || storageRevision !== session.repo.storageRevision) throw new AtlasDbError('STALE_BASE', '模型补交等待期间快照已变化，候选不发布', {});
@@ -99,7 +100,7 @@ async function retry(session: SqlSession, input: RetryInput): Promise<RetryResul
     seedRefs:original.scope.all().filter(ref=>!failedIds.has(ref.declaredByOpId ?? '')) });
   const groups = buildAtomicGroups(compiled.results.map(r => ({ opId: r.opId, ...r.result })));
   const result = await runSqlRetry(session, { branchId: session.branchId, chatUid: session.chatUid, turnId: input.turnId,
-    currentHeadTurnId: input.turnId, attemptId: `retry_${storageRevision}`, groups: groups.groups, clockS: receipt.clockAfterS, sceneMaps:history.scene_maps, replacementOperations:corrected.operations, workUsage:budget.workUsage(), workBatching:generationOptions.workBatching, isCurrent: input.isCurrent });
+    currentHeadTurnId: input.turnId, attemptId: `retry_${storageRevision}`, groups: groups.groups, clockS: receipt.clockAfterS, sceneMaps:history.scene_maps, replacementOperations:corrected.operations, workUsage:budget.workUsage(), workBatching:generationOptions.workBatching, requestAudit:budget.audit?.(), isCurrent: input.isCurrent });
   const updated = result.coreSaved ? JSON.parse(String(queryBound(session.repo.db, 'SELECT receipt_json FROM turns WHERE id=?', [input.turnId])[0].receipt_json)) as TurnReceipt : receipt;
   return { receipt: updated, coreSaved: result.coreSaved, issues: [...issues, ...compiled.issues, ...groups.issues, ...result.issues] };
 }

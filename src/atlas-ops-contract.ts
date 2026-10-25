@@ -133,6 +133,7 @@ export type GroupResult = {
 };
 
 export type TurnReceipt = {
+  requestAudit?: import('./atlas-model-call-audit.ts').ModelCallAudit;
   requestPlan?: {
     normalLimits: Record<import('./atlas-work-batching.ts').ModelWorkClass,number>;
     extraLimit: number;
@@ -356,6 +357,9 @@ export type ModelBatchRequest = {
   /** Workload scheduling metadata; never sent as provider parameters. */
   workClass?: import('./atlas-work-batching.ts').ModelWorkClass;
   retryOf?: string;
+  /** Program-only provenance; never a provider parameter or a prompt instruction. */
+  diagnosticCause?: import('./atlas-work-batching.ts').ModelCallReason;
+  diagnosticTargets?: readonly string[];
   batchId: string;
   phase: Phase;
   messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>;
@@ -495,6 +499,7 @@ export const VIEW_KINDS = [
   'entity',
   'changes',
   'diagnostics',
+  'turn-analysis',
   'simulation',
   'prompt',
   'scene',

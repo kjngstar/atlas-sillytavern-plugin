@@ -170,10 +170,15 @@ function renderRail(){
  $('[data-view="msgs"] .rail-badge').textContent=D.MESSAGES.filter(known).length;
  $('[data-view="sim"] .rail-badge').textContent=D.TASKS.filter(t=>known(t)&&t.st!=='done').length;
 }
-function renderCrumbs(){const arr=path(state.nodeId)||[D.ROOT];$('#crumbs').innerHTML=arr.map((n,i)=>`${i?'<span class="crumb-sep">›</span>':''}<button class="crumb ${i===arr.length-1?'cur':''}" data-go="${esc(n.id)}"><span class="lv">${esc(n.code)}</span><span>${esc(n.name)}</span></button>`).join('');}
-function renderLadder(){const arr=path(state.nodeId)||[];$('#depthLadder').innerHTML=D.LEVELS.map((lv,i)=>{const n=arr.find(n=>n.code===lv.code);return `<button class="dl-cell ${n?(n.id===state.nodeId?'cur':'done'):''}" ${n?`data-go="${esc(n.id)}"`:'disabled'} aria-label="${esc(lv.name+(n?'，'+n.name:'，未建立'))}"><div class="dl-bar"></div><div class="dl-lb">${lv.code}</div></button>`;}).join('');}
+function renderCrumbs(){const arr=path(state.nodeId)||[D.ROOT];$('#crumbs').innerHTML=arr.map((n,i)=>`${i?'<span class="crumb-sep">›</span>':''}<button class="crumb ${i===arr.length-1?'cur':''}" data-go="${esc(n.id)}"><span class="lv">${esc(n.tag||n.code)}</span><span>${esc(n.name)}</span></button>`).join('');
+ const select=$('#floorSwitcher'),choices=current().floorChoices||[];select.hidden=!choices.length;select.innerHTML=choices.map(c=>`<option value="${esc(c.id)}">${esc(c.name)}</option>`).join('');select.value=state.nodeId;}
+function renderLadder(){const arr=path(state.nodeId)||[];$('#depthLadder').innerHTML=arr.map(n=>`<button class="dl-cell ${n.id===state.nodeId?'cur':'done'}" data-go="${esc(n.id)}" aria-label="${esc((n.tag||n.code)+'，'+n.name)}" title="${esc(n.name)}"><div class="dl-bar"></div><div class="dl-lb">${esc(n.tag||n.code)}</div></button>`).join('');}
+function renderSpaceNavigation(){const n=current(),groups=n.spaceGroups||[],coverage=n.spaceCoverage;
+ const el=$('#spaceNavigation'),open=el.querySelector('details')?.open===true;el.hidden=!groups.length;
+ el.innerHTML=groups.length?`<details class="space-navigation" ${open?'open':''}><summary>本图空间 · ${coverage.total}${coverage.unplaced?`<em>${coverage.unplaced} 处位置待完善</em>`:''}</summary>${groups.map(g=>`<section><div class="section-label">${esc(g.label)}</div>${g.entries.map(c=>`<button class="child-location" data-go="${esc(c.id)}"><span>${esc(c.name)}</span><em>${!c.represented?'位置待完善':!c.hasLayout?'内部待布局':'查看'}</em>›</button>`).join('')}</section>`).join('')}<p class="scope-note">入口按已有归属分组；没有楼层依据的房间保留原归属。位置待完善不代表地点不存在。</p></details>`:'';
+}
 function renderTree(){let count=0;const walk=(n,depth)=>{if(!known(n))return '';count++;const has=n.children?.some(known),open=state.open.has(n.id),active=n.id===state.nodeId;
- return `<div class="tree-row ${active?'on':''}" style="padding-left:${6+depth*12}px"><button class="tw ${open&&has?'open':''}" data-expand="${esc(n.id)}" aria-label="${open?'收起':'展开'}${esc(n.name)}" ${has?'':'disabled'}>${has?icon('chev'):''}</button><button class="tree-link" data-go="${esc(n.id)}"><i class="tdot" style="--c:${color[n.kind]||color.world}"></i><span class="tname">${esc(n.name)}</span>${sceneCast(n.id).length?`<em class="tflag live">${sceneCast(n.id).length}人</em>`:''}<em class="tnum">${esc(n.code)}</em></button></div>${has&&open?n.children.map(c=>walk(c,depth+1)).join(''):''}`;};
+ return `<div class="tree-row ${active?'on':''}" style="padding-left:${6+depth*12}px"><button class="tw ${open&&has?'open':''}" data-expand="${esc(n.id)}" aria-label="${open?'收起':'展开'}${esc(n.name)}" ${has?'':'disabled'}>${has?icon('chev'):''}</button><button class="tree-link" data-go="${esc(n.id)}" title="${esc((n.tag||n.code)+(n.hasLayout===false?' · 内部待布局':''))}"><i class="tdot" style="--c:${color[n.kind]||color.world}"></i><span class="tname">${esc(n.name)}</span>${sceneCast(n.id).length?`<em class="tflag live">${sceneCast(n.id).length}人</em>`:''}<em class="tnum">${esc(n.tag||n.code)}</em></button></div>${has&&open?n.children.map(c=>walk(c,depth+1)).join(''):''}`;};
  $('#layerTree').innerHTML=walk(D.ROOT,0);$('#treeCount').textContent=count+' 节点';
 }
 const flags=[['showGrid','网格底图'],['showMarks','世界标记'],['showLabels','名称标签'],['showLinks','人物联系线'],['showRadar','室外距离环']];
@@ -338,7 +343,7 @@ function backupPanelHTML(){
   const status=!b?'正在检查升级前备份…':b.available?`可导出 · SHA256 ${esc(String(b.sha||'').slice(0,16))}… · ${esc(String(b.createdAt||''))}`:`不可导出：${esc(b.reason||'当前聊天没有持久备份')}`;
   return `<section class="backup-panel"><div class="section-label">升级前原档</div><p class="scope-note">只保留最近一次升级前的原档；导出是只读操作，不会改动当前数据库，也不会清除备份。</p><div class="detail-actions"><button class="action-btn" data-backup-export ${b?.available?'':'disabled'}>导出升级前备份</button><button class="action-btn" data-backup-recheck>重新检查</button></div><p class="scope-note" data-backup-status>${status}</p></section>`;
 }
-function diagnosticsHTML(){return `<div class="catalog-toolbar"><label class="search-field">${icon('search')}<input id="diagnosticSearch" placeholder="搜索错误代码、内容或字段路径…" aria-label="搜索诊断"></label><select id="diagnosticLevel" aria-label="日志等级"><option value="all">全部等级</option><option value="error">错误</option><option value="warn">警告</option><option value="info">信息</option><option value="debug">调试</option></select><button class="action-btn" data-copy-diagnostics>复制当前列表</button><button class="action-btn" data-export="diagnostics">导出日志</button></div>${backupPanelHTML()}<div id="diagnosticRows">${diagnosticRows()}</div>`;}
+function diagnosticsHTML(){return `<div class="catalog-toolbar"><label class="search-field">${icon('search')}<input id="diagnosticSearch" placeholder="搜索错误代码、内容或字段路径…" aria-label="搜索诊断"></label><select id="diagnosticLevel" aria-label="日志等级"><option value="all">全部等级</option><option value="error">错误</option><option value="warn">警告</option><option value="info">信息</option><option value="debug">调试</option></select><button class="action-btn" data-copy-diagnostics>复制当前列表</button><button class="action-btn" data-export="diagnostics">导出日志</button><button class="action-btn" data-export="turn-analysis">导出逐轮分析</button></div>${backupPanelHTML()}<div id="diagnosticRows">${diagnosticRows()}</div>`;}
 function diagnosticRows(q='',level='all'){
   const rows=D.DIAGNOSTICS.filter(d=>(level==='all'||d.level===level)&&JSON.stringify(d).toLowerCase().includes(q.toLowerCase()));
   if(!rows.length)return empty('没有符合条件的日志');
@@ -349,7 +354,7 @@ function settingsHTML(){const tabs=[['prompts','提示词'],['connection','API �
  if(state.settingsTab!=='appearance')return html+presetUI.render(state.settingsTab);
  return html+window.AtlasAppearance.appearanceSettingsHTML({skin:skinValue(),catalog:skinCatalog,runtime:window.AtlasSkinRuntime});
 }
-function renderAll({preserveWorkspace=false}={}){renderRail();renderCrumbs();renderLadder();renderTree();renderSwitches();renderChips();renderPlace();renderInspector();renderDock();if(!preserveWorkspace)renderPage();renderModes();applyUIProfile();}
+function renderAll({preserveWorkspace=false}={}){renderRail();renderCrumbs();renderLadder();renderTree();renderSpaceNavigation();renderSwitches();renderChips();renderPlace();renderInspector();renderDock();if(!preserveWorkspace)renderPage();renderModes();applyUIProfile();}
 function renderModes(){$('#mapModeSwitcher').value=state.mapMode;}
 function showFlow(id){const m=message(id);if(!m||!known(m))return;let destination=Object.keys(D.FLOWS).find(mapId=>(D.FLOWS[mapId]||[]).some(e=>e.id===id)&&mapId===state.nodeId)||Object.keys(D.FLOWS).find(mapId=>(D.FLOWS[mapId]||[]).some(e=>e.id===id));destination=destination||m.mapNodeId||m.locationId;state.mapMode='flow';navigate(destination,true);map.setMode('flow');select('message',id,true);renderModes();}
 function showTask(id){const t=task(id);if(!t||!known(t))return;state.mapMode='sim';navigate(t.mapId,true);map.setMode('sim');select('task',id,true);renderModes();}
@@ -443,6 +448,8 @@ async function exportData(kind){
    modal('导出当前地图',`<p>已准备 ${result.file.scope.mapCount} 张地图（含子图）的布局、坐标与组装约束。</p><p><a class="action-btn" href="${esc(mapExportUrl)}" download="${esc(result.filename)}">下载地图 JSON</a> <button class="action-btn" data-copy-map-export>复制地图 JSON</button></p><p class="scope-note">此文件用于分析，不是可直接导入的存档。</p><details><summary>查看 JSON</summary><pre>${esc(mapExportText)}</pre></details>`);
    if(window.AtlasHost.downloadMap){const text=mapExportText;$('#modalBody a[download]').onclick=event=>{event.preventDefault();window.AtlasHost.downloadMap(result.filename,text);};}
   }catch(error){toast(error.message,'warn');}
+ }else if(kind==='turn-analysis'){
+  try{const result=await window.AtlasHost.exportTurnAnalysis();download(result.filename,JSON.stringify(result.file,null,2));toast(`已导出 ${result.file.coverage.storedTurnsExported} 条回合记录与模型调用明细`);}catch(error){toast(error.message,'warn');}
  }else if(kind==='receipts')download('atlas-turn-receipts.json',JSON.stringify(D.RECEIPTS,null,2));else if(kind==='diagnostics')download('atlas-preview-diagnostics.jsonl',D.DIAGNOSTICS.map(d=>JSON.stringify(d)).join('\n'),'application/x-ndjson');else if(Object.keys(skinValue().assets).length)download('atlas-skin.zip',await appearance.exportPack(),'application/zip');else download('atlas-ui-theme.json',JSON.stringify(skinValue(),null,2));
 }
 function skinValue(){return clone(activeSkin);}
@@ -547,6 +554,7 @@ function bind(){
   if(el.id==='diagnosticLevel')$('#diagnosticRows').innerHTML=diagnosticRows($('#diagnosticSearch').value,el.value);
   if(el.id==='profileSwitcher'){await setUIProfile(el.value);return;}
   if(el.id==='mapModeSwitcher'){state.mapMode=el.value;map.setMode(state.mapMode);refreshFlows();renderModes();return;}
+  if(el.id==='floorSwitcher'){navigate(el.value);return;}
   if(el.hasAttribute('data-skin-select')){await setTheme(el.value);renderPage();return;}
   for(const [attribute,section]of [['skinComponent','components'],['skinMapStyle','mapStyles'],['skinToken','tokens']])if(el.dataset[attribute]){await updateSkin(section,el.dataset[attribute],el.type==='range'?Number(el.value):el.value);return;}
   for(const key of ['radar','motion','coordinates'])if(el.hasAttribute('data-appearance-'+key)){await updateSkin('options',key,el.checked);return;}

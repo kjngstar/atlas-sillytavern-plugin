@@ -255,6 +255,8 @@ export function resolveSpatialProfile(input: SpatialProfileInput): SpatialProfil
     && (input.members ?? []).some(member => member.kind === 'room')
     && !(input.members ?? []).some(member => ['region', 'natural', 'city', 'district', 'building'].includes(TEXT(member.kind)))) {
     chosen = { mode: 'interior', basis: 'source-supported', reason: '该容器位于已登记室内容器内，并直接包含已登记房间' };
+  } else if (containerKind==='building'&&(input.members??[]).some(m=>m.kind==='floor')) {
+    chosen={mode:'compound',basis:'source-supported',reason:'已登记楼层有独立子图；建筑本图展示总览和楼层入口，未明确楼层的房间不擅自分层'};
   } else if (containerKind==='building'&&(input.members??[]).some(m=>m.kind==='building')&&(input.members??[]).some(m=>['region','natural','other'].includes(String(m.kind)))) {
     chosen={mode:'compound',basis:'source-supported',reason:'已登记成员同时包含独立建筑与室外空间'};
   } else if (containerKind && TYPED_DEFAULT[containerKind]) {
@@ -286,7 +288,9 @@ export function resolveSpatialProfile(input: SpatialProfileInput): SpatialProfil
     const id = String(member.id ?? '');
     const kind = TEXT(member.kind);
     if (!kind) continue;
-    if (chosen.mode === 'outdoor' && INDOOR_KINDS.has(kind)) {
+    if (kind === 'floor' && (chosen.mode === 'interior' || chosen.mode === 'compound')) {
+      pushUnsupported(id, kind, '楼层由独立楼层入口展示，不作为同层平面房间或室外足迹');
+    } else if (chosen.mode === 'outdoor' && INDOOR_KINDS.has(kind)) {
       // 室外档案不画室内房间：这些成员等它们自己的室内图，说得明白，不硬塞。
       pushUnsupported(id, kind, '室外档案不生成匿名室内房间：等该地点自己的室内图');
     } else if (chosen.mode === 'interior' && OUTDOOR_KINDS.has(kind)) {

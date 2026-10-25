@@ -97,6 +97,18 @@ function boot({data=BUILDING_DATA,host={},preferences={version:1,singleClickEnte
 function withUI(t,options){const ui=boot(options);t.after(ui.dispose);return ui;}
 
 const tick=()=>new Promise(resolve=>setImmediate(resolve));
+test('楼层用原生选择器导航；未明楼层房间保留入口，导航不会偷偷请求生成',async t=>{
+ const upper={mapId:'upper-map',name:'二楼',kind:'interior',containerLocationId:'upper',containerLocationKind:'floor',parentMapId:'bld-map',points:[]};
+ const pantry={mapId:'pantry-map',name:'厨房',kind:'interior',containerLocationId:'pantry',containerLocationKind:'room',parentMapId:'bld-map',points:[]};
+ const data=projectReferenceData({mapView:view([WORLD,BUILDING_MAP,upper,pantry]),catalogView:view([...CATALOG,{entityId:'upper',entityKind:'location',locationKind:'floor',name:'二楼',mapId:'bld-map'},{entityId:'pantry',entityKind:'location',locationKind:'room',name:'厨房',mapId:'bld-map'}]),viewMode:'author'});
+ const generated=[],{w,preview}=withUI(t,{data,host:{layout:id=>generated.push(id),build:id=>generated.push(id)}});
+ preview.go('bld-map');const select=w.document.getElementById('floorSwitcher');
+ assert.equal(select.hidden,false);assert.deepEqual([...select.options].map(o=>o.value),['bld-map','upper-map']);
+ assert.match(w.document.getElementById('spaceNavigation').textContent,/房间 · 楼层未标明/);
+ select.value='upper-map';select.dispatchEvent(new w.Event('change',{bubbles:true}));await tick();assert.equal(preview.state.nodeId,'upper-map');
+ preview.go('pantry-map');assert.equal(select.hidden,true);assert.deepEqual(generated,[]);
+ assert.deepEqual([...w.document.querySelectorAll('#depthLadder button')].map(b=>b.textContent),['世界','建筑','房间']);
+});
 test('map tools start tucked away and retain canvas, camera, selection and independent legend state',async t=>{
  const {w,preview,calls}=withUI(t),doc=w.document,canvas=doc.getElementById('map'),toggle=doc.getElementById('mapWidgetsToggle'),widgets=doc.getElementById('mapHudWidgets');
  assert.equal(widgets.hidden,true);assert.equal(toggle.getAttribute('aria-expanded'),'false');

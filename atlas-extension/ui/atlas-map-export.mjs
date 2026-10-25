@@ -59,6 +59,8 @@ export function buildMapAnalysisExport({data,mapView,sceneView,catalogView,mapId
       frame,metersPerCell:m.metersPerCell??null,scaleLocked:m.scaleLocked??false,
       points:m.points??[],coarseList:m.coarseList??[],
       sceneStatus:s?.sceneStatus??(s?.scene?'ready':'missing'),scene:s?.scene??null,issues:s?.issues??[],
+      assessment:s?.assessment??null,
+      navigation:{groups:node.spaceGroups??[],floors:node.floorChoices??[],coverage:node.spaceCoverage??null},
       rendered:{kind:node.renderKind,extent:node.extent,transform:node.transform,metric:node.metric,
         geometry:node.geo,marks:(node.marks??[]).map(({node:child,...mark})=>({...mark,childMapId:child?.id??null}))},
       // P01b：路线与地图质量字段追加导出。只搬运**已过滤 DTO** 的公开字段，

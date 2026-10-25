@@ -126,7 +126,7 @@ export function baselineFloorRooms(
   ref: (id:unknown)=>string|undefined,
   sizeOf?: (id:string)=>{widthM:number;heightM:number}|null,
 ) {
-  const local=[...locations].sort((a,b)=>byId(String(a.id),String(b.id)));
+  const local=locations.filter(row=>row.kind!=='floor').sort((a,b)=>byId(String(a.id),String(b.id)));
   const perSide=Math.ceil(local.length/2);
   if(!perSide)return [];
   const w=Math.floor(Math.min(8,(extent.width-1)/perSide)*2)/2;
@@ -485,7 +485,8 @@ export function deriveLayoutSites(tables: TableReadPort, branchId: string): Deri
       locations,
       mapRow: entry.map,
       branchId,
-      firstEstimate: { widthM: entry.extent.width, heightM: entry.extent.height },
+      // An uncalibrated overview extent is in cells, never physical metres.
+      firstEstimate: entry.extent.units==='meters'?{ widthM: entry.extent.width, heightM: entry.extent.height }:null,
     });
     if (!resolved) continue;
     entry.spaceSize = resolved;
@@ -516,13 +517,13 @@ export function deriveLayoutSites(tables: TableReadPort, branchId: string): Deri
     && !entry.map.scale_locked && !hasScene(entry.map);
   for (const entry of [...entries].sort((a,b)=>entryDepth(b)-entryDepth(a)||byId(a.mapId,b.mapId))) {
     if (!expandable(entry) || entry.own.length === 0) continue;
-    const sizes = entry.own.map(row => {
+    const sizes = entry.own.filter(row=>row.kind!=='floor').sort((a,b)=>byId(String(a.id),String(b.id))).map(row => {
       const known = locationSpaceSize({maps, locations, locationId:String(row.id), branchId});
       const child = entries.find(child => child.kind === 'floor' && child.container?.id === row.id && child.own.length > 0);
       return known ? [known.widthM, known.heightM] : child ? [child.extent.width, child.extent.height] : [8, 8];
     });
-    const perSide = Math.ceil(sizes.length / 2);
-    const minW = Math.max(...sizes.map(size=>size[0])) * perSide + 1;
+    if(!sizes.length)continue;
+    const minW = Math.max(...[0,1].map(side=>sizes.reduce((sum,size,i)=>sum+(i%2===side?size[0]:0),0))) + 1;
     const minH = Math.max(...sizes.map(size=>size[1])) * 2 + 3;
     entry.extent = {...entry.extent, width:Math.max(entry.extent.width,minW), height:Math.max(entry.extent.height,minH)};
     entry.spaceSize = resolveMapSpaceSize({maps,locations,mapRow:entry.map,branchId,firstEstimate:{widthM:entry.extent.width,heightM:entry.extent.height}});
@@ -545,6 +546,7 @@ export function deriveLayoutSites(tables: TableReadPort, branchId: string): Deri
   for (const entry of entries) {
     if (entry.kind !== 'floor' || entry.own.length === 0) continue;
     for (const row of entry.own) {
+      if(row.kind==='floor')continue;
       const childId = asId(row.id);
       if (!childId || childId === asId(entry.map.container_location_id)) continue;
       const child = locationSpaceSize({ maps, locations, locationId: childId, branchId });
@@ -729,7 +731,7 @@ export function buildSqlLayoutTask(
         const known = locationSpaceSize({ maps: derived.maps, locations: derived.locations, locationId: id, branchId })??derived.entries.find(e=>e.container?.id===id&&e.kind==='floor')?.spaceSize?.resolution;
         return known ? { widthM: known.widthM, heightM: known.heightM } : null;
       }) : [];
-    const local = entry.standalone && container ? [container] : entry.own;
+    const local = entry.standalone && container ? [container] : container?.kind==='room'?[container,...entry.own]:entry.own;
     const localIds = new Set(local.map((row) => String(row.id)));
     // P12/R03 §19.3：父图轮廓是子空间权威尺寸在**父坐标系**里的投影；这里把已知尺寸随 scope 下发，
     // 但坐标仍由本图自己的布局决定（局部坐标允许不同，物理宽高必须一致）。
@@ -816,6 +818,7 @@ export function buildSqlLayoutTask(
       childSpaces,
       parentContext,
       hierarchy:{parentMap:ref(parentEntry(entry)?.mapId),depth:depth(entry),sharedSpace:ref(container?.id)},
+      verticalSpaces:entry.own.filter(row=>row.kind==='floor').map(row=>({ref:ref(row.id),name:row.name,kind:row.kind})),
       baselineRooms,
       locations: local.map((row) => ({
         ref: ref(row.id),
@@ -910,11 +913,15 @@ export function buildSqlLayoutTask(
     const districts=(registeredDistricts.length?registeredDistricts:[scope.container]).map((district,index)=>({id:district.ref,name:district.name,bank:'west',order:index}));
     const buildings=scope.locations.filter(location=>location.kind==='building').map(location=>{
       const size=scope.childSpaces.find(space=>space.ref===location.ref);
-      return {id:location.ref,name:location.name,districtId:districts.find(district=>district.id===location.parent)?.id??districts[0].id,w:size?.w??24,h:size?.h??24};
+      return {id:location.ref,name:location.name,districtId:districts.find(district=>district.id===location.parent)?.id??scope.container!.ref,w:size?.w??24,h:size?.h??24};
     });
-    request.messages[1].content+='\n【本图合法 city JSON 示例；所有实体引用均已登记】\n'+JSON.stringify({op:'map.layout.request',ref:scope.map,data:{kind:'city',spec:{districts,buildings,enclosure:'open',riverWidth:0}},why:'使用已登记城市范围生成估计布局'});
+    if(buildings.some(building=>building.districtId===scope.container!.ref)&&!districts.some(d=>d.id===scope.container!.ref))districts.push({id:scope.container.ref,name:scope.container.name,bank:'west',order:districts.length});
+    request.messages[1].content+='\n【本图合法 city JSON 示例；所有实体引用均已登记】\n'+JSON.stringify({op:'map.layout.request',ref:scope.map,data:{kind:'city',spec:{districts,buildings,enclosure:'open',riverWidth:0,blocksPerDistrict:0}},why:'使用已登记城市范围生成估计布局'});
     request.messages[1].content+='\ncity 的 districts.id 和 buildings.id 必须沿用上方已登记地点引用，不能使用 B1、B2 等自造编号。没有已登记建筑时 buildings=[]；不能为填满画面而新增可交互建筑。';
   }
+  if(scopes.some(scope=>scope.verticalSpaces.length))request.messages[1].content+='\nverticalSpaces 是上下楼层入口，由界面的楼层导航展示。不要把它们放进 rooms、zones 或 buildings，也不把整层用门连接到同层走廊。房间只保留已登记的归属；没有楼层依据时不能擅自迁到一楼或二楼。';
+  if(scopes.some(scope=>scope.container?.kind==='room'))request.messages[1].content+='\n房间包含已登记子房间时，baselineRooms 只列子房间；程序另外保留容器房间自身的可用地面。厨房的操作台、厨内人物仍用厨房容器的 roomId，不能迁入储物间，也不能因为存在储物间就省略厨房本身的陈设与人物。不要把容器再次塞进 rooms 形成重叠房间。';
+  if(hasCity)request.messages[1].content+='\n建筑的 districtId 不能凭相邻或示意排位推断为另一个已登记街区。没有已登记街区归属的建筑使用当前城市容器作为自身分区，不把住所强行归入温室区等任意首个街区。默认 blocksPerDistrict=0，先表达真实地点与道路，不用装饰街块填满地图。';
   if (hasFloor && hasSpatialCapability(CAPABILITY_CORRIDOR_BINDING)) request.messages[1].content += '\n' + CORRIDOR_BINDING_PROMPT;
   if (hasSpatialCapability(CAPABILITY_SPACE_CANONICAL)) request.messages[1].content += '\n' + SPACE_CANONICAL_PROMPT;
   if (hasSpatialCapability(CAPABILITY_SPATIAL_PROFILE)) request.messages[1].content += '\n' + SPATIAL_PROFILE_PROMPT;
@@ -967,6 +974,7 @@ export function buildSqlLayoutTask(
   if(hasOverview)request.messages[1].content += '\noverview 的 surface 只能为 mixed/urban/forest/mountain/water/indoor/void；砂石、泥土、草地等具体材料可在 why 中说明，不得用 gravel/dirt/grass 作为 surface 枚举。未知或混合场地用 mixed。';
   request.messages[1].content += '\n【提交前核对，不输出核对过程】逐一覆盖本批每张 map，且每图只提交一行 map.layout.request；kind 与引用逐图匹配，不能串用另一张图的局部陈设。初次生成补齐已登记空间；更新只补缺项或修正 layoutIssues，保留其它约束。示例只展示合法字段，不是空布局答案。尺寸冲突时保留确认值并在 why 说明，不能缩小已确认空间或删除锁定结构来凑成功。程序判定实际可绘制结果，模型不要声称校验已经通过。不得因正文未变化只返回 noop，不输出解释正文。';
   // 兼容预设的注入副本必须与最终任务一致（预览与真实发送不能两套）。
+  request.diagnosticTargets = pendingIds;
   request.batchTargets={kind:'maps',count:selected.length,estimatedOutputTokens:estimatedTokens};
   request.promptInput.injectionText = request.messages[1].content;
 

@@ -40,7 +40,7 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 var define_ATLAS_BUILD_INFO_default;
 var init_define_ATLAS_BUILD_INFO = __esm({
   "<define:__ATLAS_BUILD_INFO__>"() {
-    define_ATLAS_BUILD_INFO_default = { pluginVersion: "0.9.96", buildId: "build-2deb635e2774a8d5", buildCommit: "010989ab1f2238a114d6cd4f812930ac03709566", buildDirty: false };
+    define_ATLAS_BUILD_INFO_default = { pluginVersion: "0.9.97", buildId: "build-7ddb69b7091135c4", buildCommit: "f75e72994ea31681544a31492557198bc282b600", buildDirty: false };
   }
 });
 
@@ -57,11 +57,12 @@ function validWorkBatching(value) {
   const raw = value;
   return Object.keys(DEFAULT_WORK_BATCHING).every((key) => Number.isSafeInteger(raw[key]) && raw[key] >= (key === "extraRequests" ? 0 : 1));
 }
-var DEFAULT_WORK_BATCHING;
+var MODEL_CALL_REASONS, DEFAULT_WORK_BATCHING;
 var init_atlas_work_batching = __esm({
   "src/atlas-work-batching.ts"() {
     "use strict";
     init_define_ATLAS_BUILD_INFO();
+    MODEL_CALL_REASONS = ["scheduled", "transport_retry", "format_repair", "evidence_repair", "missing_map_reply", "batch_split", "validation_repair", "background_resume", "retry_unspecified"];
     DEFAULT_WORK_BATCHING = {
       mapBatches: 1,
       characterBatches: 1,
@@ -100,6 +101,10 @@ var init_atlas_runtime_limits = __esm({
       containerDepth: 4,
       actionPlanDepth: 2,
       detailedAttemptsPerTurn: 20,
+      /** Compact transport records per turn; totals survive when older detail is evicted. */
+      modelCallAuditLimit: 256,
+      /** Safe model/turn events retained across refresh in this browser session. */
+      diagnosticCallHistoryLimit: 1e3,
       diagnosticPageSize: 100,
       /** M4：只读目录视图单页上限（完整导出走游标，不允许一次全量）。 */
       catalogViewMaxLimit: 200,
@@ -289,6 +294,8 @@ function sanitizeDiagnostic(raw, now = Date.now) {
         else if (key === "completionSignal" && ["received", "ended", "after-commands"].includes(token)) details[key] = token;
         else if (key === "method" && ["GET", "POST", "PUT", "DELETE", "PATCH"].includes(token)) details[key] = token;
         else if (key === "apiFormat" && ["openai", "openai_responses", "claude", "gemini"].includes(token)) details[key] = token;
+        else if (key === "workClass" && ["observe", "construction", "evidence", "maps", "characters", "outcomes"].includes(token)) details[key] = token;
+        else if (key === "callReason" && MODEL_CALL_REASONS.includes(token)) details[key] = token;
         else if (key === "retryKind" && ["normal", "retry", "repair", "compatibility"].includes(token)) details[key] = token;
         else if (key === "failureStage" && ["preparation", "budget", "request", "headers", "body", "parse", "validation", "commit", "save"].includes(token)) details[key] = token;
         else if (key === "cancelledBy" && ["timeout", "transport", "host", "unknown"].includes(token)) details[key] = token;
@@ -343,6 +350,10 @@ function createAtlasDiagnosticsSink(options = {}) {
   const capacity = Math.max(100, Math.min(2e3, Math.trunc(options.capacity ?? 500)));
   const storageKey = options.storageKey ?? "atlas:safe-diagnostics:v1";
   const archiveKey = options.archiveKey ?? "atlas:safe-diagnostics-archive:v1";
+  const callHistoryKey = storageKey + ":model-calls:v1";
+  const callHistory = [];
+  let callHistoryDropped = 0;
+  let callHistoryDirty = false;
   const archiveTtlMs = Math.max(6e4, Math.min(30 * 864e5, options.archiveTtlMs ?? 7 * 864e5));
   let archiveEnabled = options.archiveEnabled === true;
   let archiveUnavailable = false;
@@ -387,6 +398,10 @@ function createAtlasDiagnosticsSink(options = {}) {
     try {
       const saved = entries.filter((entry) => entry.level === "warn" || entry.level === "error").slice(-100);
       options.persist.setItem(storageKey, JSON.stringify(saved));
+      if (callHistoryDirty) {
+        options.persist.setItem(callHistoryKey, JSON.stringify({ entries: callHistory, droppedCount: callHistoryDropped }));
+        callHistoryDirty = false;
+      }
     } catch {
       storageUnavailable = true;
       const unavailable = sanitizeDiagnostic({
@@ -417,6 +432,21 @@ function createAtlasDiagnosticsSink(options = {}) {
           const entry = sanitizeDiagnostic(raw, now);
           if (entry && (entry.level === "warn" || entry.level === "error")) entries.push(entry);
         }
+      }
+    }
+  } catch {
+    storageUnavailable = true;
+  }
+  try {
+    const raw = options.persist?.getItem(callHistoryKey);
+    if (raw) {
+      const saved = JSON.parse(raw);
+      if (saved && Array.isArray(saved.entries)) {
+        for (const item of saved.entries.slice(-ATLAS_RUNTIME_LIMITS.diagnosticCallHistoryLimit)) {
+          const entry = sanitizeDiagnostic(item, now);
+          if (entry && CALL_HISTORY_CODES.has(entry.code)) callHistory.push(entry);
+        }
+        callHistoryDropped = typeof saved.droppedCount === "number" && Number.isSafeInteger(saved.droppedCount) && saved.droppedCount >= 0 ? saved.droppedCount : 0;
       }
     }
   } catch {
@@ -454,6 +484,14 @@ function createAtlasDiagnosticsSink(options = {}) {
       try {
         const entry = sanitizeDiagnostic({ ...options.metadata, ...raw }, now);
         if (!entry) return null;
+        if (CALL_HISTORY_CODES.has(entry.code)) {
+          callHistory.push(entry);
+          if (callHistory.length > ATLAS_RUNTIME_LIMITS.diagnosticCallHistoryLimit) {
+            callHistory.shift();
+            callHistoryDropped++;
+          }
+          callHistoryDirty = true;
+        }
         const last = entries[entries.length - 1];
         if (last && ["API_CALL_COMPLETE", "ENGINE_HEALTH_OK", "STATE_REFRESH_COMPLETE"].includes(entry.code) && entry.level !== "error" && entry.level !== "warn" && last.level === entry.level && !entry.requestRef && !last.requestRef && last.code === entry.code && last.phase === entry.phase && last.traceId === entry.traceId && last.source === entry.source && last.chatRef === entry.chatRef && last.chatFingerprint === entry.chatFingerprint && last.httpStatus === entry.httpStatus && last.outcome === entry.outcome && last.errorCode === entry.errorCode && JSON.stringify(last.details) === JSON.stringify(entry.details) && Date.parse(entry.at) - Date.parse(last.at) < 2e3) {
           last.count = (last.count ?? 1) + 1;
@@ -483,10 +521,26 @@ function createAtlasDiagnosticsSink(options = {}) {
     getSnapshot() {
       return entries.map((entry) => ({ ...entry, ...entry.details ? { details: { ...entry.details } } : {} }));
     },
+    /** Export has its own session history; rendering still uses the small live ring. */
+    getExportSnapshot() {
+      const all = new Map([...callHistory, ...entries].map((entry) => [entry.id, entry]));
+      return {
+        events: [...all.values()].sort((a, b) => Date.parse(a.at) - Date.parse(b.at)).map((entry) => ({ ...entry, ...entry.details ? { details: { ...entry.details } } : {} })),
+        coverage: { retainedCallEvents: callHistory.length, droppedCallEvents: callHistoryDropped, sessionPersistenceAvailable: Boolean(options.persist) && !storageUnavailable }
+      };
+    },
     clear() {
       entries.length = 0;
+      callHistory.length = 0;
+      callHistoryDropped = 0;
+      callHistoryDirty = false;
       try {
         options.persist?.removeItem(storageKey);
+      } catch {
+        storageUnavailable = true;
+      }
+      try {
+        options.persist?.removeItem(callHistoryKey);
       } catch {
         storageUnavailable = true;
       }
@@ -517,11 +571,12 @@ function createAtlasDiagnosticsSink(options = {}) {
     }
   };
 }
-var LEVELS, SOURCES, OUTCOMES, SAFE_SCENE_STATUS, DETAIL_KEYS, SAFE_ATOM, SAFE_ROUTES, SAFE_CAPABILITIES, SAFE_MODES, SAFE_LORE_ACTIVATION_MODES, SAFE_LORE_REASONS, SAFE_COLLECTIONS, SAFE_COUNT_KEYS, REQUEST_NUMBER_KEYS, nextId, REF_PREFIX, REF_HEX_CHARS, REF_DIGITS, REF_MASK, REF_PATTERN, REF_OFFSET_64, REF_PRIME_64, REF_MIX_1, REF_MIX_2, SPATIAL_DETAILS, ATLAS_NAMED_DIAGNOSTICS;
+var LEVELS, SOURCES, OUTCOMES, SAFE_SCENE_STATUS, DETAIL_KEYS, SAFE_ATOM, SAFE_ROUTES, SAFE_CAPABILITIES, SAFE_MODES, SAFE_LORE_ACTIVATION_MODES, SAFE_LORE_REASONS, SAFE_COLLECTIONS, SAFE_COUNT_KEYS, REQUEST_NUMBER_KEYS, CALL_HISTORY_CODES, nextId, REF_PREFIX, REF_HEX_CHARS, REF_DIGITS, REF_MASK, REF_PATTERN, REF_OFFSET_64, REF_PRIME_64, REF_MIX_1, REF_MIX_2, SPATIAL_DETAILS, ATLAS_NAMED_DIAGNOSTICS;
 var init_atlas_diagnostics = __esm({
   "src/atlas-diagnostics.ts"() {
     "use strict";
     init_define_ATLAS_BUILD_INFO();
+    init_atlas_work_batching();
     init_atlas_runtime_limits();
     LEVELS = /* @__PURE__ */ new Set(["debug", "info", "warn", "error"]);
     SOURCES = /* @__PURE__ */ new Set(["host", "ui", "engine", "model", "storage", "lorebook", "map"]);
@@ -610,6 +665,9 @@ var init_atlas_diagnostics = __esm({
       "quietPromptPresent",
       "completionSignal",
       "gated",
+      "workClass",
+      "callReason",
+      "retryOfBatchRef",
       "requestRef",
       "batchRef",
       "pathRef",
@@ -734,6 +792,17 @@ var init_atlas_diagnostics = __esm({
       "rejectedGroups",
       "targetCount",
       "budgetUsed"
+    ]);
+    CALL_HISTORY_CODES = /* @__PURE__ */ new Set([
+      "MODEL_REQUEST_STARTED",
+      "MODEL_REQUEST_COMPLETED",
+      "MODEL_REQUEST_FAILED",
+      "MODEL_REQUEST_DEFERRED",
+      "TURN_STARTED",
+      "COMMIT_SUCCEEDED",
+      "COMMIT_PARTIAL",
+      "COMMIT_FAILED",
+      "TURN_DUPLICATE"
     ]);
     nextId = 0;
     REF_PREFIX = "ref-";
@@ -1114,6 +1183,18 @@ var init_atlas_model_batching = __esm({
   }
 });
 
+// src/atlas-model-call-audit.ts
+var init_atlas_model_call_audit = __esm({
+  "src/atlas-model-call-audit.ts"() {
+    "use strict";
+    init_define_ATLAS_BUILD_INFO();
+    init_atlas_diagnostics();
+    init_atlas_runtime_limits();
+    init_atlas_work_batching();
+    init_atlas_work_batching();
+  }
+});
+
 // src/atlas-sql-generation-budget.ts
 function transportBudgetPort(budget, stage, batchId) {
   return {
@@ -1128,6 +1209,7 @@ var init_atlas_sql_generation_budget = __esm({
   "src/atlas-sql-generation-budget.ts"() {
     "use strict";
     init_define_ATLAS_BUILD_INFO();
+    init_atlas_model_call_audit();
     init_atlas_runtime_limits();
     init_atlas_work_batching();
     init_atlas_request_diagnostics();
@@ -5205,6 +5287,18 @@ var init_atlas_db_upgrade = __esm({
   }
 });
 
+// src/atlas-turn-analysis-view.ts
+var init_atlas_turn_analysis_view = __esm({
+  "src/atlas-turn-analysis-view.ts"() {
+    "use strict";
+    init_define_ATLAS_BUILD_INFO();
+    init_atlas_db_runtime();
+    init_atlas_request_diagnostics();
+    init_atlas_diagnostics();
+    init_atlas_model_call_audit();
+  }
+});
+
 // src/atlas-world-feed-history.ts
 var init_atlas_world_feed_history = __esm({
   "src/atlas-world-feed-history.ts"() {
@@ -5465,6 +5559,7 @@ var init_atlas_db_repository = __esm({
     init_atlas_db_upgrade();
     init_atlas_db_envelope();
     init_atlas_runtime_limits();
+    init_atlas_turn_analysis_view();
     init_atlas_db_views();
     init_atlas_catalog_views();
     init_atlas_spatial_flow_views();
@@ -7684,6 +7779,9 @@ function createSqlModelPort(options) {
         batchRef: atlasRefFingerprint(request.batchId),
         stage: request.promptMode === "atlas-spatial-extract" ? "spatial-extract" : options.stage && options.stage !== "observe" ? options.stage : request.phase,
         phase: request.phase,
+        workClass: request.workClass ?? (request.batchTargets?.kind === "maps" ? "maps" : request.batchTargets?.kind === "characters" ? "characters" : request.promptMode === "atlas-spatial-extract" ? "evidence" : request.phase === "geography" ? "construction" : request.phase === "decision" ? "characters" : request.phase === "outcome" ? "outcomes" : "observe"),
+        callReason: request.diagnosticCause ?? (request.phase === "repair" ? "validation_repair" : request.retryOf ? "retry_unspecified" : "scheduled"),
+        ...request.retryOf ?? request.repairOfBatchId ? { retryOfBatchRef: atlasRefFingerprint(request.retryOf ?? request.repairOfBatchId) } : {},
         retryKind: request.phase === "repair" ? "repair" : request.retryOf || request.repairOfBatchId ? "retry" : "normal",
         ...request.batchTargets ? { targetCount: request.batchTargets.count } : {}
       } };
@@ -7708,7 +7806,7 @@ function createSqlModelPort(options) {
       if (preset.toolCalling && ((preset.connectionMode ?? "custom") !== "custom" || (preset.apiFormat ?? "openai") !== "openai")) throw failure("TOOL_PROTOCOL_UNSUPPORTED", "函数输出目前仅支持自定义 OpenAI 兼容连接，请关闭函数输出或切换连接");
       const budget = options.budget;
       const phase = options.stage === "background" ? "background" : request.phase || options.stage || "observe";
-      const logical = budget?.claimBatch(phase, request.batchId, { kind: request.workClass ?? (request.batchTargets?.kind === "maps" ? "maps" : request.batchTargets?.kind === "characters" ? "characters" : request.promptMode === "atlas-spatial-extract" ? "evidence" : void 0), retry: Boolean(request.retryOf) || request.phase === "repair" });
+      const logical = budget?.claimBatch(phase, request.batchId, { kind: request.workClass ?? (request.batchTargets?.kind === "maps" ? "maps" : request.batchTargets?.kind === "characters" ? "characters" : request.promptMode === "atlas-spatial-extract" ? "evidence" : void 0), retry: Boolean(request.retryOf) || request.phase === "repair", cause: request.diagnosticCause ?? (request.phase === "repair" ? "validation_repair" : request.retryOf ? "retry_unspecified" : "scheduled"), retryOf: request.retryOf ?? request.repairOfBatchId, targetCount: request.batchTargets?.count, targetIds: request.diagnosticTargets });
       if (logical && !logical.ok) {
         observeDiagnostic(options.onDiagnostic, {
           ...context,
@@ -7732,7 +7830,13 @@ function createSqlModelPort(options) {
         fetchFn: options.fetchFn,
         now: options.now,
         messagesOverride: messages,
-        onDiagnostic: options.onDiagnostic,
+        onDiagnostic: (event) => {
+          try {
+            budget?.recordDiagnostic?.(event);
+          } catch {
+          }
+          observeDiagnostic(options.onDiagnostic, event);
+        },
         diagnosticContext: context,
         ...preset.toolCalling && request.promptMode !== "atlas-spatial-extract" ? { responseTool: { name: "emit_atlas_operations", description: "Return the complete Atlas operations exactly once as JSONL in content. Follow the stage operation contract; do not write text outside this call.", parameters: { type: "object", properties: { content: { type: "string", description: "Complete stage reply, one validated operation JSON object per line" } }, required: ["content"], additionalProperties: false } } } : {},
         // M3-03A：API 内部兼容路由的第二次真实发送，也走同一局部预算。缺预算 port 时不传，
@@ -10944,7 +11048,7 @@ function createAtlasSettingsRoutes(deps) {
       plugin: "atlas",
       // 0.9.18 起与 ATLAS_PLUGIN_VERSION 同步（此前自 0.9.2 起一直烂着没人查——
       // tests/atlas-server-plugin.test.mjs 的 health 版本一致性断言防再犯）
-      version: "0.9.96",
+      version: "0.9.97",
       protocolVersion: 1,
       time: now()
     });

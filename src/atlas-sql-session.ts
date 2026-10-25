@@ -695,7 +695,7 @@ export async function runSqlTurn(session: SqlSession, input: TurnInput): Promise
 }
 
 /** Retry changes live only in an isolated candidate until the host confirms its save. */
-export async function runSqlRetry(session: SqlSession, input: Omit<FailedGroupRetryInput, 'db'> & { isCurrent?: () => boolean;sceneMaps?:boolean;replacementOperations?:ParsedOperation[];workUsage?:import("./atlas-sql-generation-budget.ts").WorkPlanUsage|null;workBatching?:import("./atlas-work-batching.ts").WorkBatchingSettings }): Promise<FailedGroupRetryResult & { coreSaved: boolean }> {
+export async function runSqlRetry(session: SqlSession, input: Omit<FailedGroupRetryInput, 'db'> & { isCurrent?: () => boolean;sceneMaps?:boolean;replacementOperations?:ParsedOperation[];workUsage?:import("./atlas-sql-generation-budget.ts").WorkPlanUsage|null;workBatching?:import("./atlas-work-batching.ts").WorkBatchingSettings;requestAudit?:import("./atlas-model-call-audit.ts").ModelCallAudit }): Promise<FailedGroupRetryResult & { coreSaved: boolean }> {
   if (input.chatUid !== session.chatUid || input.branchId !== session.branchId) throw new AtlasDbError('CHAT_CHANGED', '补交不属于当前 SQL 会话', {});
   return withChatCommitLock(session.chatUid, async () => {
     if (session.isCurrentHost && !session.isCurrentHost()) throw new AtlasDbError('SESSION_STALE', '补交前宿主快照已变化', {});
@@ -738,6 +738,7 @@ export async function runSqlRetry(session: SqlSession, input: Omit<FailedGroupRe
         receipt.worldChanged = receipt.worldChanged || result.groups.some(g => g.changedRows > 0 && g.purpose !== 'bookkeeping');
         const branchStatus=queryBound(candidate.db,'SELECT simulation_status FROM branches WHERE id=?',[session.branchId])[0]?.simulation_status;
         receipt.status = branchStatus==='catching_up'||branchStatus==='blocked'||receipt.groups.some(g => g.status === 'rejected' || g.status === 'blocked') ? 'partial' : 'committed';
+        if(input.requestAudit)receipt.requestAudit=input.requestAudit;
         if(input.workUsage&&input.workBatching)receipt.requestPlan={normalLimits:workPlanLimits(input.workBatching),extraLimit:input.workBatching.extraRequests,usage:input.workUsage};
         runBound(candidate.db, 'UPDATE turns SET receipt_json=?, status=? WHERE id=?',
           [JSON.stringify(receipt), receipt.status, input.turnId]);

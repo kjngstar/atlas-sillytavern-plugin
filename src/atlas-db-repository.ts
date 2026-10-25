@@ -44,6 +44,7 @@ import { ATLAS_SCHEMA_VERSION, USER_TABLE_COUNT, currentSchemaVersion, expectedT
 import { upgradeSchema } from './atlas-db-upgrade.ts';
 import { encodeSnapshot, sha256HexSync, sha256Hex } from './atlas-db-envelope.ts';
 import { ATLAS_RUNTIME_LIMITS } from './atlas-runtime-limits.ts';
+import { queryTurnAnalysis } from './atlas-turn-analysis-view.ts';
 import { queryChanges, queryDiagnostics, queryEntityDetail, queryMapView, queryNearby, querySimulationView } from './atlas-db-views.ts';
 // M4/Q07：四个新只读口。这里只传查询上下文，绝不把 writer / saveSession 交给读口。
 import { queryCatalog } from './atlas-catalog-views.ts';
@@ -1107,6 +1108,8 @@ export function createSqlRepository(options: RepositoryOptions) {
           return queryChanges(ctx, query);
         case 'diagnostics':
           return queryDiagnostics(ctx, query);
+        case 'turn-analysis':
+          return queryTurnAnalysis(ctx, query);
         case 'simulation':
           return querySimulationView(ctx, query);
         case 'prompt':
@@ -2116,7 +2119,7 @@ export function createSqlRepository(options: RepositoryOptions) {
           allIssues.push({code:'LAYOUT_TRANSPORT_RETRIED',path:'$.layout',message:'空间模型连接出现可重试错误；本轮在额度内重新发送一次同一请求。',severity:'warning',retryable:false});
           await new Promise<void>(resolve=>setTimeout(resolve,1000));
           if(input.isCurrent&&!input.isCurrent()||currentRevision()!==anchor.baseRevision)throw new AtlasDbError('STALE_BASE','空间模型重试前聊天或世界修订已变化，候选不发布',{});
-          return layoutModelPort!.request({...request,batchId:`${request.batchId}_transport_retry`,retryOf:request.batchId});
+          return layoutModelPort!.request({...request,batchId:`${request.batchId}_transport_retry`,retryOf:request.batchId,diagnosticCause:'transport_retry'});
         }
       };
       let layoutApplied=false;
@@ -2286,7 +2289,7 @@ export function createSqlRepository(options: RepositoryOptions) {
                 if(layoutBudget.remaining()<=0)throw firstError??new Error(rejected.map(r=>r.message).join('；'));
                 const affected=rejected.some(r=>r.mapId===null)||firstError?evidenceMapRefs.map(m=>m.id):[...new Set(rejected.map(r=>r.mapId!))];
                 const repairContent=batch.request.messages[1].content+'\n【格式纠错】准确问题：'+(firstError instanceof Error?firstError.message:JSON.stringify(rejected))+'. 请重新核对受影响地图 '+affected.join('、')+'，只返回完整 JSON {"facts":[{"mapRef":"目录引用","segmentRef":"本批 S 编号"}]}。只选择已提供片段编号，不抄写或改写原文。没有相关片段则 facts=[]。';
-                const repairRequest={...batch.request,batchId:batch.request.batchId+'_repair',retryOf:batch.request.batchId,messages:batch.request.messages.map((message,index)=>index===1?{...message,content:repairContent}:message),promptInput:{...batch.request.promptInput!,injectionText:repairContent}};
+                const repairRequest={...batch.request,batchId:batch.request.batchId+'_repair',retryOf:batch.request.batchId,diagnosticCause:'evidence_repair' as const,messages:batch.request.messages.map((message,index)=>index===1?{...message,content:repairContent}:message),promptInput:{...batch.request.promptInput!,injectionText:repairContent}};
                 const repairStarted=now();
                 evidenceResponse=await requestSpatialWithTransportRetry(repairRequest,'layout_evidence_repair');
                 recordAttempt({kind:'layout_evidence_repair',phase:'geography',started_wall_ms:repairStarted,finished_wall_ms:now(),input_chars:repairRequest.messages.reduce((sum,message)=>sum+message.content.length,0),response_chars:evidenceResponse.text?.length??0,http_status:evidenceResponse.httpStatus,response_hash:sha256HexSync(evidenceResponse.text??''),finish_reason:evidenceResponse.finishReason});
@@ -2317,7 +2320,7 @@ export function createSqlRepository(options: RepositoryOptions) {
           }
           const layoutRequest=attachLayoutEvidence(currentLayoutTask.request,layoutEvidenceCache,currentLayoutTask.mapIds);
           const isSupplement=currentLayoutTask.mapIds.some(id=>retriedLayoutIds.has(id));
-          if(isSupplement)layoutRequest.retryOf=layoutTasks[0].request.batchId;
+          if(isSupplement){layoutRequest.retryOf=layoutTasks[0].request.batchId;layoutRequest.diagnosticCause=currentLayoutTask.mapIds.some(id=>smallerLayoutBatches.has(id))?'batch_split':'missing_map_reply';}
           else mapBatchesRemaining--;
           // Every real transport still claims the finite spatial plan's allowance.
           layoutStarted=now();
@@ -2338,7 +2341,7 @@ export function createSqlRepository(options: RepositoryOptions) {
             retriedLayoutIds.add(currentLayoutTask.mapIds[0]);
             const reason=unknownEntityRefs.length?`使用了未登记实体引用 ${unknownEntityRefs.join('、')}`:parsed.explicitNoop?'只返回了 noop':parsed.operations.length?'未返回本批地图引用的 map.layout.request':parsed.issues.some(i=>i.code==='JSON_SYNTAX')?'回复不是合法 JSON':'回复中没有布局操作';
             const repairText=layoutRequest.messages[1].content+'\n【布局回复纠错】上次'+reason+'。解析问题：'+(parsed.issues.map(i=>i.message).join('；')||'无语法错误，但没有本批布局')+'\n本批是用户明确请求生成或更新布局，不能以“正文无变化”判定 noop。重新生成以上地图的完整布局；缺少事实时保留估计/未知和锁，不编造实体。只返回 JSONL，每张图一个完整 JSON 对象，ref 必须使用本图目录引用：'+[...allowedRefs].join('、')+'。所有键及字符串用双引号，不要代码围栏、解释、逗号连接两个对象或在字段内省略括号。';
-            const repairRequest={...layoutRequest,retryOf:layoutRequest.batchId,batchId:layoutRequest.batchId+'_format_retry',messages:layoutRequest.messages.map((m,i)=>i===1?{...m,content:repairText}:m),promptInput:layoutRequest.promptInput?{...layoutRequest.promptInput,injectionText:repairText}:undefined};
+            const repairRequest={...layoutRequest,retryOf:layoutRequest.batchId,batchId:layoutRequest.batchId+'_format_retry',diagnosticCause:'format_repair' as const,messages:layoutRequest.messages.map((m,i)=>i===1?{...m,content:repairText}:m),promptInput:layoutRequest.promptInput?{...layoutRequest.promptInput,injectionText:repairText}:undefined};
             allIssues.push({code:'LAYOUT_RESPONSE_RETRIED',path:'$.layout',message:`首次布局${reason}，已在本轮预算内请求一次完整回复纠错；原回复未写入地图。`,severity:'warning',retryable:false});
             const retryStarted=now();
             response=await requestSpatialWithTransportRetry(repairRequest,'layout_repair');
@@ -2624,6 +2627,7 @@ export function createSqlRepository(options: RepositoryOptions) {
       });
       if ((simulation.catchingUp || simulation.elapsed.quality === 'unknown') && receipt.status !== 'failed') receipt.status = 'partial';
       if (construction.attempted && construction.status !== 'ready' && receipt.status !== 'failed') receipt.status = 'partial';
+      receipt.requestAudit = turnBudget.audit?.();
       if(generationOptions.workBatching)receipt.requestPlan={normalLimits:workPlanLimits(generationOptions.workBatching),extraLimit:generationOptions.workBatching.extraRequests,usage:turnBudget.workUsage()!};
       if (construction.reasonCode === 'MODEL_BUDGET_EXHAUSTED' && receipt.status !== 'failed') receipt.status = 'partial';
       if (input.layoutMaps && allIssues.some(issue => issue.severity === 'error')) {

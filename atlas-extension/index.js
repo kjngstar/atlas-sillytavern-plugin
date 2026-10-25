@@ -20,7 +20,7 @@ export { atlasPointRefOf, atlasKnownCoordinate, atlasPositionQuality, atlasSqlMa
  * - 任何失败都不破坏 SillyTavern 原聊天：静默降级为控制台警告。
  */
 
-export const ATLAS_EXTENSION_VERSION = "0.9.96";
+export const ATLAS_EXTENSION_VERSION = "0.9.97";
 export const ATLAS_DISPLAY_NAME = "阿特拉斯 / Atlas";
 export const ATLAS_PROTOCOL_VERSION = 1;
 export const ATLAS_EXTENSION_ID = "atlas-world-sim";
@@ -1557,7 +1557,7 @@ function el(tag, className, text) {
 
 function renderPanel(core, root, api, store, mod, skinPort = null) {
   return mountReferenceUi({root,core,api,getContext:()=>globalThis.SillyTavern?.getContext?.(),settingsPort:skinPort,lorePort:createReferenceLorePort(()=>globalThis.SillyTavern?.getContext?.(),loadStWorldInfo,async()=>{try{return await globalThis.TavernHelper?.getCharWorldbookNames?.('current')??[];}catch{return [];}}),
-    diagnostics:()=>atlasDiagnostics?.getSnapshot?.()??pendingDiagnostics,emit:emitAtlasDiagnostic,defaultPrompt:mod.DEFAULT_WORLD_TURN_SYSTEM_PROMPT??'',pluginVersion:ATLAS_EXTENSION_VERSION,diagnosticTools:mod});
+    diagnostics:()=>atlasDiagnostics?.getSnapshot?.()??pendingDiagnostics,exportDiagnostics:()=>atlasDiagnostics?.getExportSnapshot?.()??{events:pendingDiagnostics,coverage:{}},emit:emitAtlasDiagnostic,defaultPrompt:mod.DEFAULT_WORLD_TURN_SYSTEM_PROMPT??'',pluginVersion:ATLAS_EXTENSION_VERSION,diagnosticTools:mod});
 }
 
 // ---------------------------------------------------------------------------
