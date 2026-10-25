@@ -40,7 +40,7 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 var define_ATLAS_BUILD_INFO_default;
 var init_define_ATLAS_BUILD_INFO = __esm({
   "<define:__ATLAS_BUILD_INFO__>"() {
-    define_ATLAS_BUILD_INFO_default = { pluginVersion: "0.9.96", buildId: "build-c56c42b727ea787f", buildCommit: "dc07376f1645dbe73a2abacd2aedee1c6a8d80ff", buildDirty: false };
+    define_ATLAS_BUILD_INFO_default = { pluginVersion: "0.9.97", buildId: "build-7ddb69b7091135c4", buildCommit: "f75e72994ea31681544a31492557198bc282b600", buildDirty: false };
   }
 });
 
@@ -11048,7 +11048,7 @@ function createAtlasSettingsRoutes(deps) {
       plugin: "atlas",
       // 0.9.18 起与 ATLAS_PLUGIN_VERSION 同步（此前自 0.9.2 起一直烂着没人查——
       // tests/atlas-server-plugin.test.mjs 的 health 版本一致性断言防再犯）
-      version: "0.9.96",
+      version: "0.9.97",
       protocolVersion: 1,
       time: now()
     });
