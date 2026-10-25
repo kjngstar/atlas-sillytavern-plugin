@@ -27,6 +27,10 @@ export const ATLAS_RUNTIME_LIMITS = {
   containerDepth: 4,
   actionPlanDepth: 2,
   detailedAttemptsPerTurn: 20,
+  /** Compact transport records per turn; totals survive when older detail is evicted. */
+  modelCallAuditLimit: 256,
+  /** Safe model/turn events retained across refresh in this browser session. */
+  diagnosticCallHistoryLimit: 1000,
   diagnosticPageSize: 100,
   /** M4：只读目录视图单页上限（完整导出走游标，不允许一次全量）。 */
   catalogViewMaxLimit: 200,

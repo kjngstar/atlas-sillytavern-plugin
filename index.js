@@ -1557,7 +1557,7 @@ function el(tag, className, text) {
 
 function renderPanel(core, root, api, store, mod, skinPort = null) {
   return mountReferenceUi({root,core,api,getContext:()=>globalThis.SillyTavern?.getContext?.(),settingsPort:skinPort,lorePort:createReferenceLorePort(()=>globalThis.SillyTavern?.getContext?.(),loadStWorldInfo,async()=>{try{return await globalThis.TavernHelper?.getCharWorldbookNames?.('current')??[];}catch{return [];}}),
-    diagnostics:()=>atlasDiagnostics?.getSnapshot?.()??pendingDiagnostics,emit:emitAtlasDiagnostic,defaultPrompt:mod.DEFAULT_WORLD_TURN_SYSTEM_PROMPT??'',pluginVersion:ATLAS_EXTENSION_VERSION,diagnosticTools:mod});
+    diagnostics:()=>atlasDiagnostics?.getSnapshot?.()??pendingDiagnostics,exportDiagnostics:()=>atlasDiagnostics?.getExportSnapshot?.()??{events:pendingDiagnostics,coverage:{}},emit:emitAtlasDiagnostic,defaultPrompt:mod.DEFAULT_WORLD_TURN_SYSTEM_PROMPT??'',pluginVersion:ATLAS_EXTENSION_VERSION,diagnosticTools:mod});
 }
 
 // ---------------------------------------------------------------------------

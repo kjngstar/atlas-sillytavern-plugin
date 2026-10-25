@@ -343,7 +343,7 @@ function backupPanelHTML(){
   const status=!b?'正在检查升级前备份…':b.available?`可导出 · SHA256 ${esc(String(b.sha||'').slice(0,16))}… · ${esc(String(b.createdAt||''))}`:`不可导出：${esc(b.reason||'当前聊天没有持久备份')}`;
   return `<section class="backup-panel"><div class="section-label">升级前原档</div><p class="scope-note">只保留最近一次升级前的原档；导出是只读操作，不会改动当前数据库，也不会清除备份。</p><div class="detail-actions"><button class="action-btn" data-backup-export ${b?.available?'':'disabled'}>导出升级前备份</button><button class="action-btn" data-backup-recheck>重新检查</button></div><p class="scope-note" data-backup-status>${status}</p></section>`;
 }
-function diagnosticsHTML(){return `<div class="catalog-toolbar"><label class="search-field">${icon('search')}<input id="diagnosticSearch" placeholder="搜索错误代码、内容或字段路径…" aria-label="搜索诊断"></label><select id="diagnosticLevel" aria-label="日志等级"><option value="all">全部等级</option><option value="error">错误</option><option value="warn">警告</option><option value="info">信息</option><option value="debug">调试</option></select><button class="action-btn" data-copy-diagnostics>复制当前列表</button><button class="action-btn" data-export="diagnostics">导出日志</button></div>${backupPanelHTML()}<div id="diagnosticRows">${diagnosticRows()}</div>`;}
+function diagnosticsHTML(){return `<div class="catalog-toolbar"><label class="search-field">${icon('search')}<input id="diagnosticSearch" placeholder="搜索错误代码、内容或字段路径…" aria-label="搜索诊断"></label><select id="diagnosticLevel" aria-label="日志等级"><option value="all">全部等级</option><option value="error">错误</option><option value="warn">警告</option><option value="info">信息</option><option value="debug">调试</option></select><button class="action-btn" data-copy-diagnostics>复制当前列表</button><button class="action-btn" data-export="diagnostics">导出日志</button><button class="action-btn" data-export="turn-analysis">导出逐轮分析</button></div>${backupPanelHTML()}<div id="diagnosticRows">${diagnosticRows()}</div>`;}
 function diagnosticRows(q='',level='all'){
   const rows=D.DIAGNOSTICS.filter(d=>(level==='all'||d.level===level)&&JSON.stringify(d).toLowerCase().includes(q.toLowerCase()));
   if(!rows.length)return empty('没有符合条件的日志');
@@ -448,6 +448,8 @@ async function exportData(kind){
    modal('导出当前地图',`<p>已准备 ${result.file.scope.mapCount} 张地图（含子图）的布局、坐标与组装约束。</p><p><a class="action-btn" href="${esc(mapExportUrl)}" download="${esc(result.filename)}">下载地图 JSON</a> <button class="action-btn" data-copy-map-export>复制地图 JSON</button></p><p class="scope-note">此文件用于分析，不是可直接导入的存档。</p><details><summary>查看 JSON</summary><pre>${esc(mapExportText)}</pre></details>`);
    if(window.AtlasHost.downloadMap){const text=mapExportText;$('#modalBody a[download]').onclick=event=>{event.preventDefault();window.AtlasHost.downloadMap(result.filename,text);};}
   }catch(error){toast(error.message,'warn');}
+ }else if(kind==='turn-analysis'){
+  try{const result=await window.AtlasHost.exportTurnAnalysis();download(result.filename,JSON.stringify(result.file,null,2));toast(`已导出 ${result.file.coverage.storedTurnsExported} 条回合记录与模型调用明细`);}catch(error){toast(error.message,'warn');}
  }else if(kind==='receipts')download('atlas-turn-receipts.json',JSON.stringify(D.RECEIPTS,null,2));else if(kind==='diagnostics')download('atlas-preview-diagnostics.jsonl',D.DIAGNOSTICS.map(d=>JSON.stringify(d)).join('\n'),'application/x-ndjson');else if(Object.keys(skinValue().assets).length)download('atlas-skin.zip',await appearance.exportPack(),'application/zip');else download('atlas-ui-theme.json',JSON.stringify(skinValue(),null,2));
 }
 function skinValue(){return clone(activeSkin);}

@@ -3,6 +3,7 @@ import { emptyReferenceData, projectReferenceData, referenceEntity,referenceRece
 import { referencePresetDocument, referenceSettingsCommands } from './atlas-reference-presets.mjs';
 import { buildMapAnalysisExport } from './atlas-map-export.mjs';
 import { projectReferenceFlows } from './atlas-reference-flows.mjs';
+import { buildTurnAnalysisExport } from './atlas-turn-analysis-export.mjs';
 
 /**
  * M6-01：事件流分页参数，镜像 `src/atlas-runtime-limits.ts` 的 feedPageMax。
@@ -12,7 +13,7 @@ import { projectReferenceFlows } from './atlas-reference-flows.mjs';
 const ATLAS_FEED_PAGE_MAX=100;
 const ATLAS_FEED_MAX_PAGES=20;
 
-export function mountReferenceUi({root,core,api,getContext,settingsPort,lorePort,diagnostics=()=>[],emit=()=>{},defaultPrompt='',pluginVersion=null,diagnosticTools={},fetchFn=globalThis.fetch,loadSqlRuntime=()=>import(new URL('../dist/atlas-sql.mjs',import.meta.url).href)}) {
+export function mountReferenceUi({root,core,api,getContext,settingsPort,lorePort,diagnostics=()=>[],exportDiagnostics=()=>({events:diagnostics(),coverage:{}}),emit=()=>{},defaultPrompt='',pluginVersion=null,diagnosticTools={},fetchFn=globalThis.fetch,loadSqlRuntime=()=>import(new URL('../dist/atlas-sql.mjs',import.meta.url).href)}) {
   root.replaceChildren();root.className='atlas-native-ui-host';root.id='atlas-extension-panel-root';
   root.setAttribute('role','application');root.setAttribute('aria-label','阿特拉斯世界工作台');
   // Tavern themes may transform a zero-height html element, making fixed inset
@@ -353,6 +354,28 @@ export function mountReferenceUi({root,core,api,getContext,settingsPort,lorePort
         await core.refresh();await refresh(true);
         return result;
       }catch(error){actionError=error.message;throw error;}finally{actionBusy=false;deliver(latest);}
+    },
+    async exportTurnAnalysis(){
+      if(viewMode!=='author')throw Error('请切换到作者视角导出逐轮分析');
+      if(typeof diagnosticTools.sanitizeDiagnostic!=='function'||typeof diagnosticTools.atlasDiagnosticContext!=='function')throw Error('逐轮分析模块尚未就绪，请更新完整插件');
+      const ticket={...scope(),epoch};
+      if(!ticket.state.chatId)throw Error('请先打开一个酒馆聊天');
+      const turns=[],seenCursors=new Set();let cursor,revision,totalTurns;
+      do{
+        if(cursor){if(seenCursors.has(cursor))throw Error('逐轮分析分页未前进，请重新导出');seenCursors.add(cursor);}
+        const page=await query(ticket,'turn-analysis',{cursor,...(revision===undefined?{}:{revision})});
+        if(!page||!live(ticket))throw Error('导出期间聊天、视角或存档已变化，请重新导出');
+        if(revision===undefined){revision=page.revision;totalTurns=page.metadata?.totalCount;}
+        if(page.revision!==revision||page.metadata?.totalCount!==totalTurns)throw Error('导出期间回合记录已变化，请重新导出');
+        turns.push(...page.items);cursor=page.nextCursor;
+      }while(cursor);
+      if(turns.length!==totalTurns)throw Error('逐轮分析未读完全部回合，请重新导出');
+      const identity=diagnosticTools.atlasDiagnosticContext({chatUid:ticket.state.chatId,branchId:ticket.state.binding?.branchId??'main'});
+      const runtimeExport=exportDiagnostics();
+      const safe=runtimeExport.events.map(event=>diagnosticTools.sanitizeDiagnostic(event)).filter(Boolean);
+      const file=buildTurnAnalysisExport({turns,diagnostics:safe,totalTurns,pluginVersion,build:diagnosticTools.ATLAS_BUILD_INFO??null,runtimeCoverage:runtimeExport.coverage,
+        scope:{chatFingerprint:identity.chatFingerprint,branchRef:identity.details?.branchRef,revision,viewMode:'author'}});
+      return {file,filename:`atlas-turn-analysis-${file.exportedAt.replace(/[:.]/g,'-')}.json`};
     },
     exportUpgradeBackup,
     /**

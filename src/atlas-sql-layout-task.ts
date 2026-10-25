@@ -974,6 +974,7 @@ export function buildSqlLayoutTask(
   if(hasOverview)request.messages[1].content += '\noverview 的 surface 只能为 mixed/urban/forest/mountain/water/indoor/void；砂石、泥土、草地等具体材料可在 why 中说明，不得用 gravel/dirt/grass 作为 surface 枚举。未知或混合场地用 mixed。';
   request.messages[1].content += '\n【提交前核对，不输出核对过程】逐一覆盖本批每张 map，且每图只提交一行 map.layout.request；kind 与引用逐图匹配，不能串用另一张图的局部陈设。初次生成补齐已登记空间；更新只补缺项或修正 layoutIssues，保留其它约束。示例只展示合法字段，不是空布局答案。尺寸冲突时保留确认值并在 why 说明，不能缩小已确认空间或删除锁定结构来凑成功。程序判定实际可绘制结果，模型不要声称校验已经通过。不得因正文未变化只返回 noop，不输出解释正文。';
   // 兼容预设的注入副本必须与最终任务一致（预览与真实发送不能两套）。
+  request.diagnosticTargets = pendingIds;
   request.batchTargets={kind:'maps',count:selected.length,estimatedOutputTokens:estimatedTokens};
   request.promptInput.injectionText = request.messages[1].content;
 

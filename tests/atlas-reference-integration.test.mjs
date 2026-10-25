@@ -1,3 +1,5 @@
+import {atlasDiagnosticContext} from '../src/atlas-request-diagnostics.ts';
+import {sanitizeDiagnostic} from '../src/atlas-diagnostics.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
@@ -89,11 +91,26 @@ test('原版预设：异步保存失败后保留草稿，导出不包含 Key',as
 function mount(options={}){
  const dom=new JSDOM('<div id="root"></div>',{url:'http://localhost/'}),root=dom.window.document.getElementById('root');let state={chatId:'A',binding:options.unbound?null:{branchId:'main',enabled:options.bindingEnabled??true},stateData:{revision:3},receipts:[],panelOpen:true},context={chatId:'A',chatMetadata:{atlas:{database:{data:'A',sha256:'a'}}},extensionSettings:{atlas_world_sim:{sqlMode:options.enabled??true}}},calls=[],closes=0,loads=0,prefs={},settings=settingsViewV2(createDefaultSettingsV2());
  const sql={projectMapView:()=>null,toLegacyTurnReceipt,LAYOUT_SIGNATURE_POLICY_VERSION:'layout-v3'};
- const api={request:async(method,path,body)=>{if(['/sql/chat/map/layout','/sql/chat/map/build'].includes(path)&&options.mapReply)return {status:200,body:{ok:true,data:await options.mapReply(path)}};if(path==='/sql/chat/map/layout'&&options.layoutFailure)return {status:500,body:{ok:false,error:{code:'TURN_FAILED',message:'布局格式错误',details:options.layoutFailure}}};if(path==='/sql/chat/ui-read'){calls.push(body);await options.delay?.(body);const data=body.kind==='map'?view([{...map,name:context.chatId}]):body.kind==='catalog'?view(cat):body.kind==='entity'?view([{kind:'character',character:{id:'C',name:context.chatId},position:{kind:'at_location'}}]):view([]);data.metadata={protagonistId:'C',snapshotSaved:!!context.chatMetadata.atlas?.database};return {status:200,body:{ok:true,data}};}if(method==='PUT'){const r=applySettingsCommand(settings,body);if(!r.ok)return {status:400,body:{ok:false,error:{message:r.message}}};settings={...settings,...r.settings};}return {status:200,body:{ok:true,data:settings}};},setRuntimeApiKeys:c=>calls.push({runtime:c.map(x=>({id:x.id,key:!!x.apiKey}))})};
+ const api={request:async(method,path,body)=>{if(path==='/sql/chat/ui-read'&&body.kind==='turn-analysis'&&options.turnAnalysis){calls.push(body);return {status:200,body:{ok:true,data:await options.turnAnalysis(body)}};}if(['/sql/chat/map/layout','/sql/chat/map/build'].includes(path)&&options.mapReply)return {status:200,body:{ok:true,data:await options.mapReply(path)}};if(path==='/sql/chat/map/layout'&&options.layoutFailure)return {status:500,body:{ok:false,error:{code:'TURN_FAILED',message:'布局格式错误',details:options.layoutFailure}}};if(path==='/sql/chat/ui-read'){calls.push(body);await options.delay?.(body);const data=body.kind==='map'?view([{...map,name:context.chatId}]):body.kind==='catalog'?view(cat):body.kind==='entity'?view([{kind:'character',character:{id:'C',name:context.chatId},position:{kind:'at_location'}}]):view([]);data.metadata={protagonistId:'C',snapshotSaved:!!context.chatMetadata.atlas?.database};return {status:200,body:{ok:true,data}};}if(method==='PUT'){const r=applySettingsCommand(settings,body);if(!r.ok)return {status:400,body:{ok:false,error:{message:r.message}}};settings={...settings,...r.settings};}return {status:200,body:{ok:true,data:settings}};},setRuntimeApiKeys:c=>calls.push({runtime:c.map(x=>({id:x.id,key:!!x.apiKey}))})};
  const core={recordExternalReceipt:(receipt,chatId,detail)=>{state.receipts=[...(state.receipts??[]),{...receipt,chatId,detail}];},getState:()=>state,setPage:()=>{},setPanelOpen:v=>{state.panelOpen=v;render();},setEnabled:async v=>{state.binding.enabled=v;calls.push({enabled:v});},manualAdvance:async()=>{calls.push({advance:true});if(options.advanceError)state.lastError=options.advanceError;},initializeWorld:async()=>false,retryLastCommit:async()=>{},refresh:async()=>{calls.push({refresh:true});}};
- const render=mountReferenceUi({root,core,api,getContext:()=>context,pluginVersion:options.pluginVersion,lorePort:options.lorePort,emit:entry=>calls.push({diagnostic:entry}),diagnostics:()=>calls.filter(c=>c.diagnostic).map(c=>c.diagnostic),settingsPort:{read:async()=>prefs,write:async(_,v)=>{prefs=v;}},loadSqlRuntime:async()=>{loads++;if(options.unavailable)throw Error('SQL_CORE_UNAVAILABLE');return sql;}}),bridge=root.firstChild.__atlasHost;
+ const render=mountReferenceUi({root,core,api,getContext:()=>context,pluginVersion:options.pluginVersion,diagnosticTools:{atlasDiagnosticContext,sanitizeDiagnostic},lorePort:options.lorePort,emit:entry=>calls.push({diagnostic:entry}),diagnostics:()=>calls.filter(c=>c.diagnostic).map(c=>c.diagnostic),settingsPort:{read:async()=>prefs,write:async(_,v)=>{prefs=v;}},loadSqlRuntime:async()=>{loads++;if(options.unavailable)throw Error('SQL_CORE_UNAVAILABLE');return sql;}}),bridge=root.firstChild.__atlasHost;
  return {root,core,render,bridge,calls,get loads(){return loads;},get closes(){return closes;},get prefs(){return prefs;},saved(){context.chatMetadata.atlas.database={data:'saved-A',sha256:'saved-a',storage_revision:4};state={...state,stateData:{revision:4}};render();},noSnapshot(){context.chatMetadata.atlas={};render();},switch(id){state={...state,chatId:id,lastError:null};context={...context,chatId:id,chatMetadata:{atlas:{database:{data:id,sha256:id}}}};render();},off(){context.extensionSettings.atlas_world_sim.sqlMode=false;render();}};
 }
+
+test('逐轮分析导出读完所有页，不依赖当前诊断列表或触发模型',async()=>{
+ const m=mount({turnAnalysis:async body=>({revision:3,items:[{id:body.cursor?'two':'one',turnRef:body.cursor?'ref-22222222':'ref-11111111',recordedModelTransports:0,requestAudit:{calls:[],transports:0,droppedCalls:0}}],metadata:{totalCount:2},...(!body.cursor?{nextCursor:'second'}:{})})});
+ try{
+  await m.bridge.boot();const result=await m.bridge.exportTurnAnalysis();
+  assert.equal(result.file.schema,'atlas-turn-analysis/v1');assert.equal(result.file.coverage.storedTurnsExported,2);assert.equal(result.file.coverage.storedTurnPagesComplete,true);
+  assert.equal(m.calls.filter(call=>call.kind==='turn-analysis').length,2);assert.ok(!m.calls.some(call=>call.advance));assert.match(result.filename,/^atlas-turn-analysis-.*\.json$/);
+ }finally{await m.render.dispose();}
+});
+test('逐轮分析导出遇到聊天变化或循环游标，整份拒绝而不下载混合记录',async()=>{
+ let m; m=mount({turnAnalysis:async()=>{m.switch('B');return {revision:3,items:[],metadata:{totalCount:0}};}});
+ try{await m.bridge.boot();await assert.rejects(m.bridge.exportTurnAnalysis(),/已变化/);}finally{await m.render.dispose();}
+ const loop=mount({turnAnalysis:async()=>({revision:3,items:[],metadata:{totalCount:5},nextCursor:'repeat'})});
+ try{await loop.bridge.boot();await assert.rejects(loop.bridge.exportTurnAnalysis(),/分页未前进/);}finally{await loop.render.dispose();}
+});
 
 test('the real host saves v3 map-widget preferences while still accepting v1 and v2',async()=>{
  const m=mount();
