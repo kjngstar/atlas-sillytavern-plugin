@@ -191,10 +191,10 @@ try {
     const diagnosticRows = ext.getAtlasSafeDiagnosticsSnapshot().filter(entry => !previousDiagnostics.has(entry.id));
     const modelStarts = diagnosticRows.filter(entry => entry.code === 'MODEL_REQUEST_STARTED');
     const commitLog = diagnosticRows.find(entry => ['API_CALL_COMPLETE','API_CALL_PARTIAL'].includes(entry.code) && entry.details?.route === '/sql/chat/commit');
-    const uiLog = diagnosticRows.find(entry => entry.code === 'COMMIT_SUCCEEDED');
+    const uiLog = diagnosticRows.find(entry => ['COMMIT_SUCCEEDED','COMMIT_PARTIAL'].includes(entry.code));
     return { prepared, prepareSaves, commitSaves, calls, layoutCalls, retryCalls,layoutTargets,requestPlan:committed.receipts[0]?.detail?.receipt?.requestPlan??null,layoutKinds,issues:committed.receipts[0]?.detail?.issues,workBatching:(await window.releaseStartup.api.request('GET','/settings')).body.data?.workBatching,
       diagnosticEvidence:{modelStarts,commitLog,uiLog},
-      commitStatus: committed.receipts[0]?.status, floor: committed.binding?.lastCommittedMessageId,
+      commitStatus: committed.receipts[0]?.status, nativeStatus: committed.receipts[0]?.detail?.receipt?.status, floor: committed.binding?.lastCommittedMessageId,
       rollbackFloor: rolledBack.binding?.lastCommittedMessageId,
       rollbackSaves: window.releaseStartupSaves() - before - commitSaves,
       tableWritten: Boolean(host.chatMetadata.atlas?.tables), error: rolledBack.lastError };
@@ -221,6 +221,9 @@ try {
   assert.equal(evidence.commitLog.details.saveConfirmed,true);
   assert.equal(evidence.commitLog.details.modelRequests,automaticChat.calls);
   assert.ok(evidence.modelStarts.every(entry=>entry.details.turnRef===evidence.commitLog.details.turnRef),'提取、建设与布局请求属于同一回合');
+  assert.ok(evidence.uiLog,JSON.stringify(automaticChat));
+  assert.equal(evidence.uiLog.code,automaticChat.nativeStatus==='partial'?'COMMIT_PARTIAL':'COMMIT_SUCCEEDED','界面日志必须保留真实回执的部分完成状态');
+  assert.equal(evidence.uiLog.details.coreSaved,true,'部分完成也必须经过宿主保存确认');
   assert.equal(evidence.uiLog.details.turnRef,evidence.commitLog.details.turnRef,'界面与引擎按同一回合关联');
   const timeoutEvidence=await startupPage.evaluate(async()=>{
     const ext=await import('/index.js'),api=window.releaseStartup.api,host=window.releaseStartupHost;
