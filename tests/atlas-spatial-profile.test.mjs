@@ -163,6 +163,31 @@ const scopeOf = (task) => {
   }
   return scopes;
 };
+test('房间内已有陈设账本的 other 子空间沿用室内布局，作者室外选择仍优先',async()=>{
+ const seed=await siteSeed();try{
+  const area='L_LOCAL_AREA',mapId='M_LOCAL_AREA';
+  insertRows(seed.db,'entity_keys',[{branch_id:BRANCH,id:area,kind:'location'}]);
+  insertRows(seed.db,'locations',[loc(area,{parent_location_id:ROOM,map_id:MAP_BLD})]);
+  const canonical={version:1,locationId:area,revision:1,size:{widthM:8,heightM:8,quality:'estimated',locked:false,basis:{kind:'first-estimate',referenceId:null,note:'synthetic'}},furnishing:[{localId:`space:${area}:furn:bed`,type:'bed',name:'匿名床',itemId:null,widthM:2,heightM:1.6,quality:'layout'}]};
+  insertRows(seed.db,'maps',[mapRow(mapId,{container_location_id:area,meters_per_cell:1,scale_quality:'estimated',frame_json:{cols:8,rows:8,atlasSpaceCanonical:canonical}})]);
+  const port=createTableReadPort(seed.db),derived=deriveLayoutSites(port,BRANCH),entry=entryOf(derived,mapId);
+  assert.equal(entry.kind,'floor');assert.equal(entry.standalone,true);assert.equal(entry.profile.profile.basis,'source-supported');
+  const task=buildSqlLayoutTask(seed.db,BRANCH,{anchor:{chatUid:IDS.chatA,branchId:BRANCH,baseRevision:0,baseStorageRevision:0},userText:'',assistantText:'',sourceSnapshot:[],layoutMaps:[mapId]},TURN);
+  const scoped=scopeOf(task).find(s=>s.map===task.catalogue.knownRefs.find(r=>r.id===mapId).alias);
+  assert.equal(scoped.kind,'floor');
+  assert.ok(scoped.spaceSize.furnishingInventory.some(f=>f.id===`space:${area}:furn:bed`));
+  const request={requestId:'local-area-repair',operationId:'local-area-repair-op',kind:'floor',status:'pending',createdTurnId:TURN,spec:{rooms:[{id:area,w:8,h:8,side:'north'}],contents:[{id:'bed',roomId:area,type:'bed',w:2,h:1.6}]}};
+  seed.db.run('UPDATE maps SET frame_json=? WHERE branch_id=? AND id=?',[JSON.stringify({...frameOf(seed,mapId),atlasLayoutRequest:request}),BRANCH,mapId]);
+  const applied=applyPendingSpatialRequests({db:seed.db,scope:SCOPE,turnId:TURN,autoPlan:true,ports:{applyGroups,isCurrent:()=>true,branchId:BRANCH,turnId:TURN}});
+  assert.ok(applied.processed.includes('local-area-repair'),JSON.stringify(applied.issues));
+  const saved=frameOf(seed,mapId);assert.equal(saved.atlasScene.layout.kind,'floor');
+  assert.ok(saved.atlasScene.layout.groups.some(f=>f.id==='bed'&&f.type==='bed'),JSON.stringify(saved.atlasScene.layout.groups));
+  assert.equal(saved.atlasSpaceCanonical.furnishing[0].localId,`space:${area}:furn:bed`);
+  writeProfile(seed,mapId,'outdoor','explicit-outdoor');
+  assert.equal(entryOf(deriveLayoutSites(createTableReadPort(seed.db),BRANCH),mapId).kind,'overview');
+  assert.equal(queryBound(seed.db,'SELECT kind FROM locations WHERE branch_id=? AND id=?',[BRANCH,area])[0].kind,'other');
+ }finally{seed.close();}
+});
 test('未标定概览的格幅面不被登记成同等数值的米制物理尺寸',async()=>{
  const seed=await siteSeed();
  try{

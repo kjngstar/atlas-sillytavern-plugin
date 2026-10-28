@@ -5,6 +5,7 @@ import type { AtlasModelPort } from './atlas-db-contract.ts';
 import type { ModelBatchRequest } from './atlas-ops-contract.ts';
 import { DEFAULT_SQL_PROMPT_SEGMENTS, hasLegacySqlPromptProtocol } from './atlas-sql-prompts.ts';
 import { assemblePromptLayers } from './atlas-prompt-layers.ts';
+import { DEFAULT_SQL_PROMPT_SEGMENTS as SQL_DEFAULT_SEGMENTS, sqlPromptPresetNotice } from './atlas-sql-prompts.ts';
 import { transportBudgetPort, type GenerationBudgetPort } from './atlas-sql-generation-budget.ts';
 import { normalizeModelBatching } from './atlas-model-batching.ts';
 import { atlasDiagnosticContext, observeDiagnostic, type DiagnosticObserver } from './atlas-request-diagnostics.ts';
@@ -76,9 +77,15 @@ export function createSqlModelPort(options: Options): AtlasModelPort {
     policy: request.promptMode === 'atlas-spatial-extract' ? [] : custom.map(s => ({ role: promptRole(s.role), content: substitutePromptPlaceholders(s.content, input) })),
     task: request.messages.slice(1).map(m => m.content),
   });
-  return {preset,input,messages,promptSource: preset.systemPrompt?.trim()?'connection':preset.promptSegments?.length?'preset':'builtin'};
+  // §19.3：只提示、不改写。自定义预设缺当前策略说明时，让界面说清楚「行为可能不一样」。
+  const policyNotice = sqlPromptPresetNotice((preset.promptSegments?.length ? preset.promptSegments : SQL_DEFAULT_SEGMENTS) as Parameters<typeof sqlPromptPresetNotice>[0]);
+  return {preset,input,messages,policyNotice,promptSource: preset.systemPrompt?.trim()?'connection':preset.promptSegments?.length?'preset':'builtin'};
  }
  const port: AtlasModelPort = {
+  async freezeWindow() {
+    const snapshot: unknown = structuredClone(await options.readSettings());
+    return createSqlModelPort({ ...options, readSettings: async () => snapshot });
+  },
   async generationOptions(){
     const raw=await options.readSettings();
     const {settings}=raw&&typeof raw==='object'&&(raw as {schemaVersion?:unknown}).schemaVersion===2?sanitizeSettingsV2(raw):migrateAtlasSettings(raw);
@@ -86,8 +93,8 @@ export function createSqlModelPort(options: Options): AtlasModelPort {
   },
   withBudget: (budget, stage) => createSqlModelPort({ ...options, budget, stage }),
   async preview(request:ModelBatchRequest){
-   const {input,messages,promptSource}=await prepare(request);
-   return {messages:messages.map(message=>({...message,chars:message.content.length})),promptSource,
+   const {input,messages,promptSource,policyNotice}=await prepare(request);
+   return {messages:messages.map(message=>({...message,chars:message.content.length})),promptSource,policyNotice,
     missing:{worldState:Boolean(input.injectionText),lastTurn:false,recentContext:Boolean(input.assistantText)},coreSaved:false};
   },
   async request(request:ModelBatchRequest){

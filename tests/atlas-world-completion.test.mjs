@@ -368,3 +368,37 @@ test('W11: 相同输入第二次重试复用已建地点，不造同名重复地
   assert.deepEqual(attempt2.operations.map((op) => op.ref).sort(), ['T_NEW_ENTRY', 'T_NEW_ROOM']);
   f.close();
 });
+
+// ---------------------------------------------------------------------------
+// P02 · 共同额度与来源别名必须写进模型看得见的提示词
+// ---------------------------------------------------------------------------
+
+test('P02: 提示词写明共同总额 64，并标明地点/路线不是各自配额', async () => {
+  const f = await fixture();
+  const task = buildSqlWorldCompletionTask(
+    f.tables,
+    BRANCH,
+    baseInput({
+      focusLocationIds: [T.BLD],
+      sourceSnapshot: [
+        { key: 'LB_BUILDING_A', kind: 'lorebook', hash: 'h1', text: '测试建筑甲是一座带门厅与阅览室的公共建筑。' },
+        { key: 'LB_BUILDING_B', kind: 'lorebook', hash: 'h2', text: '另一份测试资料。' },
+      ],
+      focusTerms: ['测试建筑甲'],
+    }),
+    TURN,
+    4,
+  );
+  assert.ok(task, '存在缺项时必须发出建设任务');
+  const prompt = task.request.messages.map((m) => m.content).join('\n');
+
+  assert.match(prompt, /totalOperations=64/, '预算行必须写出共同总额');
+  assert.match(prompt, /不是额外通道/, '必须说明类型配额不是额外通道');
+  assert.match(prompt, /不要以为「地点 64、路线 64」就能输出 128 条/, '必须直接点破 128 的误解');
+
+  // 来源别名：按 key 字典序分配，提示词同时保留完整 key
+  assert.match(prompt, /SRC1｜LB_BUILDING_A/, '第一个来源拿到 SRC1');
+  assert.match(prompt, /SRC2｜LB_BUILDING_B/, '第二个来源拿到 SRC2');
+  assert.match(prompt, /可写别名 SRC1 或完整 key/, '必须告诉模型两种写法都行');
+  f.close();
+});

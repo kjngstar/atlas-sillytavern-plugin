@@ -20,6 +20,18 @@ function parsedLines(result) {
   return result.operations.map((o) => o.value);
 }
 
+test('T-C10 malformed source rejects its operation while preserving an independent valid line', () => {
+  for (const source of [['W1', { key: 'fake' }, 123], 42, null]) {
+    const bad = { op: 'character.upsert', ref: 'C1', source, data: { thought: 'rejected' } };
+    const good = { op: 'character.upsert', ref: 'C2', source: [], data: { thought: 'accepted' } };
+    const parsed = parseOperations([JSON.stringify(bad), JSON.stringify(good)].join('\n'), { phase: 'observe' });
+    assert.deepEqual(parsedLines(parsed), [good]);
+    assert.ok(parsed.issues.some(issue => issue.code === 'SOURCE_UNKNOWN' && issue.severity === 'error' && issue.line === 1));
+    assert.equal(normalizeOperation(bad, 'observe').op, null);
+    assert.equal(parsed.incomplete, true);
+  }
+});
+
 test('T04-01 P01 原文 → 1 条操作，opId 稳定、line=1、full sha256、无 issue', () => {
   const response = caseById('P01').response;
   const first = parseOperations(response, { phase: 'observe' });

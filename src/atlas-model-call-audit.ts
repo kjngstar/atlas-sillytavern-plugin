@@ -1,6 +1,7 @@
 /** Compact, turn-local transport journal. No prompts, responses or credentials. */
 import { atlasRefFingerprint, isAtlasRefFingerprint, sanitizeDiagnostic, type AtlasDiagnosticInput } from './atlas-diagnostics.ts';
 import { ATLAS_RUNTIME_LIMITS } from './atlas-runtime-limits.ts';
+import { transportMetricsFromDetails } from './atlas-response-metrics.ts';
 import type { ModelWorkClass } from './atlas-work-batching.ts';
 
 export { MODEL_CALL_REASONS } from './atlas-work-batching.ts';
@@ -26,7 +27,20 @@ export type ModelCallRecord = {
   errorCode?: string;
   finishReason?: string;
   promptChars?: number;
+  /** 旧口径：原始传输正文长度（含 JSON / SSE 包装）。**保留原语义，不改**。 */
   responseChars?: number;
+  /** P14 §20.3：与 responseChars 同值的显式命名，供新读取方按口径取值。 */
+  rawResponseChars?: number;
+  /** P14 §20.3：助手可见正文字符数；响应无正文载体时为 null（未知 ≠ 0）。 */
+  visibleTextChars?: number | null;
+  /** P14 §20.3：推理字段字符数；响应无明确推理字段时为 null，**绝不由差值推断**。 */
+  reasoningTextChars?: number | null;
+  /** P14 §20.3：观测到响应头的耗时。 */
+  headersMs?: number;
+  /** P14 §20.3：正文接收耗时。 */
+  bodyMs?: number;
+  /** P14 §20.3：true = 本次 logicalDurationMs 覆盖了兼容重发的第二次 fetch，不可当单次累加。 */
+  durationIncludesCompatibilityRetry?: boolean;
   modelRef?: string;
 };
 export type ModelCallAudit = {
@@ -64,7 +78,13 @@ export function sanitizeModelCallAudit(value: unknown): ModelCallAudit | null {
       stage: typeof row.stage === 'string' && /^[a-z][a-z0-9_-]{0,63}$/.test(row.stage) ? row.stage : 'unknown',
       workClass: row.workClass as ModelWorkClass, reason: row.reason as ModelCallReason, status: row.status as ModelCallRecord['status'] };
     for (const key of ['retryOfBatchRef', 'requestRef', 'modelRef'] as const) if (ref(row[key])) call[key] = String(row[key]);
-    for (const key of ['targetCount', 'targetRefsDropped', 'transportAttempt', 'logicalDurationMs', 'httpStatus', 'promptChars', 'responseChars'] as const) if (integer(row[key])) call[key] = row[key] as number;
+    for (const key of ['targetCount', 'targetRefsDropped', 'transportAttempt', 'logicalDurationMs', 'httpStatus', 'promptChars', 'responseChars', 'rawResponseChars', 'headersMs', 'bodyMs'] as const) if (integer(row[key])) call[key] = row[key] as number;
+    // P14 §20.3：可见/推理长度允许显式 null（＝探测过、无该字段），其余只收非负整数。
+    for (const key of ['visibleTextChars', 'reasoningTextChars'] as const) {
+      if (row[key] === null) call[key] = null;
+      else if (integer(row[key])) call[key] = row[key] as number;
+    }
+    if (row.durationIncludesCompatibilityRetry === true) call.durationIncludesCompatibilityRetry = true;
     if (Array.isArray(row.targetRefs)) call.targetRefs = row.targetRefs.filter(isAtlasRefFingerprint).slice(0, 128);
     if (typeof row.startedAt === 'string' && /^\d{4}-\d\d-\d\dT[\d:.]+Z$/.test(row.startedAt) && Number.isFinite(Date.parse(row.startedAt))) call.startedAt = row.startedAt;
     if (typeof row.errorCode === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(row.errorCode)) call.errorCode = row.errorCode;
@@ -117,6 +137,9 @@ export function createModelCallAudit(initial?: ModelCallAudit | null) {
       if (typeof details.modelRef === 'string') call.modelRef = details.modelRef;
       if (integer(details.promptChars)) call.promptChars = details.promptChars;
       if (integer(details.responseChars)) call.responseChars = details.responseChars;
+      // P14 §20.3：长度三口径与分段耗时进审计记录。缺字段＝未知，不写 0。
+      const { metrics, timing } = transportMetricsFromDetails(details);
+      Object.assign(call, metrics, timing);
       if (typeof details.finishReason === 'string') call.finishReason = details.finishReason;
       if (safe.code === 'MODEL_REQUEST_COMPLETED' || safe.code === 'MODEL_REQUEST_FAILED') {
         call.status = safe.code === 'MODEL_REQUEST_COMPLETED' ? 'completed' : 'failed';

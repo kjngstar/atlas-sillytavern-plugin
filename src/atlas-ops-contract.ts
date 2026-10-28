@@ -139,6 +139,11 @@ export type TurnReceipt = {
     extraLimit: number;
     usage: import('./atlas-sql-generation-budget.ts').WorkPlanUsage;
   };
+  /**
+   * 全局建设摘要（v2 §5.4）。可选：只有本轮真的推进了建设任务才带，
+   * 普通剧情回执不为它凭空造一个空对象。完整目标清单不进回执，按进度表分页读。
+   */
+  worldBuild?: import('./atlas-world-contract.ts').WorldBuildReceiptV1;
   turnId: string;
   anchor: TurnAnchor;
   status: 'committed' | 'partial' | 'noop' | 'failed';
@@ -243,7 +248,9 @@ export function groupChangesBusiness(group: { purpose?: GroupPurpose; mutations:
 }
 
 /**
- * §8.4：15 个语义操作 + noop（0.9.76 起含 map.layout.request）。
+ * §8.4：15 个语义操作 + noop（0.9.76 起含 map.layout.request）；
+ * v2 计划 §5.7/§18.4 增补第 16 个 `space.state.patch`（对已存在门窗/陈设改状态，
+ * 不再让模型重发整份 scene）。
  * 顺序即 §8.4 表格顺序，测试与提示词模板都按此顺序生成。
  */
 export const ATLAS_SEMANTIC_OPS = [
@@ -262,6 +269,7 @@ export const ATLAS_SEMANTIC_OPS = [
   'map.estimate',
   'route.propose',
   'map.layout.request',
+  'space.state.patch',
 ] as const;
 
 export type AtlasSemanticOp = (typeof ATLAS_SEMANTIC_OPS)[number];
@@ -283,6 +291,8 @@ export const PHASE_ALLOWED_OPS: Record<Phase, readonly string[]> = {
     'relation.upsert',
     'event.propose',
     'information.propose',
+    // §18.4：正文明确开关门、上锁、破坏陈设时，只改状态，不重发整份 scene。
+    'space.state.patch',
   ],
   geography: ['location.upsert', 'map.estimate', 'route.propose', 'map.layout.request'],
   decision: [
@@ -293,7 +303,12 @@ export const PHASE_ALLOWED_OPS: Record<Phase, readonly string[]> = {
     'attention.propose',
     'channel.upsert',
   ],
-  outcome: ['event.propose', 'information.propose'],
+  outcome: [
+    'event.propose',
+    'information.propose',
+    // §18.4：后台真实发生的开关/上锁也是状态事件（decision 里的未来意图不算）。
+    'space.state.patch',
+  ],
   repair: [], // 由 allowedOpsForPhase 用原失败组的允许集合填充
 };
 
@@ -400,9 +415,13 @@ export type SourceSnapshotEntry = {
 };
 
 export type TurnInput = {
+  /** Constructed by the authenticated build controller, never decoded from model output. */
+  worldBuild?: { action: import('./atlas-world-build-runner.ts').WorldBuildControlAction; jobId?: string; expectedEpoch?: number; pauseReason?: string;
+    abortedWindow?: { id: string; transports: number; requestAudit?: import('./atlas-model-call-audit.ts').ModelCallAudit; windowSequence?: number } };
   anchor: TurnAnchor;
   /** Local host guard; never serialized into the database or model prompt. */
   isCurrent?: () => boolean;
+  beforePublish?: () => Promise<boolean>;
   userText: string;
   assistantText: string;
   sourceSnapshot: SourceSnapshotEntry[];
@@ -523,7 +542,11 @@ export type ViewQuery = {
   mapId?: string;
   entityId?: string;
   povId?: string;
-  viewMode?: 'pov' | 'author';
+  /**
+   * P08 §14 三个作用域：`pov`（角色认知，模型输入用）/ `player`（完整已记录世界，去掉内部字段）/
+   * `author`（完整世界 + 机器内部字段）。缺省由各调用点自己决定，不在这里猜。
+   */
+  viewMode?: 'pov' | 'author' | 'player';
   cursor?: string;
   limit?: number;
   /** catalog：按实体种类筛选；省略=全部。 */
@@ -549,6 +572,13 @@ export type ViewResult = {
   revision: number;
   items: unknown[];
   nextCursor?: string;
+  /**
+   * P14 §20.2：整视图范围的汇总（只读派生，不参与写入）。
+   *
+   * 逐轮分析用它下发楼层/窗口合计与建图窗口账；**它不是可以直接相加的两个口径**，
+   * 所以汇总体里带着 `floorAndWindowTotalsAreIndependent: false`，调用方照抄即可。
+   */
+  summary?: Record<string, unknown>;
   metadata: Record<string, unknown>;
 };
 

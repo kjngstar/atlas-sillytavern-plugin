@@ -18,6 +18,7 @@
 
 import type { PlanIssue } from './atlas-world-contract.ts';
 import { normalizeFrame } from './atlas-spatial-frame.ts';
+import { readSpaceCanonical } from './atlas-space-canonical.ts';
 
 /**
  * frame 里保存绘图档案的命名空间。
@@ -211,6 +212,7 @@ export type SpatialProfileResolution = {
 
 export type SpatialProfileInput = {
   map: Row;
+  maps?: readonly Row[];
   container: Row | null;
   /** Structured containing place; names never determine an indoor profile. */
   parentContainer?: Row | null;
@@ -221,6 +223,16 @@ export type SpatialProfileInput = {
   /** 本图已登记的路线行（成员）。 */
   routes?: Row[];
 };
+
+/** Containment within a room supplies the boundary; an authored outdoor profile remains authoritative. */
+export function functionalAreaMembers(container: Row | null, members: readonly Row[], maps: readonly Row[]): Row[] {
+  if(container?.kind!=='room')return [];
+  return members.filter(member=>member.kind==='other'&&member.parent_location_id===container.id&&!maps.some(map=>{
+    if(map.container_location_id!==member.id)return false;
+    const profile=readSpatialProfile(map.frame_json).profile;
+    return profile?.basis==='author'&&['outdoor','linear','compound'].includes(profile.mode);
+  }));
+}
 
 /**
  * `resolveSpatialProfile`：§20 的唯一档案裁决点。
@@ -250,6 +262,9 @@ export function resolveSpatialProfile(input: SpatialProfileInput): SpatialProfil
     // 可信关系推导：本图绑定了一条真实的命名走廊 → 通行空间。这条比类型默认更可信，
     // 但它仍然**不覆盖**作者的显式选择（上一分支已经拦下了 author）。
     chosen = { mode: 'circulation', basis: 'source-supported', reason: `本图已绑定真实走廊 ${corridorEntityId}` };
+  } else if (containerKind==='other' && TEXT(input.parentContainer?.kind)==='room'
+    && (readSpaceCanonical(input.map?.frame_json,asId(input.container?.id)).canonical?.furnishing.length??0)>0) {
+    chosen={mode:'interior',basis:'source-supported',reason:'该子空间包含于已登记房间内，并已有同一空间的陈设账本'};
   } else if (containerKind === 'other'
     && ['building', 'floor', 'room', 'vehicle'].includes(TEXT(input.parentContainer?.kind))
     && (input.members ?? []).some(member => member.kind === 'room')
@@ -284,6 +299,7 @@ export function resolveSpatialProfile(input: SpatialProfileInput): SpatialProfil
   };
   const INDOOR_KINDS = new Set(['room', 'floor', 'vehicle']);
   const OUTDOOR_KINDS = new Set(['region', 'natural', 'other', 'city', 'district']);
+  const functionalIds=new Set(functionalAreaMembers(input.container,members,input.maps??[]).map(member=>member.id));
   for (const member of members) {
     const id = String(member.id ?? '');
     const kind = TEXT(member.kind);
@@ -293,7 +309,7 @@ export function resolveSpatialProfile(input: SpatialProfileInput): SpatialProfil
     } else if (chosen.mode === 'outdoor' && INDOOR_KINDS.has(kind)) {
       // 室外档案不画室内房间：这些成员等它们自己的室内图，说得明白，不硬塞。
       pushUnsupported(id, kind, '室外档案不生成匿名室内房间：等该地点自己的室内图');
-    } else if (chosen.mode === 'interior' && OUTDOOR_KINDS.has(kind)) {
+    } else if (chosen.mode === 'interior' && OUTDOOR_KINDS.has(kind) && !functionalIds.has(member.id)) {
       // 室内档案不把明确室外的成员塞进普通 rooms。
       pushUnsupported(id, kind, '室内档案不把明确室外的成员塞进普通房间：它需要自己的室外/复合图');
     } else if (chosen.mode === 'compound' && kind === 'room') {

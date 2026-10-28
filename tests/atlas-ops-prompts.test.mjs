@@ -3,8 +3,8 @@
  *
  * §18.3 必须覆盖的断言：
  * - 阶段只给允许操作：每个阶段的提示词与 allowedOpsForPhase 完全一致，且列出的名字出现在正文里；
- * - 15 种不会每轮全塞：observe 不含 plan.propose/map.estimate/route.propose/attention.propose/channel.upsert，
- *   列出的条数严格小于 15，任何阶段都不会列出全部 15 种；
+ * - 16 种不会每轮全塞：observe 不含 plan.propose/map.estimate/route.propose/attention.propose/channel.upsert，
+ *   列出的条数严格小于 16，任何阶段都不会列出全部 16 种；
  * - 原分段角色与内容保留：messages[0] 是 system 且含固定格式段，messages[1] 是 user，
  *   用户可编辑段逐字保留且排在格式段之后；`{{allowedOperationHelp}}` 占位符不得残留在输出里；
  * - 没有一边要求 SQL 一边要求 JSON：所有阶段 promptForbidsSql 为真，
@@ -43,26 +43,27 @@ test('T23-01 阶段只给允许操作：每阶段列出的操作与该阶段允�
   assert.ok(checkedHelpLines > 0, '最少参数清单必须真的被检查到');
 });
 
-test('T23-02 15 种不会每轮全塞：observe 不含 5 种越权操作，且没有任何阶段列出全部 15 种', () => {
+test('T23-02 16 种不会每轮全塞：observe 不含 5 种越权操作，且没有任何阶段列出全部 16 种', () => {
   const observe = buildStagePrompt({ phase: 'observe' });
   const observeText = FULL_TEXT(observe);
   for (const forbidden of ['plan.propose', 'map.estimate', 'route.propose', 'attention.propose', 'channel.upsert']) {
     assert.equal(promptOperationNames(observe).includes(forbidden), false, `observe 不得列出 ${forbidden}`);
     assert.equal(observeText.includes(forbidden), false, `observe 正文不得出现 ${forbidden}`);
   }
-  assert.ok(promptOperationNames(observe).length < ATLAS_SEMANTIC_OPS.length, 'observe 的条数必须严格小于全量 15 种');
-  // §8.4 原为 14 种；M2 加入 map.layout.request 后固定为 15 种。
-  assert.equal(ATLAS_SEMANTIC_OPS.length, 15, '§8.4 固定为 15 种语义操作（含 map.layout.request）');
+  assert.ok(promptOperationNames(observe).length < ATLAS_SEMANTIC_OPS.length, 'observe 的条数必须严格小于全量 16 种');
+  // §8.4 原为 14 种；M2 加入 map.layout.request 后为 15 种；
+  // v2 计划 §5.7/§18.4 再加入 space.state.patch（只改已有门窗/陈设状态）后为 16 种。
+  assert.equal(ATLAS_SEMANTIC_OPS.length, 16, '16 种语义操作（含 map.layout.request 与 space.state.patch）');
 
   for (const phase of [...PHASES, 'repair']) {
     const listed = promptOperationNames(buildStagePrompt({ phase }));
-    assert.ok(listed.length < ATLAS_SEMANTIC_OPS.length, `${phase} 不得列出全部 15 种操作`);
+    assert.ok(listed.length < ATLAS_SEMANTIC_OPS.length, `${phase} 不得列出全部 16 种操作`);
     const unique = [...new Set(listed)];
     assert.equal(unique.length, listed.length, `${phase} 不得重复列出同一操作`);
   }
   // 各阶段集合是真正的分工，不是同一份全量
   assert.deepEqual([...PHASE_ALLOWED_OPS.geography].sort(), ['location.upsert', 'map.estimate', 'map.layout.request', 'route.propose']);
-  assert.deepEqual([...PHASE_ALLOWED_OPS.outcome].sort(), ['event.propose', 'information.propose']);
+  assert.deepEqual([...PHASE_ALLOWED_OPS.outcome].sort(), ['event.propose', 'information.propose', 'space.state.patch']);
   assert.notDeepEqual([...PHASE_ALLOWED_OPS.observe].sort(), [...PHASE_ALLOWED_OPS.decision].sort());
 
   // 提示词里给出的是「本次允许的操作与最少参数」，不是二十张表的建表语句

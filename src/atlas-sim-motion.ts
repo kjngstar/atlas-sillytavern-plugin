@@ -318,9 +318,33 @@ function mapCalibration(world: { db: SqlDatabase; branchId: string }, mapId: str
 }
 
 /** §9.3：已标定同一坐标系内 `距离 = 路线格长度 × 米/格`；layout 坐标不参与距离计算。 */
+/**
+ * §17.3：不同图不能直接相减两个局部坐标求距离。
+ *
+ * 判定口径：路线声明了帧（`map_id`），且它的端点在**别的图**上 → 这条几何
+ * 只能描述其中一张图的走向，不能当作两点间的真实长度。此时不用几何量距，
+ * 让调用方回落到声明的距离，或如实报 ETA unknown。
+ */
+function routeFrameConsistent(
+  world: { db: SqlDatabase; branchId: string },
+  route: Record<string, unknown>,
+): { ok: boolean; routeMapId: string | null; fromMapId: string | null; toMapId: string | null } {
+  const routeMapId = str(route.map_id);
+  const fromId = str(route.from_location_id);
+  const toId = str(route.to_location_id);
+  const from = fromId ? loadRow(world, 'locations', fromId) : null;
+  const to = toId ? loadRow(world, 'locations', toId) : null;
+  const fromMapId = from ? str(from.map_id) : null;
+  const toMapId = to ? str(to.map_id) : null;
+  if (!routeMapId) return { ok: true, routeMapId, fromMapId, toMapId };
+  const ok = (!fromMapId || fromMapId === routeMapId) && (!toMapId || toMapId === routeMapId);
+  return { ok, routeMapId, fromMapId, toMapId };
+}
+
 function geometryDistance(world: { db: SqlDatabase; branchId: string }, route: Record<string, unknown>): { minM: number; nominalM: number; maxM: number } | null {
   const geometry = asObject(route.geometry_json);
   if (!geometry || String(geometry.kind ?? '') !== 'line') return null;
+  if (!routeFrameConsistent(world, route).ok) return null;
   const coords = asArray(geometry.coordinates).slice(0, GEOMETRY_VERTEX_LIMIT);
   if (coords.length < 2) return null;
   let cells = 0;
@@ -378,7 +402,14 @@ export function computeTravelInterval(world: {db:SqlDatabase;branchId:string}, a
 }
 
 function segmentQuality(geometryQuality: string, distanceQuality: 'confirmed' | 'estimated' | 'unknown'): 'confirmed' | 'estimated' | 'unknown' {
-  if (geometryQuality === 'unknown' && distanceQuality === 'unknown') return 'unknown';
+  /**
+   * §17.3：没有距离依据就没有耗时依据。
+   *
+   * 几何画得再仔细（`geometry_quality='estimated'`），只要**量不出距离**
+   * （未标定、跨帧、无声明距离），这一段就是 unknown —— 否则
+   * `distanceNominalM=0` 会让 ETA 变成「现在就到」，正是本节禁止的「立即抵达」。
+   */
+  if (distanceQuality === 'unknown') return 'unknown';
   if (geometryQuality === 'confirmed' && distanceQuality === 'confirmed') return 'confirmed';
   return 'estimated';
 }
@@ -576,6 +607,12 @@ export function startJourney(
     issues.push(...selection.issues);
     const distance = segmentDistance(world, route);
     const calibration = mapCalibration(world, str(route.map_id));
+    /**
+     * §17.3「不同图不能直接相减两个局部坐标求距离」已经在 `geometryDistance` 里执行：
+     * 端点不在路线的帧上就拿不到几何距离。**这里不额外报警**——
+     * 室内地图到街道的出口本来就是跨图路线（门的两侧在不同图上），
+     * 只要它声明了距离或耗时就是合法路段；没声明时由下面的 ETA_UNKNOWN 如实记账。
+     */
     if (distance.quality === 'unknown' && !asObject(route.travel_time_override_json)) {
       issues.push(
         issue('JOURNEY_ETA_UNKNOWN', 'routes.distance_m', `路段 ${String(route.id)} 无距离依据且无通行耗时覆盖：保留在途状态，ETA 未知`, 'warning'),
@@ -694,6 +731,26 @@ function routeIsOpen(world: { db: SqlDatabase; branchId: string }, routeId: stri
 }
 
 /**
+ * §17.3：门/道路关闭、毁坏或访问条件变化时，**当前有效通行受限**。
+ *
+ * 出发时判过一次不够：中途关闸、上锁、涨水都发生在同一条路线上。
+ * 返回 true 表示这条路段此刻不能继续走。没有规则（null）视为不受新增限制。
+ */
+function routeAccessDenied(
+  world: { db: SqlDatabase; branchId: string },
+  routeId: string | null,
+  actorId: string | null,
+  clockS: number,
+): boolean {
+  if (!routeId) return false;
+  const row = loadRow(world, 'routes', routeId);
+  if (!row) return false;
+  const condition = asObject(row.access_rules_json);
+  if (!condition) return false;
+  return !evaluateCondition(world, condition, { clockS, actorId }).ok;
+}
+
+/**
  * F04：按世界时刻精确推进，产出时序节点边界。
  * 返回更新后的 journey 行（由调用方持久化）；`remainingS` 是留给其它事务的余额。
  */
@@ -721,6 +778,7 @@ export function advanceJourney(journey: Record<string, unknown>, untilS: number,
   }
 
   const policy = stopPolicyOf(world, journey);
+  const moverId = str(journey.mover_entity_id);
   let cursor = lastAdvanced;
   let index = Math.max(0, Math.trunc(num(journey.segment_index) ?? 0));
   let timeDone = num(journey.segment_time_done_s) ?? 0;
@@ -738,6 +796,22 @@ export function advanceJourney(journey: Record<string, unknown>, untilS: number,
       nextStatus = 'blocked';
       stopReason = 'route_blocked';
       events.push({ kind: 'blocked', locationId: lastReached ?? undefined, atS: cursor, secondsUsed: 0 });
+      break;
+    }
+    // §17.3：路的开放状态与访问条件必须**当前**有效。出发时能走不等于现在能走，
+    // 也不许因为快到自己那一格就忽略刚上的锁。
+    if (routeAccessDenied(world, routeId, moverId, cursor)) {
+      nextStatus = 'blocked';
+      stopReason = 'route_access_denied';
+      events.push({ kind: 'blocked', locationId: lastReached ?? undefined, atS: cursor, secondsUsed: 0 });
+      issues.push(
+        issue(
+          'JOURNEY_ROUTE_ACCESS_DENIED',
+          'routes.access_rules_json',
+          `路段 ${routeId ?? index} 此刻的通行条件不成立（门/道路关闭或访问受限）：停在 ${lastReached ?? '原地'}，不穿过`,
+          'warning',
+        ),
+      );
       break;
     }
     const bounds = segmentBounds(segment);

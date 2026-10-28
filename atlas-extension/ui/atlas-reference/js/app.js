@@ -12,7 +12,11 @@ const names={map:'地图',cast:'全部人物',items:'全部物品',msgs:'全部�
 const ui=window.AtlasUIModel;
 let preferenceStorage=window.AtlasHost.preferenceStorage;
 const preferences=ui.preferences(preferenceStorage);
-const state={page:'map',nodeId:D.meta.initialNodeId||D.ROOT.id,selected:null,inspectorTab:'cast',dock:'log',viewMode:D.meta.viewMode||'pov',mapMode:'map',open:new Set(),cameras:new Map(),query:'',filter:'all',settingsTab:'prompts',motion:true,leftClosed:false,rightClosed:false,branch:'main',advance:0,...preferences.value};
+const state={page:'map',nodeId:D.meta.initialNodeId||D.ROOT.id,selected:null,inspectorTab:'cast',dock:'log',viewMode:'player',mapMode:'map',open:new Set(),cameras:new Map(),query:'',filter:'all',settingsTab:'prompts',motion:true,leftClosed:false,rightClosed:false,branch:'main',advance:0,...preferences.value};
+// P08 §14.5：作用域只由服务端下发的 meta 决定，旧偏好里残留的 viewMode 不许覆盖它。
+// UI 自己只有 player/author 两档；若服务端**刻意**下发了 pov 载荷（内部/测试路径），照样如实渲染，
+// 不把它悄悄升成全量 —— 作用域必须跟着数据走（§14.9）。
+state.viewMode=D.meta.viewMode==='author'?'author':D.meta.viewMode==='pov'?'pov':'player';
 const timers=new Set(),unlisten=[];
 let flowReadSequence=0,scopedFlows=null,disposed=false,hostVisible=true,profileSequence=0,layoutFrame=0,layoutWaiters=[],fullFocus=null;
 function refreshFlows(){
@@ -39,7 +43,7 @@ function path(id,n=D.ROOT,p=[]){if(n===D.ROOT){const location=(D.LOCATIONS||[]).
 function current(){return byId(state.nodeId)||D.ROOT;}
 function clock(){const m=D.meta.timeMinutes;return `${String(Math.floor(m/60)%24).padStart(2,'0')}:${String(Math.floor(m%60)).padStart(2,'0')}`;}
 function placeName(id){return byId(id)?.name||'位置未明确';}
-function known(o){return state.viewMode==='author'||o.known!==false;}
+function known(o){return state.viewMode!=='pov'||o.known!==false;}
 /**
  * M6-11①：左栏读的是**本轮故事**，判据是服务端给的真实 narrative 回合 id（`meta.latestTurnId`），
  * 不是数组顺序、也不是「本地第几个事件」——manual 标定与地图建设都会造事件，
@@ -165,8 +169,8 @@ function frameChrome(st){
 }
 function renderRail(){
  $$('.rail-btn').forEach(b=>{const on=b.dataset.view===state.page;b.classList.toggle('active',on);b.setAttribute('aria-current',on?'page':'false');});
- $('.rail-ava').textContent=state.viewMode==='author'?'作':'知';$('.rail-ava').setAttribute('aria-label',state.viewMode==='author'?'当前作者视图，切换主角所知':'当前主角所知，切换作者视图');
- $('#viewBadge').textContent=state.viewMode==='author'?'世界后台':'主角所知';
+ $('.rail-ava').textContent=state.viewMode==='author'?'作':'玩';$('.rail-ava').setAttribute('aria-label',state.viewMode==='author'?'当前世界后台，切换玩家视图':'当前玩家视图，切换世界后台');
+ $('#viewBadge').textContent=state.viewMode==='author'?'世界后台':'玩家视图';
  $('[data-view="msgs"] .rail-badge').textContent=D.MESSAGES.filter(known).length;
  $('[data-view="sim"] .rail-badge').textContent=D.TASKS.filter(t=>known(t)&&t.st!=='done').length;
 }
@@ -206,7 +210,7 @@ function detailHTML(){const s=state.selected;if(!s)return '';
     n.host&&n.sceneStatus==='missing'?`<button class="action-btn" data-build-map="${esc(n.id)}">完善本图</button>`:''}</div>${
     n.host&&n.sceneStatus==='missing'?'<p class="scope-note">「完善本图」只在点击后才会调用一次模型；切页、缩放与打开地图不会自动建设。</p>':''}<div class="section-label">在这里的人物 · ${cast.length}</div>${cast.map(c=>castCard(c)).join('')||empty('这里暂无已记录的在场人物')}<div class="section-label">物品 · ${items.length}</div>${items.map(itemCard).join('')||'<p class="scope-note">暂无已记录物品</p>'}${children.length?`<div class="section-label">下属地点 · ${children.length}</div>${children.map(ch=>`<button class="child-location" data-inspect-place="${esc(ch.id)}"><i style="--ac:${color[ch.kind]}"></i><span>${esc(ch.name)}</span><em>${esc(ch.code)}</em>›</button>`).join('')}`:''}`;
  }
- if(s.kind==='character'){const c=D.CAST.find(c=>c.id===s.id);if(!c||!known(c))return empty('当前视角没有该人物的信息');return `<div class="entity-hero" style="--ac:${c.c}"><div class="entity-avatar">${esc(c.initial)}</div><div><h3>${esc(c.name)}</h3><span>${esc(c.role)}</span></div></div><div class="detail-tags"><em>${esc(c.tag)}</em><em>${esc(placeName(c.locationId))}</em></div>${field('当前行动',c.doing)}${state.viewMode==='author'?field('后台想法',c.mind):field('可见表现','仅显示主角能够观察到的行动与状态。')}${field('位置',c.state==='away'?(c.description||'目前在途'):placeName(c.locationId))}<div class="detail-actions">${action('查看地图位置','character',c.id,true)}${action('查看人物经历','timeline',c.id)}</div><div class="section-label">携带物品</div>${D.ITEMS.filter(it=>it.holder===c.id&&known(it)).map(itemCard).join('')||empty('暂无已记录的携带物品')}<div class="section-label">最近相关事件</div>${D.EVENTS.filter(e=>e.target===c.id&&known(e)).map(eventRow).join('')||'<p class="scope-note">暂无相关记录</p>'}`;}
+ if(s.kind==='character'){const c=D.CAST.find(c=>c.id===s.id);if(!c||!known(c))return empty('当前视角没有该人物的信息');return `<div class="entity-hero" style="--ac:${c.c}"><div class="entity-avatar">${esc(c.initial)}</div><div><h3>${esc(c.name)}</h3><span>${esc(c.role)}</span></div></div><div class="detail-tags"><em>${esc(c.tag)}</em><em>${esc(placeName(c.locationId))}</em></div>${field('当前行动',c.doing)}${state.viewMode==='author'?field('后台想法',c.mind):field('可见表现','已记录的行动与状态；内部想法只在世界后台显示。')}${field('位置',c.state==='away'?(c.description||'目前在途'):placeName(c.locationId))}<div class="detail-actions">${action('查看地图位置','character',c.id,true)}${action('查看人物经历','timeline',c.id)}</div><div class="section-label">携带物品</div>${D.ITEMS.filter(it=>it.holder===c.id&&known(it)).map(itemCard).join('')||empty('暂无已记录的携带物品')}<div class="section-label">最近相关事件</div>${D.EVENTS.filter(e=>e.target===c.id&&known(e)).map(eventRow).join('')||'<p class="scope-note">暂无相关记录</p>'}`;}
  if(s.kind==='item'){const it=D.ITEMS.find(it=>it.id===s.id);if(!it||!known(it))return empty('当前视角没有该物品的信息');return `<div class="detail-title">${icon('box')}<h3>${esc(it.name)}</h3></div>${field('描述',it.description)}${field('当前状态',it.st)}${field('归属',it.holder?(D.CAST.find(c=>c.id===it.holder)?.name||'未知持有者'):'放置于地点')}${field('所在地点',placeName(it.locationId))}<div class="detail-actions">${action('查看地图位置','item',it.id,true)}${it.holder?action('查看持有者','character',it.holder):''}</div>`;}
  if(s.kind==='message'){const m=message(s.id);if(!m||!known(m))return empty('该消息尚未进入当前视角');return `<div class="detail-title">${icon('wave')}<h3>${esc(m.src)}</h3></div><div class="detail-tags"><em>${esc(m.status)}</em><em>${m.known?'主角已可获知':'世界后台 · 未送达主角'}</em></div><p class="detail-text">${esc(m.txt)}</p>${field('来源地点',placeName(m.locationId))}<div class="section-label">传播节点</div><div class="flow-steps">${m.hops.map((h,i)=>`<div><i>${i+1}</i><span>${esc(h)}</span></div>`).join('')}</div><div class="detail-actions"><button class="action-btn" data-show-flow="${esc(m.id)}">在地图上查看信息流</button></div>`;}
  if(s.kind==='task'){const t=task(s.id);if(!t||!known(t))return empty('当前视角没有此后台任务');return `<div class="detail-title">${icon('cpu')}<h3>${esc(t.n)}</h3></div>${field('状态',t.stName)}${field('行动',t.d)}${t.p!=null?`<div class="task-progress"><span>当前进度 ${t.p}%</span><div><i style="width:${t.p}%"></i></div></div>`:field('进度','等待条件满足，尚无可计算的进度')}<div class="detail-actions"><button class="action-btn" data-task-map="${esc(t.id)}">查看地图动向</button>${action('查看相关人物','character',t.entityId)}</div>`;}
@@ -258,6 +262,50 @@ function receiptBatches(detail){
 }
 function receiptCard(r){const partial=r.detail?.receipt?.status==='partial',status=partial?'部分成功':{committed:'已提交',duplicate:'重复回执',failed:'失败','pending-review':'待审阅'}[r.status]||r.status,detail={status:r.status,...(r.detail??{}),...(r.logs?.length?{logs:r.logs}:{})};return `<div class="receipt-row"><i class="rc-ok ${r.ok&&!partial?'':'rc-fail'}"></i><div><b>推演回执 · ${esc(status)} · ${esc(r.t)}</b><p>${esc(r.m)}</p>${receiptLayers(r)}${receiptBatches(r.detail)}${r.issue?`<code>${esc(r.issue)}</code>`:''}<details class="diagnostic-row"><summary>查看本轮日志</summary><pre>${esc(JSON.stringify(detail,null,2))}</pre></details></div>${r.retryable?`<button class="action-btn" data-retry="${esc(r.id)}">重试失败项</button>`:r.ok?`<span class="receipt-done">${esc(status)}</span>`:'<button class="action-btn" data-page="diag">查看诊断</button>'}</div>`;}
 function enginePhaseText(engine=D.meta.engine??{}){return {'awaiting-reply':'等待酒馆正文完成…',queued:'推演排队中…','reading-context':'正在读取推演资料…',committing:'正在推演，等待回执…'}[engine.phase]||'正在处理…';}
+/**
+ * P14 §20.1：建图进度块。只显示服务端已算好的事实，界面不重新汇总。
+ * - 任务类型/范围、阶段、来源扫描覆盖；
+ * - 已完成 / 必建待办 / 失败 / 依赖阻塞 / 等待实际进入，含真实地图布局数；
+ * - 当前窗口、累计窗口、累计真实发送；
+ * - 停止本次运行与集中重试失败项由已保存任务状态决定，并调用宿主建设控制路由，
+ *   并如实说明原因 —— 不摆一个点了没反应的按钮。
+ * 进度/失败不插聊天，只在这里与诊断里出现（§20.1 / R41）。
+ */
+function buildStatusHTML(){
+ const b=D.buildStatus;if(!b)return '';
+ const q=b.totals?.required??{},maps=b.mapLayouts??{},w=b.windows??{},a=b.actions??{};
+ const num=v=>Number.isFinite(v)?v:'未知';
+ const line=[
+  `必建 ${num(q.done)}/${num(q.total)} 完成`,
+  `待办 ${num(q.pending)}`,
+  `失败 ${num(q.failed)}`,
+  `依赖阻塞 ${num(q.blocked)}`,
+  `等待实际进入 ${num(b.totals?.deferredInteriors)}`,
+  `地图布局 ${num(maps.laidOut)}/${num(maps.registered)}`,
+ ].join(' · ');
+ const phase={idle:'尚未开始',discovery:'资料发现',layout:'空间布局',finished:'已收尾',stopped:'已停止'}[b.phase]||'进行中';
+ const windows=[`已提交窗口 ${num(w.committed)}`,w.current===null?'当前无窗口':`当前窗口 ${num(w.current)}`,
+   `累计窗口 ${num(w.cumulative)}`,`累计真实发送 ${num(w.cumulativeTransports)} 次`].join(' · ');
+ const reasons=Array.isArray(w.extraReasons)&&w.extraReasons.length
+  ?`<p class="scope-note">额外请求原因：${w.extraReasons.map(r=>`${esc(r.reason)}×${esc(String(r.windows))}`).join('、')}</p>`
+  :`<p class="scope-note">额外请求原因：${!Array.isArray(w.extraReasons)?(w.ledgerAvailable?'账本明细不完整，未知':'无已保存窗口账本，未知'):'已记录，无额外请求'}</p>`;
+ const failed=Array.isArray(a.failedTargets)?a.failedTargets:[];
+ const failedList=failed.length
+  ?`<details class="diagnostic-row" data-build-failures><summary>查看失败项 · ${failed.length}</summary><ul class="receipt-layers">${failed.slice(0,50).map(f=>`<li>${esc(f.workKind)} · ${esc(f.lastErrorCode??'未给错误码')} · 已尝试 ${esc(String(f.attempts))} 次</li>`).join('')}</ul></details>`
+  :'';
+ const retryTitle=esc(a.retryBlockedReason??a.retryScope??'没有可重试的失败项');
+ const jobLabel=b.job?`${esc(b.job.kind)} · ${esc(b.job.label)}`:'尚无建设任务';
+ return `<section class="build-status" data-build-status data-phase="${esc(b.phase??'')}">
+  <div class="section-label">建图进度 · ${jobLabel}</div>
+  <p class="scope-note">阶段：${phase} · 来源扫描 ${b.sourceScan?.complete?'已完成':'未完成'}${b.sourceScan?.scopeSealed?' · 范围已封口':''}</p>
+  <p class="scope-note">${line}</p>
+  <p class="scope-note">${windows}</p>${reasons}${failedList}
+  <div class="build-status-actions">
+   <button class="action-btn" data-build-control="stop" ${a.canStop?'':'disabled'} title="停止后保留已保存结果，下次合法世界更新可续建">停止本次运行</button>
+   <button class="action-btn" data-build-control="retry-failed" ${a.canRetryFailed?'':'disabled'} title="${retryTitle}">集中重试失败项</button>
+   ${a.retryBlockedReason?`<span>${esc(a.retryBlockedReason)}</span>`:''}
+  </div></section>`;
+}
 function renderDock(){
  $$('#dockTabs .dt').forEach(b=>{b.classList.toggle('active',b.dataset.tab===state.dock);b.setAttribute('aria-selected',b.dataset.tab===state.dock);});
  const el=$('#dockBody');
@@ -267,7 +315,7 @@ function renderDock(){
  if(state.dock==='log'){const now=turnEvents(),old=historyEvents();
    el.innerHTML=`<div class="section-label">本轮世界动向 · ${now.length}</div><div class="event-list">${now.map(eventRow).join('')||'<p class="scope-note">本轮暂无新的世界动向</p>'}</div>`+
      (old.length?`<div class="section-label">历史记录 · ${old.length}</div><div class="event-list">${old.slice(0,60).map(eventRow).join('')}</div>`:'');}
- else if(state.dock==='tasks')el.innerHTML=`<div class="task-grid">${D.TASKS.filter(known).map(taskCard).join('')||empty('当前视角暂无后台任务')}</div>`;
+ else if(state.dock==='tasks')el.innerHTML=buildStatusHTML()+`<div class="task-grid">${D.TASKS.filter(known).map(taskCard).join('')||empty('当前视角暂无后台任务')}</div>`;
  else if(state.dock==='receipt')el.innerHTML=(D.RECEIPTS.length?'<button class="action-btn" data-export="receipts">导出推演回执</button>':'')+D.RECEIPTS.map(receiptCard).join('')+(D.meta.engine?.error?`<div class="receipt-row"><i class="rc-ok rc-fail"></i><div><b>当前错误</b><p>${esc(D.meta.engine.error)}</p></div><button class="action-btn" data-page="diag">查看诊断</button></div>`:'')+(!D.RECEIPTS.length&&!D.meta.engine?.error?empty(D.meta.engine?.busy?'正在推演，等待回执…':'尚无推演回执；首次推演完成后在此查看结果与日志'):'');
  else el.innerHTML=`<div class="prop-grid">${D.MESSAGES.filter(known).map(m=>`<button class="propagation-row" data-show-flow="${esc(m.id)}"><i class="pd sm"></i><div><b>${esc(m.src)}</b><span>${esc(m.hops.join(' → '))}</span></div><em>${esc(m.status)}</em>${icon('chev')}</button>`).join('')}</div>`+(scopedFlows?.cards??[]).map(c=>`<p class="scope-note">${esc(c.name)} · ${{NO_ROUTE_GEOMETRY:'缺少已保存路线，暂不画线',ENDPOINTS_NOT_ON_MAP:'两端未定位在本图',ARRIVED_FRONT:'已到达；没有可显示的传播路径',SCALE_UNKNOWN:'地图尺度未标定',CROSS_MAP:'路径位于其他地图'}[c.reason]||'暂无可绘制路径'}</p>`).join('');
  $('#turnChip').textContent=`第 ${D.meta.turn} 轮 · ${clock()}`;
@@ -297,7 +345,7 @@ function renderCatalog(){const q=state.query.trim().toLowerCase(),f=state.filter
  if(p==='cast')list=list.filter(c=>f==='all'||f==='here'&&sceneCast().some(v=>v.id===c.id)||f==='travel'&&c.state==='away'||f==='away'&&!sceneCast().some(v=>v.id===c.id)&&c.state!=='away');
  if(p==='items')list=list.filter(it=>f==='all'||f==='held'&&it.holder||f==='ground'&&!it.holder);
  if(p==='msgs')list=list.filter(m=>f==='all'||m.kind===f);
- $('#catalogCount').textContent=`${list.length} 条记录 · ${state.viewMode==='author'?'世界后台':'主角所知'}`;
+ $('#catalogCount').textContent=`${list.length} 条记录 · ${state.viewMode==='author'?'世界后台':'玩家视图'}`;
  $('#catalogResults').innerHTML=list.length?list.map(o=>p==='cast'?castCard(o,true):p==='items'?itemCard(o):messageCard(o)).join(''):empty('没有符合条件的记录');
 }
 function timelineHTML(){const turns=[...new Set(D.EVENTS.filter(known).map(e=>e.turn))];return `<div class="timeline">${turns.map(t=>`<section><div class="timeline-turn"><i></i><span>第 ${t} 轮</span><em>${esc(D.EVENTS.find(e=>e.turn===t).t)}</em></div><div class="timeline-events">${D.EVENTS.filter(e=>e.turn===t&&known(e)).map(eventRow).join('')}</div></section>`).join('')}</div>`;}
@@ -343,7 +391,14 @@ function backupPanelHTML(){
   const status=!b?'正在检查升级前备份…':b.available?`可导出 · SHA256 ${esc(String(b.sha||'').slice(0,16))}… · ${esc(String(b.createdAt||''))}`:`不可导出：${esc(b.reason||'当前聊天没有持久备份')}`;
   return `<section class="backup-panel"><div class="section-label">升级前原档</div><p class="scope-note">只保留最近一次升级前的原档；导出是只读操作，不会改动当前数据库，也不会清除备份。</p><div class="detail-actions"><button class="action-btn" data-backup-export ${b?.available?'':'disabled'}>导出升级前备份</button><button class="action-btn" data-backup-recheck>重新检查</button></div><p class="scope-note" data-backup-status>${status}</p></section>`;
 }
-function diagnosticsHTML(){return `<div class="catalog-toolbar"><label class="search-field">${icon('search')}<input id="diagnosticSearch" placeholder="搜索错误代码、内容或字段路径…" aria-label="搜索诊断"></label><select id="diagnosticLevel" aria-label="日志等级"><option value="all">全部等级</option><option value="error">错误</option><option value="warn">警告</option><option value="info">信息</option><option value="debug">调试</option></select><button class="action-btn" data-copy-diagnostics>复制当前列表</button><button class="action-btn" data-export="diagnostics">导出日志</button><button class="action-btn" data-export="turn-analysis">导出逐轮分析</button></div>${backupPanelHTML()}<div id="diagnosticRows">${diagnosticRows()}</div>`;}
+function diagnosticsHTML(){
+ /**
+  * P08 §14 / P14 §20.2：逐轮分析是**作者专属**只读导出（含每轮为什么发、失败分类、
+  * 楼层与窗口账）。玩家视图下这个按钮不该出现 —— 出现了也必然失败，等于一个假入口。
+  * 所以直接不给按钮，并写明为什么；作者视角才显示。
+  */
+ const authorView=D.meta.viewMode==='author';
+ return `<div class="catalog-toolbar"><label class="search-field">${icon('search')}<input id="diagnosticSearch" placeholder="搜索错误代码、内容或字段路径…" aria-label="搜索诊断"></label><select id="diagnosticLevel" aria-label="日志等级"><option value="all">全部等级</option><option value="error">错误</option><option value="warn">警告</option><option value="info">信息</option><option value="debug">调试</option></select><button class="action-btn" data-copy-diagnostics>复制当前列表</button><button class="action-btn" data-export="diagnostics">导出日志</button>${authorView?'<button class="action-btn" data-export="turn-analysis">导出逐轮分析</button>':''}</div>${authorView?'':'<p class="scope-note">逐轮分析（每轮为什么发、失败分类、楼层与窗口账）只在世界后台可用：切换到作者视角后出现导出按钮。</p>'}${backupPanelHTML()}<div id="diagnosticRows">${diagnosticRows()}</div>`;}
 function diagnosticRows(q='',level='all'){
   const rows=D.DIAGNOSTICS.filter(d=>(level==='all'||d.level===level)&&JSON.stringify(d).toLowerCase().includes(q.toLowerCase()));
   if(!rows.length)return empty('没有符合条件的日志');
@@ -406,7 +461,15 @@ function cancelRollback(){rollbackPreview=null;renderDock();}
 function resetDemo(){return runHost('refresh','已刷新当前世界');}
 function retry(){return runHost('retry','重试请求已处理');}
  function generateLayout(id=state.nodeId){return runHost('layout','空间布局已保存',id);}
-function switchView(){return window.AtlasHost.setViewMode(state.viewMode==='author'?'pov':'author').catch(error=>toast(error.message,'warn'));}
+/**
+ * P08 §14：三个作用域都要能到达。
+ * - 显式给 `author` / `player` / `pov` 就切到那一档（内部与验收路径直接点名）；
+ * - 不给参数时在「世界后台 ↔ 玩家视图」之间切换（这就是界面上的那个按钮）。
+ */
+function switchView(target){
+ const next=target==='author'||target==='player'||target==='pov'?target:(state.viewMode==='author'?'player':'author');
+ return window.AtlasHost.setViewMode(next).catch(error=>toast(error.message,'warn'));
+}
 function download(name,content,type='application/json'){if(window.AtlasHost.downloadFile){window.AtlasHost.downloadFile(name,content,type);return;}const blob=new Blob([content],{type}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=name;a.click();later(()=>URL.revokeObjectURL(url),1000);}
 /** M6-11③：显式建设本图。切页/缩放/打开地图都不会走到这里，只有按钮会。 */
 function buildMap(mapId){return runHost('build','本图建设已提交',mapId,{mode:'local'});}
@@ -511,6 +574,7 @@ function bind(){
   const b=e.target.closest('button,[data-view],.rail-ava');if(!b||b.disabled)return;
   if(await presetUI.click(b))return;
   if(b.hasAttribute('data-engine-enable')){await runHost('setEnabled','推演开关已更新',b.dataset.engineEnable==='true');return;}
+  if(b.hasAttribute('data-build-control')){await runHost('buildControl',b.dataset.buildControl==='stop'?'本次建设已停止':'已开始重试失败项',b.dataset.buildControl);return;}
   if(b.dataset.openBackend){state.settingsTab=b.dataset.openBackend;setPage('prefs');return;}
   if(b.dataset.page){setPage(b.dataset.page);return;}if(b.dataset.view){setPage(b.dataset.view);return;}
   if(b.dataset.go){navigate(b.dataset.go);return;}
@@ -596,7 +660,7 @@ function bind(){
 function updateSnapshot(value,{resetScope=false}={}){
  const snapshot=clone(value);if(!snapshot?.meta||!snapshot.ROOT)throw Error('ATLAS_SNAPSHOT_INVALID');
  const page=state.page,id=state.nodeId,selected=state.selected,sameScope=!resetScope&&D.meta?.scopeKey===snapshot.meta.scopeKey;
- for(const key of Object.keys(D))delete D[key];Object.assign(D,snapshot);state.viewMode=D.meta.viewMode;
+ for(const key of Object.keys(D))delete D[key];Object.assign(D,snapshot);state.viewMode=D.meta.viewMode==='author'?'author':D.meta.viewMode==='pov'?'pov':'player';
  if(!sameScope){state.cameras.clear();state.open.clear();state.query='';state.filter='all';fullFocus=null;}
  const next=sameScope&&nodes().find(n=>n.id===id)?id:D.meta.initialNodeId||D.ROOT.id;
  navigate(next,true,{preserveWorkspace:page==='prefs',logicalPage:sameScope||page==='prefs'?page:'map',resetScope:!sameScope});

@@ -83,12 +83,24 @@ try{
  await p.evaluate(()=>atlasPreviewConnection.core.setEnabled(false));await f.locator('[data-view="sim"]').click();await f.waitForFunction(()=>AtlasPreview.data.meta.engine.enabled===false);check('paused-chat-control',await f.locator('[data-engine-enable="true"]').isVisible()&&await f.locator('#nextDemo').isDisabled());await f.locator('[data-engine-enable="true"]').click();await f.waitForFunction(()=>AtlasPreview.data.meta.engine.enabled===true);check('enable-chat-real-host',await p.evaluate(()=>atlasPreviewConnection.core.getState().binding.enabled===true));
  await f.locator('[data-open-backend="connection"]').click();check('backend-connection-entry',await f.locator('#connectionProvider').isVisible());await f.locator('[data-view="sim"]').click();
  await p.evaluate(()=>{window.__originalManual=atlasPreviewConnection.core.manualAdvance;atlasPreviewConnection.core.manualAdvance=async()=>{throw Error('验收故障：API_NOT_CONFIGURED');};});await f.locator('[data-demo-next]').click();await f.waitForFunction(()=>!!document.querySelector('[data-engine-error]'));check('advance-error-stays-visible',(await f.locator('[data-engine-error]').innerText()).includes('API_NOT_CONFIGURED'));await f.locator('[data-page="diag"]').first().click();check('advance-error-in-diagnostics',(await f.locator('#diagnosticRows').innerText()).includes('API_NOT_CONFIGURED'));await p.evaluate(()=>{atlasPreviewConnection.core.manualAdvance=window.__originalManual;});
+ /* P08 §14 / P14 §20.2：逐轮分析是作者专属导出。玩家视图下不能有这个入口（否则就是假入口），
+    切到作者视角才出现 —— 两件事都当验收项。切视角会整体重读并重绘，所以先把页面切回诊断页。 */
+ check('turn-analysis-author-only',await f.locator('[data-export="turn-analysis"]').count()===0);
+ await f.evaluate(()=>AtlasPreview.switchView());await f.waitForFunction(()=>AtlasPreview.data.meta.viewMode==='author');
+ await f.locator('[data-view="diag"]').first().click();
+ check('turn-analysis-button-in-author',await f.locator('[data-export="turn-analysis"]').count()===1);
  const beforeAnalysisExport=await snapshot();
  const [analysisDownload]=await Promise.all([p.waitForEvent('download'),f.locator('[data-export="turn-analysis"]').click()]);
  const analysisFile=JSON.parse(readFileSync(await analysisDownload.path(),'utf8'));
  check('turn-analysis-download',analysisFile.schema==='atlas-turn-analysis/v1'&&analysisFile.coverage.storedTurnPagesComplete&&Array.isArray(analysisFile.rounds),{turns:analysisFile.coverage.storedTurnsExported,rounds:analysisFile.rounds.length});
  check('turn-analysis-readonly',await snapshot()===beforeAnalysisExport);
  check('turn-analysis-safe-file',!JSON.stringify(analysisFile).includes('apiKey')&&!JSON.stringify(analysisFile).includes('https://mock.local'));
+ /* P14 §20.2：合计口径必须自证「楼层栏与窗口栏不能相加」，且未知不写成 0。 */
+ check('turn-analysis-projection',!!analysisFile.projection&&analysisFile.projection.floorAndWindowTotalsAreIndependent===false
+   &&(analysisFile.projection.transports!==null||typeof analysisFile.projection.transportsLowerBound==='number')
+   &&Array.isArray(analysisFile.projection.byFloor),analysisFile.projection?{transports:analysisFile.projection.transports,lower:analysisFile.projection.transportsLowerBound}:null);
+ check('turn-analysis-length-explained',typeof analysisFile.explanation?.lengths==='string'&&typeof analysisFile.explanation?.timing==='string');
+ // 后续界面断言都是作者视角的既有能力（布局按钮、后台想法、写操作入口），保持作者视角继续。
  await f.locator('[data-view="map"]').click();
  check('map-widgets-collapsed-by-default',await f.locator('#mapHudWidgets').isHidden()&&await f.locator('#mapWidgetsToggle').getAttribute('aria-expanded')==='false');
  await f.locator('#mapWidgetsToggle').click();
@@ -239,7 +251,7 @@ try{
  await f.locator('[data-view="prefs"]').click();await f.locator('[data-settings-tab="interaction"]').click();await f.locator('[data-single-click-enter]').check();check('interaction-setting',await f.evaluate(()=>AtlasPreview.state.singleClickEnter));
  await f.locator('[data-settings-tab="appearance"]').click();await f.locator('#skinAccent').fill('#43e0ff');await f.locator('#skinAccent').dispatchEvent('input');await f.locator('[data-view="map"]').click();
  check('viewing-does-not-write-world',(await snapshot())===before);
- const authorCount=await f.evaluate(()=>AtlasPreview.data.CAST.length);await f.locator('.rail-ava').click();await f.waitForFunction(()=>AtlasPreview.data.meta.viewMode==='pov');check('pov-requeries',await f.evaluate(n=>AtlasPreview.data.CAST.length<=n&&AtlasPreview.state.selected===null,authorCount));await f.locator('.rail-ava').click();await f.waitForFunction(()=>AtlasPreview.data.meta.viewMode==='author');
+ const authorCount=await f.evaluate(()=>AtlasPreview.data.CAST.length);await f.locator('.rail-ava').click();await f.waitForFunction(()=>AtlasPreview.data.meta.viewMode==='player');check('player-view-requeries',await f.evaluate(n=>AtlasPreview.data.CAST.length<=n&&AtlasPreview.state.selected===null,authorCount));await f.locator('.rail-ava').click();await f.waitForFunction(()=>AtlasPreview.data.meta.viewMode==='author');
  await p.screenshot({path:`${dir}/native-desktop.png`});await p.setViewportSize({width:390,height:844});await delay(400);check('mobile-no-overflow',await f.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth));await p.screenshot({path:`${dir}/native-mobile.png`});await p.setViewportSize({width:1600,height:1000});
  const locations=await p.evaluate(async()=>{const sql=await import('/release/atlas-ui-extension/dist/atlas-sql.mjs'),ctx=SillyTavern.getContext(),s=await sql.openSqlSession({chatUid:ctx.chatId,chatMetadata:ctx.chatMetadata,saveSession:async()=>{throw Error('read only');}});try{return (await s.repo.queryView({kind:'catalog',entityKind:'location',viewMode:'author'})).items.filter(x=>x.mapId==='world').slice(0,6).map(x=>({id:x.entityId,name:x.name}));}finally{await sql.closeSqlSession(s);}});
  const scope={chatId:'review',branchId:'main',revision:0,viewMode:'author'},context={scope,map:{id:'world',name:'空间验收',metersPerCell:2,frame:{cols:15,rows:12}},entities:{locations:locations.map(x=>x.id),characters:[],items:[]}};

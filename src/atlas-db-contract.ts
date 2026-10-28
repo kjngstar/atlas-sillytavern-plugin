@@ -559,10 +559,12 @@ export interface AtlasSqlRepository {
 }
 
 export interface AtlasModelPort {
+  /** Capture connection, preset and budget settings once for an operation window. */
+  freezeWindow?(): Promise<AtlasModelPort>;
   /** Read-only, credential-free planning settings for the current connection. */
   generationOptions?(): Promise<import('./atlas-model-batching.ts').ModelGenerationOptions>;
   withBudget?(budget: import('./atlas-sql-generation-budget.ts').GenerationBudgetPort, stage?: string): AtlasModelPort;
-  preview?(request:import('./atlas-ops-contract.ts').ModelBatchRequest):Promise<{messages:Array<{role:string;content:string;chars:number}>;promptSource:string;missing:Record<string,boolean>;coreSaved:boolean}>;
+  preview?(request:import('./atlas-ops-contract.ts').ModelBatchRequest):Promise<{messages:Array<{role:string;content:string;chars:number}>;promptSource:string;missing:Record<string,boolean>;coreSaved:boolean;policyNotice?:{needsAttention:boolean;code:string;message:string;autoSwitch:boolean}}>;
   request(input: import('./atlas-ops-contract.ts').ModelBatchRequest): Promise<import('./atlas-ops-contract.ts').ModelBatchResponse>;
 }
 

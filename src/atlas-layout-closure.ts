@@ -54,7 +54,7 @@ export function completeLayoutClosure(input:{group:AtomicGroup;maps:Row[];locati
     const container=locations.find(l=>l.id===map.container_location_id),scene=frame.atlasScene as Row|undefined;
     const layout=scene?.layout as Row|undefined;
     const members=collectMapLocations({mapRow:map,maps,locations});
-    const profile=resolveSpatialProfile({map,container:container??null,parentContainer:locations.find(row=>row.id===container?.parent_location_id)??null,members,routes:input.routes.filter(r=>r.map_id===mapId)});
+    const profile=resolveSpatialProfile({map,maps,container:container??null,parentContainer:locations.find(row=>row.id===container?.parent_location_id)??null,members,routes:input.routes.filter(r=>r.map_id===mapId)});
     const pending=frame.atlasLayoutRequest as Row|undefined;
     // A parent footprint establishes a non-leaf floor's size, not its internal
     // layout. Leave it for its own pending request instead of inventing a self

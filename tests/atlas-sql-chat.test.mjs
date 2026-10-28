@@ -147,12 +147,12 @@ test('普通剧情的关系、公开风声和明确告知认知经过生产提�
  }finally{await f.close();}
 });
 
-function fixture({ response = room, model, identity, retryFloor, afterResponse, commitGuard, lore = '全部世界书原文：文风规则与地点。' } = {}) {
+function fixture({ response = room, model, identity, retryFloor, afterResponse, commitGuard, readWorldBuildSources, lore = '全部世界书原文：文风规则与地点。' } = {}) {
   let enabled = true, saves = 0, calls = 0, saveOk = true;
   const requests = [], batches = [], diagnostics=[];
   const current = { chatUid: 'chat-auto', branchId: 'main', chatMetadata: {}, saveMetadata: async () => { saves++; return saveOk; } };
   let live = current;
-  const provider = createBrowserSqlHost({ enabled: () => enabled, context: () => live, loadRuntime: loadAtlasSqlRuntime,
+  const provider = createBrowserSqlHost({ enabled: () => enabled, context: () => live, loadRuntime: loadAtlasSqlRuntime, readWorldBuildSources,
     modelPort: { request: async request => { calls++; batches.push(request); const generated = request.batchId.includes('_evidence_') ? '{"facts":[]}' : request.batchId.startsWith('construction_') ? '{"op":"noop"}' : model ? await model(request) : null;
       return { batchId: request.batchId, text: typeof generated === 'string' ? generated : response, finishReason: 'stop', httpStatus: 200, durationMs: 1 }; } } });
   const server = createAtlasServerCore({ store: { read: async () => null, write: async () => {} }, sqlSessionProvider: provider });
@@ -448,4 +448,23 @@ test('Q03 deleting an earlier SQL floor restores its maps and all dependent late
   assert.ok(!f.ui.getState().receipts.some(r=>priorReceiptIds.includes(r.receiptId)),'rolled-back successful receipts are removed; the real rollback receipt remains');
   f.restartUi();await f.ui.refresh();assert.ok(!f.ui.getState().receipts.some(r=>priorReceiptIds.includes(r.receiptId)),'reload cannot resurrect rolled-back receipts');
  }finally{await f.close();}
+});
+
+test('T-J01 real browser host initialization yields to the next foreground floor and retains its narrative locator',async()=>{
+  const sources=[{key:'lore:full-host',kind:'lorebook',hash:'full-host-v1',text:'完整的匿名可读世界资料。'}];
+  const f=fixture({readWorldBuildSources:async()=>sources,model:async request=>request.phase==='observe'
+    ? JSON.stringify({op:'location.upsert',ref:request.anchor.hostMessageUid.includes('3')?'new:next-room':'new:first-room',data:{name:request.anchor.hostMessageUid.includes('3')?'匿名后续空间':'匿名起始空间',kind:'room'}})
+    :' {"op":"noop"}'});
+  try{
+    await f.ui.refresh();await f.prepare('0');await f.end('1');
+    const session=await f.provider.session('chat-auto');
+    const {currentBuildJob}=await import('../src/atlas-world-build-execution.ts');
+    assert.ok(currentBuildJob(session.repo.db,session.branchId));
+    await f.prepare('2');await f.end('3');
+    await (await import('../src/atlas-sql-world-build.ts')).waitWorldBuildIdle(session);
+    await f.ui.refresh();
+    assert.equal(f.ui.getState().binding.lastCommittedMessageId,'3');
+    assert.equal(queryBound(session.repo.db,"SELECT COUNT(*) n FROM turns WHERE kind='narrative' AND status IN ('committed','partial')",[])[0].n,2);
+    assert.equal(f.diagnostics.some(entry=>entry.code==='COMMIT_FAILED'),false);
+  }finally{await f.close();}
 });

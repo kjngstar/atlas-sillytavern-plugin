@@ -14,6 +14,7 @@ import { queryBound } from './atlas-db-runtime.ts';
 import { queryMapView } from './atlas-db-views.ts';
 import type { ViewContext } from './atlas-db-views.ts';
 import { sqlVisibility } from './atlas-sql-visibility.ts';
+import { resolveMapGeometrySource } from './atlas-player-view-scope.ts';
 import { createTableReadPort } from './atlas-db-readport.ts';
 import { computeMapLayoutSignatures } from './atlas-sql-layout-task.ts';
 import { assessMapCompleteness } from './atlas-map-assessment.ts';
@@ -22,6 +23,8 @@ import { boundCorridorIdOf, resolveSpatialProfile } from './atlas-spatial-profil
 import { filterSceneForView, hydrateScene, projectMapView, readSceneFrame, collectMapLocations } from '../vendor/atlas-spatial/index.mjs';
 import type { Diagnostic, SceneDocument } from '../vendor/atlas-spatial/index.mjs';
 import type { ViewQuery, ViewResult } from './atlas-ops-contract.ts';
+import { assessMapQuality } from './atlas-map-quality.ts';
+import type { MapQualityV1 } from './atlas-map-quality.ts';
 
 export type SpatialSceneStatus = 'ready' | 'missing' | 'invalid';
 
@@ -40,9 +43,16 @@ export type SpatialSceneItem = {
    * UI 不需要、也不允许用图标数量自己猜。
    */
   assessment: MapAssessmentV1;
+  quality: MapQualityV1;
 };
 
-function parseFrame(raw: unknown): Record<string, unknown> | null {
+/**
+ * 解析 `frame_json`。
+ *
+ * P14 §20.1 起对外导出：工作台要报「真实地图布局数量」，判定口径必须与场景视图**同一份**，
+ * 不能在工作台里另写一个「frame_json 里有没有 atlasScene」的近似判断。
+ */
+export function parseFrame(raw: unknown): Record<string, unknown> | null {
   if (raw === null || raw === undefined || raw === '') return null;
   if (typeof raw === 'string') {
     try {
@@ -112,6 +122,8 @@ export function querySpatialScene(ctx: ViewContext, query: ViewQuery): ViewResul
     chatId: ctx.chatId ?? `branch:${ctx.branchId}`,
     branchId: ctx.branchId,
     revision: ctx.revision,
+    // vendor 只认 pov / author 两种过滤：玩家看的是完整已记录世界，因此与 author 同档；
+    // 玩家与作者的差别在**字段披露**（后台想法/出处），不在几何完整性（P08 §14.1）。
     viewMode: ctx.viewMode === 'pov' ? ('pov' as const) : ('author' as const),
   };
   // 名字只用于给存活下来的图元补显示名；names 本身不进响应，隐藏实体名不会因此外泄。
@@ -131,7 +143,25 @@ export function querySpatialScene(ctx: ViewContext, query: ViewQuery): ViewResul
     const read = readSceneFrame(frame, { branchId: ctx.branchId, mapId });
     const issues: Diagnostic[] = [...(read.issues ?? [])];
 
-    let scene: SceneDocument | null = read.scene;
+    /**
+     * P08 §14.8：未完成的图显示真实入口与工作状态，**不残留另一张图的几何**。
+     * 帧本来就是按 mapId 取的，但文档自报的 `mapId` 仍要复核一次：上一张图刚生成完、
+     * 这张图还在排队时，任何一条按「最近一次场景」聚合的路径都可能把别的图带过来。
+     */
+    const geometry = resolveMapGeometrySource({ mapId, saved: read.scene });
+    for (const rejection of geometry.rejected) {
+      issues.push({
+        code: rejection.code,
+        path: `$.maps[${mapId}].frame_json.atlasScene`,
+        message: rejection.message,
+        severity: 'error' as const,
+        entityId: mapId,
+        retryable: false,
+        module: 'atlas-spatial-views',
+      });
+    }
+
+    let scene: SceneDocument | null = geometry.geometry;
     let sceneStatus: SpatialSceneStatus = scene ? 'ready' : hasScene ? 'invalid' : 'missing';
     if (frame === null && !hasScene) {
       issues.push({
@@ -201,6 +231,7 @@ export function querySpatialScene(ctx: ViewContext, query: ViewQuery): ViewResul
       .filter((row) => visible(String(row.id)));
     const profile = resolveSpatialProfile({
       map: mapRow,
+      maps: [...mapRows.values()],
       container,
       parentContainer: container ? locationById.get(String(container.parent_location_id)) ?? null : null,
       corridorEntityId: boundCorridorIdOf(mapRow),
@@ -250,6 +281,14 @@ export function querySpatialScene(ctx: ViewContext, query: ViewQuery): ViewResul
       issues,
       sceneStatus: scene ? 'ready' : sceneStatus,
       assessment,
+      quality: assessMapQuality({ mapId, layoutKind: profile.layoutKind,
+        calibrated: typeof mapRow.meters_per_cell === 'number' && mapRow.meters_per_cell > 0, scaleQuality: assessment.metricQuality,
+        checked: scene ? ['coverage','geometry-locks','navigability','scale','plausibility'] : [],
+        coverage: { requiredMembers: assessment.expectedIds.length, presentMembers: assessment.expectedIds.length - assessment.missingIds.length, missingIds: assessment.missingIds },
+        geometry: { hardErrors: issues.filter(issue=>issue.severity==='error').length, lockViolations: issues.filter(issue=>issue.code.includes('LOCK')).length },
+        navigability: { requiredRoutes: visibleRoutes.length, drawnRoutes: visibleRoutes.filter(route=>route.geometry!==null).length,
+          undrawnRouteIds: visibleRoutes.filter(route=>route.geometry===null).map(route=>String(route.id)) },
+        plausibility: { unsupportedStructures: profile.unsupported?.length ?? 0, notes: assessment.semanticIssues.map(issue=>issue.code) } }),
     });
   }
 

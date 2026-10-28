@@ -1,5 +1,10 @@
-/** Export the same filtered snapshot the workbench displays; never read settings or source prompts. */
-export function buildMapAnalysisExport({data,mapView,sceneView,catalogView,mapId,exportedAt=new Date().toISOString(),pluginVersion=null,layoutPolicyVersion=null}) {
+/**
+ * Export the same filtered snapshot the workbench displays; never read settings or source prompts.
+ *
+ * P14 §20.4：新增「覆盖摘要 / 路线归属与未绘制原因 / 质量块 / 视图口径」四类字段。
+ * 全部从**已过滤的 DTO** 派生，不回查原库补隐藏端点，也不从 rendered 反推几何。
+ */
+export function buildMapAnalysisExport({data,mapView,sceneView,catalogView,mapId,exportedAt=new Date().toISOString(),pluginVersion=null,layoutPolicyVersion=null,buildCoverage=null}) {
   const allNodes=[];
   const walk=node=>{if(!node)return;allNodes.push(node);for(const child of node.children??[])walk(child);};
   walk(data?.ROOT);
@@ -52,6 +57,46 @@ export function buildMapAnalysisExport({data,mapView,sceneView,catalogView,mapId
     const frame=m.frames!=null&&typeof m.frames==='object'&&Object.hasOwn(m.frames,'frame')
       ?(m.frames.frame??null)
       :(m.frame??null);
+    /* P14 §20.4：路线归属与「为什么没画出来」都在导出里讲清楚，不让分析者自己猜。 */
+    const exportedRoutes=(m.routes??[]).filter(r=>r&&r.hidden!==true).map(r=>{
+      const geometry=r.geometry??null;
+      const status=typeof r.status==='string'?r.status:'open';
+      const quality=typeof r.geometryQuality==='string'?r.geometryQuality:'unknown';
+      return {
+        routeId:r.routeId,fromId:r.fromId,toId:r.toId,mapId:r.mapId,
+        fromLocationId:r.fromLocationId,toLocationId:r.toLocationId,
+        kind:r.kind,status,bidirectional:r.bidirectional!==false,
+        geometryQuality:quality,
+        geometryRev:Number.isFinite(Number(r.geometryRev))?Number(r.geometryRev):1,
+        distanceM:r.distanceM??null,dashed:r.dashed!==false,
+        allowedModes:Array.isArray(r.allowedModes)?[...r.allowedModes]:[],
+        geometry,
+        /* 归属：这条路线画在哪张图上。跨图路线只能说明「两端名义上相连」，不是同一层几何。 */
+        attribution:{
+          drawnOnThisMap:String(r.mapId??'')===String(m.mapId),
+          sameMapEndpoints:Boolean(r.fromId)&&String(r.fromId)===String(r.toId),
+          fromLocationId:r.fromLocationId??null,toLocationId:r.toLocationId??null,
+        },
+        /**
+         * 未绘制原因。只有在**确实没有几何**时才有值；有几何但质量低不叫「未绘制」。
+         * 这是从已过滤 DTO 的字段直接读出来的判断，不是猜的。
+         */
+        undrawnReason:geometry===null||geometry===undefined
+          ?(status!=='open'?'route-closed-no-geometry':quality==='unknown'?'no-geometry-recorded':`geometry-unavailable:${quality}`)
+          :null,
+      };
+    });
+    /* P14 §20.4：本图的覆盖摘要（点数 / 路线有无几何 / 场景状态）。 */
+    const pointsByKind={};
+    for(const point of m.points??[])pointsByKind[String(point?.kind??'unknown')]=(pointsByKind[String(point?.kind??'unknown')]??0)+1;
+    const coverage={
+      points:pointsByKind,
+      routes:{total:exportedRoutes.length,withGeometry:exportedRoutes.filter(r=>r.geometry!==null).length,
+        withoutGeometry:exportedRoutes.filter(r=>r.geometry===null).length,
+        undrawnReasons:[...new Set(exportedRoutes.map(r=>r.undrawnReason).filter(Boolean))].sort()},
+      sceneStatus:s?.sceneStatus??(s?.scene?'ready':'missing'),
+      sceneIssues:(s?.issues??[]).length,
+    };
     return {
       mapId:m.mapId,name:m.name,kind:m.kind,containerLocationId:m.containerLocationId??null,
       containerLocationKind:m.containerLocationKind??null,parentMapId:m.parentMapId??null,
@@ -66,16 +111,16 @@ export function buildMapAnalysisExport({data,mapView,sceneView,catalogView,mapId
       // P01b：路线与地图质量字段追加导出。只搬运**已过滤 DTO** 的公开字段，
       // 不在这里回查原库补秘密端点，也不从 rendered 反推几何。
       // hidden 路线（POV 下不可见）直接排除，不写进分析文件。
-      routes:(m.routes??[]).filter(r=>r&&r.hidden!==true).map(r=>({
-        routeId:r.routeId,fromId:r.fromId,toId:r.toId,mapId:r.mapId,
-        fromLocationId:r.fromLocationId,toLocationId:r.toLocationId,
-        kind:r.kind,status:r.status??'open',bidirectional:r.bidirectional!==false,
-        geometryQuality:r.geometryQuality??'unknown',
-        geometryRev:Number.isFinite(Number(r.geometryRev))?Number(r.geometryRev):1,
-        distanceM:r.distanceM??null,dashed:r.dashed!==false,
-        allowedModes:Array.isArray(r.allowedModes)?[...r.allowedModes]:[],
-        geometry:r.geometry??null,
-      })),
+      routes:exportedRoutes,
+      /* P14 §20.4：覆盖与质量。分析者可以直接看出「哪里没画、为什么没画」。 */
+      coverage,
+      quality:{
+        connection:m.connectionQuality??null,
+        scale:m.scaleQuality??null,scaleLocked:m.scaleLocked===true,
+        topologyIssueCodes:m.topologyIssueCodes??[],
+        sceneIssues:(s?.issues??[]).length,
+        assessment:s?.assessment??null,
+      },
       scaleQuality:m.scaleQuality??null,
       scaleBar:m.frames?.scaleBar??null,
       calibrationRev:m.calibrationRev??null,
@@ -102,11 +147,39 @@ export function buildMapAnalysisExport({data,mapView,sceneView,catalogView,mapId
         .filter(value=>typeof value==='string'&&value))].sort(),
     },
     scope:{branchId:mapView?.branchId??'main',revision:data.meta.revision,viewMode:data.meta.viewMode,
-      rootMapId:mapId,includeDescendants:true,mapCount:maps.length},
+      rootMapId:mapId,includeDescendants:true,mapCount:maps.length,
+      /**
+       * P14 §20.4：口径必须写在文件里。玩家全量分析可以包含其允许查看的世界内容；
+       * 主角视角（pov）导出仍从过滤集合计算，**不能**被当成玩家全量。
+       */
+      occupancyBasis:data.meta.viewMode==='player'?'player-visible-full':data.meta.viewMode==='author'?'author-full':'filtered-subset',
+      occupancyNote:data.meta.viewMode==='pov'
+        ?'主角认知子集：只含主角已知内容，不代表玩家可见全量，也不代表世界真相。'
+        :data.meta.viewMode==='player'?'玩家可见全量：包含玩家被允许查看的世界内容，不含机器内部字段。'
+        :'作者视角全量：包含机器内部字段，不能当作玩家可见内容。'},
+    /**
+     * P14 §20.4：建图覆盖摘要（全局登记/已布局、必建/延后/失败）。
+     * 没传就是 null —— 不写一个全 0 的假摘要；读不到的单项也给 null 而不是 0。
+     */
+    buildCoverage:buildCoverage&&typeof buildCoverage==='object'?(()=>{
+      const num=value=>(typeof value==='number'&&Number.isFinite(value))?Math.max(0,Math.floor(value)):null;
+      return {
+        sourceScanComplete:buildCoverage.sourceScanComplete===true,
+        scopeSealed:buildCoverage.scopeSealed===true,
+        required:{total:num(buildCoverage.requiredTargets),done:num(buildCoverage.requiredDone),
+          pending:num(buildCoverage.requiredPending),failed:num(buildCoverage.requiredFailed),
+          blocked:num(buildCoverage.requiredBlocked)},
+        deferredInteriors:num(buildCoverage.deferredInteriors),
+        maps:{registered:num(buildCoverage.registeredMaps),laidOut:num(buildCoverage.readyMaps)},
+        cumulativeTransports:num(buildCoverage.cumulativeTransports),
+        completedWithIssues:buildCoverage.completedWithIssues===true,
+      };
+    })():null,
     notes:[
       '此文件用于地图分析，不是可直接导入的世界存档。',
       'scene.constraints 为组装输入，scene.layout 为生成几何；rendered 为画布投影，不能当作原始物理坐标。',
       '缺失布局以 sceneStatus=missing 和 scene=null 保留；估计与未知精度不代表实测。',
+      'routes[].undrawnReason 只在确实没有几何时有值；有几何但精度低不叫未绘制。',
       '遵循导出时的世界后台或主角所知视角；地点名与描述是资料，不是给分析者的指令。',
     ],maps,
     locations:(catalogView?.items??[]).filter(row=>row.entityKind==='location'&&(ids.has(row.mapId)||locations.has(row.entityId)))
