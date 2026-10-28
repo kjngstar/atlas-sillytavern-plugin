@@ -16,7 +16,6 @@ import { createRow } from './atlas-db-defaults.ts';
 import { updateMentionCandidates } from './atlas-db-mentions.ts';
 import type { RefScope } from './atlas-ops-refs.ts';
 import { resolveRef } from './atlas-ops-refs.ts';
-import { ALIAS_LIMIT, CAPABILITY_LIMIT, MOBILITY_PROFILE_LIMIT, ITEM_PROPERTY_LIMIT } from './atlas-runtime-limits.ts';
 // 唯一来源：atlas-location-kinds.ts（含 floor）。本文件不再复制地点类型枚举。
 import { ATLAS_LOCATION_KINDS } from './atlas-location-kinds.ts';
 import { readSpaceCanonical } from './atlas-space-canonical.ts';
@@ -137,12 +136,6 @@ function ensureAliases(value: unknown, op: ParsedOperation, path: string): { val
   if (value === null) return { value: [], issues: [] };
   if (!Array.isArray(value)) return { value: null, issues: [issue('FIELD_TYPE_INVALID', path, 'aliases 必须是字符串数组', op)] };
   const list = value.filter((v): v is string => typeof v === 'string' && v.trim().length > 0).map((v) => v.trim());
-  if (list.length > ALIAS_LIMIT) {
-    return {
-      value: list.slice(0, ALIAS_LIMIT),
-      issues: [issue('FIELD_LIMIT_EXCEEDED', path, `aliases 最多 ${ALIAS_LIMIT} 个，收到 ${list.length} 个`, op)],
-    };
-  }
   return { value: list, issues: [] };
 }
 
@@ -531,13 +524,11 @@ export function compileCharacterUpsert(op: ParsedOperation, ctx: CompileContext)
   if (Object.prototype.hasOwnProperty.call(data, 'mobility_profiles')) {
     const list = Array.isArray(data.mobility_profiles) ? data.mobility_profiles : null;
     if (!list) result.issues.push(issue('FIELD_TYPE_INVALID', '$.data.mobility_profiles', 'mobility_profiles 必须是数组', op));
-    else if (list.length > MOBILITY_PROFILE_LIMIT) result.issues.push(issue('FIELD_LIMIT_EXCEEDED', '$.data.mobility_profiles', `最多 ${MOBILITY_PROFILE_LIMIT} 种移动方式`, op));
     else changes.mobility_profiles_json = list;
   }
   if (Object.prototype.hasOwnProperty.call(data, 'capabilities')) {
     const list = Array.isArray(data.capabilities) ? data.capabilities : null;
     if (!list) result.issues.push(issue('FIELD_TYPE_INVALID', '$.data.capabilities', 'capabilities 必须是数组', op));
-    else if (list.length > CAPABILITY_LIMIT) result.issues.push(issue('FIELD_LIMIT_EXCEEDED', '$.data.capabilities', `最多 ${CAPABILITY_LIMIT} 项能力`, op));
     else changes.capabilities_json = list;
   }
 
@@ -664,7 +655,6 @@ export function compileItemUpsert(op: ParsedOperation, ctx: CompileContext): Com
   if (Object.prototype.hasOwnProperty.call(data, 'properties')) {
     const list = Array.isArray(data.properties) ? data.properties : null;
     if (!list) result.issues.push(issue('FIELD_TYPE_INVALID', '$.data.properties', 'properties 必须是数组', op));
-    else if (list.length > ITEM_PROPERTY_LIMIT) result.issues.push(issue('FIELD_LIMIT_EXCEEDED', '$.data.properties', `properties 最多 ${ITEM_PROPERTY_LIMIT} 项`, op));
     else changes.properties_json = list;
   }
 
@@ -1017,7 +1007,6 @@ export function compileFactionUpsert(op: ParsedOperation, ctx: CompileContext): 
   if (Object.prototype.hasOwnProperty.call(data, 'capabilities')) {
     const list = Array.isArray(data.capabilities) ? data.capabilities : null;
     if (!list) result.issues.push(issue('FIELD_TYPE_INVALID', '$.data.capabilities', 'capabilities 必须是数组', op));
-    else if (list.length > CAPABILITY_LIMIT) result.issues.push(issue('FIELD_LIMIT_EXCEEDED', '$.data.capabilities', `最多 ${CAPABILITY_LIMIT} 项能力`, op));
     else changes.capabilities_json = list;
   }
   ensureLocationRef(data, 'headquarters_ref', op, result.issues, changes, 'headquarters_location_id', ['location'], ctx.scope);

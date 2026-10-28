@@ -24,7 +24,7 @@ import { SPATIAL_SCENE_KEY } from './atlas-spatial-frame.ts';
 import type { TableReadPort } from './atlas-ops-compile-types.ts';
 import type { ModelBatchRequest, Issue, ModelOperation, RequiredRef } from './atlas-ops-contract.ts';
 import { buildStagePrompt } from './atlas-ops-prompts.ts';
-import { budgetUsage, classifyOperation, constructionBudget } from './atlas-construction-budget.ts';
+import { constructionBudget } from './atlas-construction-budget.ts';
 import { buildSourceCatalogue } from './atlas-source-catalogue.ts';
 import { stable } from '../vendor/atlas-spatial/index.mjs';
 import type { CompletionPolicy, GenerationTask, PlanIssue, TaskCatalogue, WorldCompletionMode, WorldFillState } from './atlas-world-contract.ts';
@@ -96,20 +96,20 @@ function branchRootMapId(tables: TableReadPort, branchId: string): string {
   return branch ? asId(branch.root_map_id) : '';
 }
 
-/** 统一 limits 提供默认值；请求不得擅自抬高（02 §5）。 */
+/** Use planning defaults only when the caller has not supplied its own work budget. */
 export function normalizeCompletionPolicy(policy?: Partial<CompletionPolicy>): CompletionPolicy {
-  const clamp = (value: unknown, ceiling: number, floor = 0): number => {
-    const raw = typeof value === 'number' && Number.isFinite(value) ? Math.floor(value) : ceiling;
-    return Math.min(ceiling, Math.max(floor, raw));
+  const workAmount = (value: unknown, fallback: number): number => {
+    const raw = typeof value === 'number' && Number.isFinite(value) ? Math.floor(value) : fallback;
+    return Math.max(0, raw);
   };
   const workload=policy?.budgetMode==='workload';
   return {
     version: 1,
     density: 'balanced',
     ...(workload?{budgetMode:'workload' as const}:{}),
-    maxNewLocations: clamp(policy?.maxNewLocations, workload?ATLAS_RUNTIME_LIMITS.operationsPerResponse:ATLAS_RUNTIME_LIMITS.newLocationsPerBatch),
-    maxNewRoutes: clamp(policy?.maxNewRoutes, workload?ATLAS_RUNTIME_LIMITS.operationsPerResponse:ATLAS_RUNTIME_LIMITS.newRoutesPerBatch),
-    maxAdditionalDepth: clamp(policy?.maxAdditionalDepth, workload?ATLAS_RUNTIME_LIMITS.locationDepth:ATLAS_RUNTIME_LIMITS.additionalParentDepthPerBatch),
+    maxNewLocations: workAmount(policy?.maxNewLocations, workload?ATLAS_RUNTIME_LIMITS.constructionOperationsPerBatch:ATLAS_RUNTIME_LIMITS.newLocationsPerBatch),
+    maxNewRoutes: workAmount(policy?.maxNewRoutes, workload?ATLAS_RUNTIME_LIMITS.constructionOperationsPerBatch:ATLAS_RUNTIME_LIMITS.newRoutesPerBatch),
+    maxAdditionalDepth: workAmount(policy?.maxAdditionalDepth, workload?ATLAS_RUNTIME_LIMITS.locationDepth:ATLAS_RUNTIME_LIMITS.additionalParentDepthPerBatch),
   };
 }
 
@@ -359,7 +359,7 @@ function buildConstructionRequest(
     '未获已注册事实支持的新地点必须写 existence_quality=inferred，不要自称 confirmed。',
     '禁止输出 event / character / item / time 相关操作：本阶段只做空间结构。',
     // P02 §8 第 1 条：共同总额必须写在模型看得见的地方，不能只靠报错教育它。
-    '本批所有非 noop 操作共用一个总额（见【当前范围与预算】的 totalOperations）：新增地点、新增路线、地点更新、尺度估计一起占用这个额度。newLocations / newRoutes 是总额之内更细的分类上限，**不是额外通道**——不要以为「地点 64、路线 64」就能输出 128 条。超出的部分会被延后到下一批，本批视为未完成。',
+    '按本批 maxNewLocations / maxNewRoutes 和依赖范围建设；更新、尺度估计等有效操作没有额外的固定条数限制。未完成的建设目标保留到后续窗口。',
     '没有需要修改的数据时输出 {"op":"noop"}。',
   ].join('\n');
 
@@ -374,7 +374,7 @@ function buildConstructionRequest(
     `maxNewRoutes=${policy.maxNewRoutes}`,
     `maxAdditionalDepth=${policy.maxAdditionalDepth}`,
     // 共同总额放在行尾：`focus=…、maxNewLocations=…` 的前缀形状是既有下游解析依赖，不要插到中间。
-    `totalOperations=${totalBudget.totalOperations}`,
+    `totalOperations=${totalBudget.totalOperations ?? 'unlimited'}`,
   ].join('、');
 
   /**
@@ -750,39 +750,5 @@ export function normalizeConstructionOps(input: NormalizeConstructionInput): Nor
     return false;
   });
 
-  // ── P02 §8 第 1/4 条：共同总额（F03 的生成侧修复）──
-  //
-  // 旧实现只分别检查「新地点数 / 新路线数 / 展开深度」，没有检查**非 noop 操作总数**：
-  // 于是「地点 64 条」能通过 normalize，却在解析器被 TOO_MANY_OPERATIONS 截掉，
-  // 模型以为自己交完了，差额静默消失。
-  // 这里把共同额度提前到生成侧：超出的操作明确延后并报出，解析器那边不会再掉操作。
-  const totalBudget = constructionBudget({
-    maxNewLocations: policy.maxNewLocations,
-    maxNewRoutes: policy.maxNewRoutes,
-  });
-  const totalUsage = budgetUsage(bounded, known);
-  const withinTotal: ModelOperation[] = [];
-  let usedTotal = 0;
-  for (const op of bounded) {
-    const cls = classifyOperation(op, known);
-    if (cls === 'noop') {
-      withinTotal.push(op);
-      continue;
-    }
-    if (usedTotal + 1 > totalBudget.totalOperations) {
-      issues.push({
-        code: 'WORLD_CONSTRUCTION_BUDGET_EXCEEDED',
-        path: `$.operations.${op.op}.${str(op.ref)}`,
-        message: `${str(op.ref) || op.op} 超出本批共同预算 ${totalBudget.totalOperations} 条非 noop 操作`
-          + `（本批共 ${totalUsage.total} 条；地点与路线共用同一总额，不是各 64 条）；留待下一批建设。`,
-        severity: 'warning',
-        retryable: true,
-      });
-      continue;
-    }
-    usedTotal += 1;
-    withinTotal.push(op);
-  }
-
-  return { operations: withinTotal, issues, downgraded, protectedDrops };
+  return { operations: bounded, issues, downgraded, protectedDrops };
 }

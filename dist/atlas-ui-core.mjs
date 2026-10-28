@@ -40,7 +40,7 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 var define_ATLAS_BUILD_INFO_default;
 var init_define_ATLAS_BUILD_INFO = __esm({
   "<define:__ATLAS_BUILD_INFO__>"() {
-    define_ATLAS_BUILD_INFO_default = { pluginVersion: "0.9.99", buildId: "build-aba473d270683e1d", buildCommit: "a49f0ef76b6e8d6a0a7a4f754f03fa4dd4eef51d", buildDirty: false };
+    define_ATLAS_BUILD_INFO_default = { pluginVersion: "0.9.99", buildId: "build-19f264a75db3ab57", buildCommit: "8752664c2a01041593f891a0aeded5ef5f8db4b4", buildDirty: false };
   }
 });
 
@@ -81,8 +81,8 @@ var init_atlas_runtime_limits = __esm({
     init_define_ATLAS_BUILD_INFO();
     ATLAS_RUNTIME_LIMITS = {
       responseUtf8Bytes: 256 * 1024,
-      operationsPerResponse: 64,
-      operationUtf8Bytes: 8 * 1024,
+      /** Planned construction work per window; never a parser or response acceptance limit. */
+      constructionOperationsPerBatch: 64,
       /** map.layout.request 的 spec 预算（与空间生成器 inputBytes 一致）。 */
       layoutSpecUtf8Bytes: 64 * 1024,
       responseJsonDepth: 16,
@@ -120,12 +120,6 @@ var init_atlas_runtime_limits = __esm({
       /** 单个批次最多把本次目标再向下展开的父边数。 */
       additionalParentDepthPerBatch: 2,
       batchOutputReserveTokens: 384,
-      /** 单张概览图的分区上限（G11 场景体积预算）。 */
-      overviewZoneLimit: 64,
-      /** 单张概览图的地物上限。 */
-      overviewFeatureLimit: 128,
-      /** 单张概览图的连接（路线/水系）上限。 */
-      overviewLinkLimit: 128,
       /** 保存场景（maps.frame_json.atlasScene）的 UTF-8 字节上限，与 vendor 生成器一致。 */
       sceneSaveUtf8Bytes: 512 * 1024,
       /** 定向引用目录单次解析的最大条目数（超过则要求更窄的目标范围）。 */
@@ -140,11 +134,6 @@ var init_atlas_runtime_limits = __esm({
       feedTurnJournalMax: 2e3
     };
     ATLAS_FIELD_LIMITS = {
-      aliasLimit: 8,
-      capabilityLimit: 16,
-      mobilityProfileLimit: 8,
-      itemPropertyLimit: 16,
-      participantsLimit: 16,
       geometryVertexLimit: 256,
       mentionRecentLimit: 8,
       journeySegmentLimit: 32,
@@ -3841,7 +3830,7 @@ var init_atlas_map_topology = __esm({
 });
 
 // src/atlas-db-invariants.ts
-var LOCATION_DEPTH, CONTAINER_DEPTH, ACTION_PLAN_DEPTH, CAPABILITY_LIMIT, MOBILITY_PROFILE_LIMIT, ALIAS_LIMIT, PARTICIPANTS_LIMIT, GEOMETRY_VERTEX_LIMIT, ITEM_PROPERTY_LIMIT, MENTION_RECENT_LIMIT;
+var LOCATION_DEPTH, CONTAINER_DEPTH, ACTION_PLAN_DEPTH, GEOMETRY_VERTEX_LIMIT, MENTION_RECENT_LIMIT;
 var init_atlas_db_invariants = __esm({
   "src/atlas-db-invariants.ts"() {
     "use strict";
@@ -3854,12 +3843,7 @@ var init_atlas_db_invariants = __esm({
     LOCATION_DEPTH = ATLAS_RUNTIME_LIMITS.locationDepth;
     CONTAINER_DEPTH = ATLAS_RUNTIME_LIMITS.containerDepth;
     ACTION_PLAN_DEPTH = ATLAS_RUNTIME_LIMITS.actionPlanDepth;
-    CAPABILITY_LIMIT = ATLAS_FIELD_LIMITS.capabilityLimit;
-    MOBILITY_PROFILE_LIMIT = ATLAS_FIELD_LIMITS.mobilityProfileLimit;
-    ALIAS_LIMIT = ATLAS_FIELD_LIMITS.aliasLimit;
-    PARTICIPANTS_LIMIT = ATLAS_FIELD_LIMITS.participantsLimit;
     GEOMETRY_VERTEX_LIMIT = ATLAS_FIELD_LIMITS.geometryVertexLimit;
-    ITEM_PROPERTY_LIMIT = ATLAS_FIELD_LIMITS.itemPropertyLimit;
     MENTION_RECENT_LIMIT = ATLAS_FIELD_LIMITS.mentionRecentLimit;
   }
 });
@@ -4056,7 +4040,7 @@ var init_contracts = __esm({
   "vendor/atlas-spatial/contracts.mjs"() {
     "use strict";
     init_define_ATLAS_BUILD_INFO();
-    LIMITS = Object.freeze({ inputBytes: 65536, sceneBytes: 524288, rooms: 24, contents: 128, actors: 128, items: 256, districts: 16, buildings: 64, blocksPerDistrict: 24, floorSide: 100, roomSide: 40, citySide: 2e4, navigationCells: 18e4, markers: 512, overlays: 256, pathPoints: 2048, zones: 64, features: 128, links: 128, watercourseSegments: 24 });
+    LIMITS = Object.freeze({ inputBytes: 65536, sceneBytes: 524288, blocksPerDistrict: 24, navigationCells: 18e4, markers: 512, overlays: 256, pathPoints: 2048, watercourseSegments: 24 });
     OVERVIEW_FEATURE_TYPES = Object.freeze(["forest_texture", "ridge", "shore", "building_cluster", "road_texture", "ruins_scatter", "watercourse"]);
     OVERVIEW_SURFACES = Object.freeze(["mixed", "urban", "forest", "mountain", "water", "indoor", "void"]);
     OVERVIEW_ZONE_ROLES = Object.freeze(["city", "settlement", "forest", "water", "mountain", "ruins", "district", "campus", "land", "other"]);
@@ -4334,7 +4318,6 @@ var init_atlas_ops_entities = __esm({
     init_atlas_db_defaults();
     init_atlas_db_mentions();
     init_atlas_ops_refs();
-    init_atlas_runtime_limits();
     init_atlas_location_kinds();
     init_atlas_space_canonical();
     init_atlas_furnishing_promotion();
@@ -5333,14 +5316,13 @@ var init_atlas_world_build_state = __esm({
   "src/atlas-world-build-state.ts"() {
     "use strict";
     init_define_ATLAS_BUILD_INFO();
-    init_atlas_runtime_limits();
     init_atlas_hash();
     init_atlas_construction_progress();
     init_atlas_construction_scheduler();
     init_atlas_world_build_plan();
     init_atlas_world_build_contract();
     init_atlas_world_fact_policy();
-    WORLD_BUILD_PAYLOAD_BUDGET_BYTES = ATLAS_RUNTIME_LIMITS.operationUtf8Bytes;
+    WORLD_BUILD_PAYLOAD_BUDGET_BYTES = 8 * 1024;
   }
 });
 
@@ -5536,7 +5518,6 @@ var init_atlas_construction_budget = __esm({
   "src/atlas-construction-budget.ts"() {
     "use strict";
     init_define_ATLAS_BUILD_INFO();
-    init_atlas_runtime_limits();
   }
 });
 
@@ -5667,7 +5648,6 @@ var init_atlas_ops_events = __esm({
     init_atlas_db_defaults();
     init_atlas_ops_refs();
     init_atlas_ops_entities();
-    init_atlas_runtime_limits();
     init_atlas_furnishing_promotion();
     init_atlas_furnishing_promotion();
     init_atlas_space_canonical();
@@ -5698,7 +5678,6 @@ var init_atlas_ops_space_state = __esm({
     init_atlas_world_build_state();
     init_atlas_construction_progress();
     init_atlas_hash();
-    init_atlas_ops_normalize();
   }
 });
 
@@ -7353,7 +7332,6 @@ function hasLegacySqlPromptProtocol(content) {
 }
 function buildSqlCompatiblePrompt(source) {
   const original = source.segments?.length ? source.segments.map((s) => ({ ...s })) : source.systemPrompt ? [{ role: "system", content: source.systemPrompt, name: "原预设" }] : [];
-  if (original.length >= 16) return null;
   const disabled = [];
   for (const [index, segment] of original.entries()) {
     if (hasLegacySqlPromptProtocol(segment.content)) {
@@ -7361,10 +7339,9 @@ function buildSqlCompatiblePrompt(source) {
       disabled.push(segment.name || `原条目 ${index + 1}`);
     }
   }
-  const defaults = original.length <= 10 ? DEFAULT_SQL_PROMPT_SEGMENTS.map((s) => ({ ...s })) : [{ role: "system", name: "SQL 世界维护策略", content: DEFAULT_SQL_PROMPT_SEGMENTS.map((s) => `${s.name}
-${s.content}`).join("\n\n") }];
+  const defaults = DEFAULT_SQL_PROMPT_SEGMENTS.map((s) => ({ ...s }));
   return {
-    name: `${source.name}（SQL 兼容草稿）`.slice(0, 64),
+    name: `${source.name}（SQL 兼容草稿）`,
     systemPrompt: source.systemPrompt,
     segments: [...defaults, ...original],
     replacedKeywords: disabled
@@ -7462,7 +7439,7 @@ function buildTableDeltaCompatiblePrompt(oldPreset) {
       body = body.replace(pattern, replacement);
     }
   }
-  const name = `${oldPreset.name}（增量兼容草稿）`.slice(0, 64);
+  const name = `${oldPreset.name}（增量兼容草稿）`;
   const segments = [
     ...DEFAULT_PROMPT_SEGMENTS_TABLE_DELTA.map((segment) => ({
       role: segment.role,
@@ -7475,23 +7452,18 @@ function buildTableDeltaCompatiblePrompt(oldPreset) {
     segments.push({
       role: "user",
       name: "原预设摘录（旧协议关键词已在新草稿里改写）",
-      content: body.trim().slice(0, MAX_PROMPT_CHARS)
+      content: body.trim()
     });
   }
   return {
     name,
-    systemPrompt: body.trim().slice(0, MAX_PROMPT_CHARS),
-    segments: segments.slice(0, MAX_PROMPT_SEGMENTS),
+    systemPrompt: body.trim(),
+    segments,
     replacedKeywords: Array.from(new Set(replacedKeywords)).slice(0, 16)
   };
 }
 var ATLAS_SETTINGS_SCHEMA_VERSION = 2;
 var BUILTIN_PROMPT_PRESET_ID = "builtin-default";
-var MAX_PRESETS_PER_LIBRARY = 20;
-var MAX_NAME_CHARS = 64;
-var MAX_ENDPOINT_CHARS = 2048;
-var MAX_MODEL_CHARS = 128;
-var MAX_API_KEY_CHARS = 4096;
 var MIN_MAX_TOKENS = 0;
 var MAX_MAX_TOKENS = Number.MAX_SAFE_INTEGER;
 var MIN_TEMPERATURE = 0;
@@ -7500,7 +7472,6 @@ var MIN_TOP_P = 0;
 var MAX_TOP_P = 1;
 var MIN_TIMEOUT_MS = 1e3;
 var MAX_TIMEOUT_MS = 12e5;
-var MAX_PROMPT_CHARS = 8e3;
 var MIN_RPM = 1;
 var MAX_RPM = 600;
 var ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
@@ -7521,20 +7492,18 @@ function normalizePromptPostProcessing(raw) {
   return PROMPT_POST_PROCESSING.includes(normalized) ? normalized : "strict";
 }
 var PROMPT_SEGMENT_ROLES = ["system", "user", "assistant"];
-var MAX_PROMPT_SEGMENTS = 16;
 function normalizePromptSegments(raw) {
   if (!Array.isArray(raw)) return [];
   const segments = [];
-  for (const entry of raw.slice(0, MAX_PROMPT_SEGMENTS * 2)) {
+  for (const entry of raw) {
     if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
     const record = entry;
     const role = typeof record.role === "string" ? record.role.trim().toLowerCase() : "";
     if (!PROMPT_SEGMENT_ROLES.includes(role)) continue;
     const content = typeof record.content === "string" ? record.content.trim() : "";
     if (!content) continue;
-    if (segments.length >= MAX_PROMPT_SEGMENTS) break;
-    const segment = { role, content: content.slice(0, MAX_PROMPT_CHARS) };
-    if (typeof record.name === "string" && record.name.trim()) segment.name = record.name.trim().slice(0, 64);
+    const segment = { role, content };
+    if (typeof record.name === "string" && record.name.trim()) segment.name = record.name.trim();
     if (record.mainSlot === "A" || record.mainSlot === "B" || record.mainSlot === "") {
       segment.mainSlot = record.mainSlot;
     }
@@ -7572,21 +7541,11 @@ function fingerprintOfConnection(input) {
   return [input.endpoint, input.model, input.apiKey, input.maxTokens, input.temperature, input.topP, input.timeoutMs].join("\0");
 }
 function uniqueName(base, used) {
-  const trimmed = base.trim().slice(0, MAX_NAME_CHARS) || "未命名";
-  if (!used.has(trimmed)) {
-    used.add(trimmed);
-    return trimmed;
-  }
-  for (let n = 2; n < 1e3; n += 1) {
-    const candidate = `${trimmed} (${n})`.slice(0, MAX_NAME_CHARS);
-    if (!used.has(candidate)) {
-      used.add(candidate);
-      return candidate;
-    }
-  }
-  const fallback = `${trimmed} (${Date.now()})`.slice(0, MAX_NAME_CHARS);
-  used.add(fallback);
-  return fallback;
+  const trimmed = base.trim() || "未命名";
+  let candidate = trimmed;
+  for (let n = 2; used.has(candidate); n += 1) candidate = `${trimmed} (${n})`;
+  used.add(candidate);
+  return candidate;
 }
 function resolveId(kind, index, fingerprint, deps, usedIds) {
   const injected = deps.legacyIdFor ? normalizeId(deps.legacyIdFor(kind, index, fingerprint)) : null;
@@ -7626,13 +7585,13 @@ function parseConnectionPreset(raw) {
   const record = raw;
   const id = normalizeId(record.id);
   if (!id) return null;
-  if (typeof record.name !== "string" || !record.name.trim() || record.name.length > MAX_NAME_CHARS) return null;
+  if (typeof record.name !== "string" || !record.name.trim()) return null;
   const connectionMode = normalizeConnectionMode(record.connectionMode);
-  const endpointOk = connectionMode !== "custom" || typeof record.endpoint === "string" && record.endpoint.length <= MAX_ENDPOINT_CHARS && isHttpUrl(record.endpoint);
+  const endpointOk = connectionMode !== "custom" || typeof record.endpoint === "string" && isHttpUrl(record.endpoint);
   if (!endpointOk) return null;
-  const modelOk = connectionMode !== "custom" || typeof record.model === "string" && !!record.model.trim() && record.model.length <= MAX_MODEL_CHARS;
+  const modelOk = connectionMode !== "custom" || typeof record.model === "string" && !!record.model.trim();
   if (!modelOk) return null;
-  if (typeof record.apiKey !== "string" || record.apiKey.length > MAX_API_KEY_CHARS) return null;
+  if (typeof record.apiKey !== "string") return null;
   if (!isFiniteIntIn(record.maxTokens, MIN_MAX_TOKENS, MAX_MAX_TOKENS)) return null;
   if (!isFiniteIn(record.temperature, MIN_TEMPERATURE, MAX_TEMPERATURE)) return null;
   if (!isFiniteIntIn(record.timeoutMs, MIN_TIMEOUT_MS, MAX_TIMEOUT_MS)) return null;
@@ -7649,13 +7608,13 @@ function parseConnectionPreset(raw) {
     topP: isFiniteIn(record.topP, MIN_TOP_P, MAX_TOP_P) ? record.topP : 0.95,
     timeoutMs: record.timeoutMs,
     ...normalizeApiFormat(record.apiFormat) !== "openai" ? { apiFormat: normalizeApiFormat(record.apiFormat) } : {},
-    ...typeof record.profileId === "string" && record.profileId.trim() ? { profileId: record.profileId.trim().slice(0, 128) } : {},
+    ...typeof record.profileId === "string" && record.profileId.trim() ? { profileId: record.profileId.trim() } : {},
     ...record.toolCalling === true ? { toolCalling: true } : {},
-    ...typeof record.bodyParams === "string" && record.bodyParams.trim() ? { bodyParams: record.bodyParams.slice(0, 4e3) } : {},
-    ...typeof record.excludeBodyParams === "string" && record.excludeBodyParams.trim() ? { excludeBodyParams: record.excludeBodyParams.slice(0, 2e3) } : {},
-    ...typeof record.requestHeaders === "string" && record.requestHeaders.trim() ? { requestHeaders: record.requestHeaders.slice(0, 2e3) } : {},
+    ...typeof record.bodyParams === "string" && record.bodyParams.trim() ? { bodyParams: record.bodyParams } : {},
+    ...typeof record.excludeBodyParams === "string" && record.excludeBodyParams.trim() ? { excludeBodyParams: record.excludeBodyParams } : {},
+    ...typeof record.requestHeaders === "string" && record.requestHeaders.trim() ? { requestHeaders: record.requestHeaders } : {},
     ...typeof record.promptPostProcessing === "string" ? { promptPostProcessing: normalizePromptPostProcessing(record.promptPostProcessing) } : {},
-    ...typeof record.systemPrompt === "string" && record.systemPrompt.trim() ? { systemPrompt: record.systemPrompt.slice(0, MAX_PROMPT_CHARS) } : {}
+    ...typeof record.systemPrompt === "string" && record.systemPrompt.trim() ? { systemPrompt: record.systemPrompt } : {}
   };
 }
 function parsePromptPreset(raw) {
@@ -7663,15 +7622,15 @@ function parsePromptPreset(raw) {
   const record = raw;
   const id = normalizeId(record.id);
   if (!id || id === BUILTIN_PROMPT_PRESET_ID) return null;
-  if (typeof record.name !== "string" || !record.name.trim() || record.name.length > MAX_NAME_CHARS) return null;
+  if (typeof record.name !== "string" || !record.name.trim()) return null;
   if (record.systemPrompt != null && typeof record.systemPrompt !== "string") return null;
   const prompt = typeof record.systemPrompt === "string" ? record.systemPrompt.trim() : "";
   const segments = normalizePromptSegments(record.segments);
-  if ((!prompt || prompt.length > MAX_PROMPT_CHARS) && segments.length === 0) return null;
+  if (!prompt && segments.length === 0) return null;
   return {
     id,
     name: record.name.trim(),
-    systemPrompt: prompt.slice(0, MAX_PROMPT_CHARS),
+    systemPrompt: prompt,
     ...segments.length > 0 ? { segments } : {},
     ...normalizeContextTurnCount(record.contextTurnCount) !== null ? { contextTurnCount: normalizeContextTurnCount(record.contextTurnCount) } : {}
   };
@@ -7690,14 +7649,9 @@ function sanitizeSettingsV2(raw, deps = {}) {
   const seenIds = /* @__PURE__ */ new Set();
   const apiPresets = [];
   if (Array.isArray(record.apiPresets)) {
-    for (const entry of record.apiPresets.slice(0, MAX_PRESETS_PER_LIBRARY * 4)) {
+    for (const entry of record.apiPresets) {
       const parsed = parseConnectionPreset(entry);
       if (!parsed || seenIds.has(parsed.id)) {
-        diagnostics.skipped += 1;
-        diagnostics.apiSkipped += 1;
-        continue;
-      }
-      if (apiPresets.length >= MAX_PRESETS_PER_LIBRARY) {
         diagnostics.skipped += 1;
         diagnostics.apiSkipped += 1;
         continue;
@@ -7709,14 +7663,9 @@ function sanitizeSettingsV2(raw, deps = {}) {
   }
   const promptPresets = [];
   if (Array.isArray(record.promptPresets)) {
-    for (const entry of record.promptPresets.slice(0, MAX_PRESETS_PER_LIBRARY * 4)) {
+    for (const entry of record.promptPresets) {
       const parsed = parsePromptPreset(entry);
       if (!parsed || seenIds.has(parsed.id)) {
-        diagnostics.skipped += 1;
-        diagnostics.promptSkipped += 1;
-        continue;
-      }
-      if (promptPresets.length >= MAX_PRESETS_PER_LIBRARY) {
         diagnostics.skipped += 1;
         diagnostics.promptSkipped += 1;
         continue;
@@ -7757,10 +7706,10 @@ function sanitizeSettingsV2(raw, deps = {}) {
 function parseLegacyPreset(raw) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
   const record = raw;
-  if (typeof record.name !== "string" || !record.name.trim() || record.name.length > MAX_NAME_CHARS) return null;
-  if (typeof record.endpoint !== "string" || record.endpoint.length > MAX_ENDPOINT_CHARS || !isHttpUrl(record.endpoint)) return null;
-  if (typeof record.model !== "string" || !record.model.trim() || record.model.length > MAX_MODEL_CHARS) return null;
-  const apiKey = typeof record.apiKey === "string" && record.apiKey.length <= MAX_API_KEY_CHARS ? record.apiKey : null;
+  if (typeof record.name !== "string" || !record.name.trim()) return null;
+  if (typeof record.endpoint !== "string" || !isHttpUrl(record.endpoint)) return null;
+  if (typeof record.model !== "string" || !record.model.trim()) return null;
+  const apiKey = typeof record.apiKey === "string" ? record.apiKey : null;
   if (apiKey === null) return null;
   const maxTokens = isFiniteIntIn(record.maxTokens, MIN_MAX_TOKENS, MAX_MAX_TOKENS) ? record.maxTokens : 0;
   const temperature = isFiniteIn(record.temperature, MIN_TEMPERATURE, MAX_TEMPERATURE) ? record.temperature : 0.7;
@@ -7812,7 +7761,7 @@ function migrateAtlasSettings(raw, deps = {}) {
     const isActiveSource = entry === record.worldTurn;
     if (isActiveSource) settings.activeApiPresetId = apiId;
     const promptText = legacy.systemPrompt.trim();
-    if (!promptText || promptText.length > MAX_PROMPT_CHARS) continue;
+    if (!promptText) continue;
     if (!promptByText.has(promptText)) {
       const promptId = resolveId("prompt", promptByText.size, promptText, deps, usedIds);
       promptByText.set(promptText, promptId);
@@ -7862,30 +7811,18 @@ function applySettingsCommand(settings, command, deps = {}) {
     case "api.save": {
       const preset = command.preset;
       const connectionMode = normalizeConnectionMode(preset.connectionMode);
-      if (typeof preset.name !== "string" || !preset.name.trim() || preset.name.length > MAX_NAME_CHARS) {
-        return fail3(settings, "INVALID_PAYLOAD", "连接名称必填且不超过 64 字。");
+      if (typeof preset.name !== "string" || !preset.name.trim()) {
+        return fail3(settings, "INVALID_PAYLOAD", "连接名称必填。");
       }
       if (connectionMode === "custom") {
-        if (typeof preset.endpoint !== "string" || preset.endpoint.length > MAX_ENDPOINT_CHARS || !isHttpUrl(preset.endpoint)) {
+        if (typeof preset.endpoint !== "string" || !isHttpUrl(preset.endpoint)) {
           return fail3(settings, "INVALID_PAYLOAD", "端点必须是 http(s) 绝对地址。");
         }
-        if (typeof preset.model !== "string" || !preset.model.trim() || preset.model.length > MAX_MODEL_CHARS) {
-          return fail3(settings, "INVALID_PAYLOAD", "模型名必填且不超过 128 字。");
+        if (typeof preset.model !== "string" || !preset.model.trim()) {
+          return fail3(settings, "INVALID_PAYLOAD", "模型名必填。");
         }
       } else if (connectionMode === "profile" && !(typeof preset.profileId === "string" && !!preset.profileId.trim())) {
         return fail3(settings, "INVALID_PAYLOAD", "酒馆连接预设模式需要选择连接预设。");
-      }
-      if (typeof preset.bodyParams === "string" && preset.bodyParams.length > 4e3) {
-        return fail3(settings, "INVALID_PAYLOAD", "附加请求体参数不超过 4000 字。");
-      }
-      if (typeof preset.excludeBodyParams === "string" && preset.excludeBodyParams.length > 2e3) {
-        return fail3(settings, "INVALID_PAYLOAD", "排除请求体字段不超过 2000 字。");
-      }
-      if (typeof preset.requestHeaders === "string" && preset.requestHeaders.length > 2e3) {
-        return fail3(settings, "INVALID_PAYLOAD", "附加请求标头不超过 2000 字。");
-      }
-      if (typeof preset.systemPrompt === "string" && preset.systemPrompt.length > MAX_PROMPT_CHARS) {
-        return fail3(settings, "INVALID_PAYLOAD", `System Prompt 不超过 ${MAX_PROMPT_CHARS} 字。`);
       }
       if (!isFiniteIntIn(preset.maxTokens, MIN_MAX_TOKENS, MAX_MAX_TOKENS)) {
         return fail3(settings, "INVALID_PAYLOAD", "输出上限需为非负安全整数；0 表示不指定，由服务商或酒馆连接决定。");
@@ -7916,13 +7853,10 @@ function applySettingsCommand(settings, command, deps = {}) {
         apiKey = "";
       } else {
         const rawKey = command.apiKey ?? "";
-        if (typeof rawKey !== "string" || rawKey.length > MAX_API_KEY_CHARS) {
-          return fail3(settings, "INVALID_PAYLOAD", "密钥必须是字符串且不超过 4096 字。");
+        if (typeof rawKey !== "string") {
+          return fail3(settings, "INVALID_PAYLOAD", "密钥必须是字符串。");
         }
         apiKey = rawKey;
-      }
-      if (existingIndex < 0 && settings.apiPresets.length >= MAX_PRESETS_PER_LIBRARY) {
-        return fail3(settings, "FIELD_LIMIT_EXCEEDED", `最多保存 ${MAX_PRESETS_PER_LIBRARY} 条 API 连接。`);
       }
       const usedApiNames = new Set(settings.apiPresets.filter((_, i) => i !== existingIndex).map((p) => p.name));
       const entry = {
@@ -7945,13 +7879,13 @@ function applySettingsCommand(settings, command, deps = {}) {
         topP: preset.topP,
         timeoutMs: preset.timeoutMs,
         ...normalizeApiFormat(preset.apiFormat) !== "openai" ? { apiFormat: normalizeApiFormat(preset.apiFormat) } : {},
-        ...connectionMode === "profile" && typeof preset.profileId === "string" && preset.profileId.trim() ? { profileId: preset.profileId.trim().slice(0, 128) } : {},
+        ...connectionMode === "profile" && typeof preset.profileId === "string" && preset.profileId.trim() ? { profileId: preset.profileId.trim() } : {},
         ...preset.toolCalling === true ? { toolCalling: true } : {},
-        ...typeof preset.bodyParams === "string" && preset.bodyParams.trim() ? { bodyParams: preset.bodyParams.slice(0, 4e3) } : {},
-        ...typeof preset.excludeBodyParams === "string" && preset.excludeBodyParams.trim() ? { excludeBodyParams: preset.excludeBodyParams.slice(0, 2e3) } : {},
-        ...typeof preset.requestHeaders === "string" && preset.requestHeaders.trim() ? { requestHeaders: preset.requestHeaders.slice(0, 2e3) } : {},
+        ...typeof preset.bodyParams === "string" && preset.bodyParams.trim() ? { bodyParams: preset.bodyParams } : {},
+        ...typeof preset.excludeBodyParams === "string" && preset.excludeBodyParams.trim() ? { excludeBodyParams: preset.excludeBodyParams } : {},
+        ...typeof preset.requestHeaders === "string" && preset.requestHeaders.trim() ? { requestHeaders: preset.requestHeaders } : {},
         ...typeof preset.promptPostProcessing === "string" ? { promptPostProcessing: normalizePromptPostProcessing(preset.promptPostProcessing) } : {},
-        ...typeof preset.systemPrompt === "string" && preset.systemPrompt.trim() ? { systemPrompt: preset.systemPrompt.trim().slice(0, MAX_PROMPT_CHARS) } : {},
+        ...typeof preset.systemPrompt === "string" && preset.systemPrompt.trim() ? { systemPrompt: preset.systemPrompt.trim() } : {},
         updatedAt: now
       };
       const apiPresets = existingIndex >= 0 ? settings.apiPresets.map((p, i) => i === existingIndex ? entry : p) : [...settings.apiPresets, entry];
@@ -7986,8 +7920,8 @@ function applySettingsCommand(settings, command, deps = {}) {
       if (preset.id !== void 0 && normalizeId(preset.id) === BUILTIN_PROMPT_PRESET_ID) {
         return fail3(settings, "INVALID_PAYLOAD", "内置默认提示词不可覆盖，请另存为新预设。");
       }
-      if (typeof preset.name !== "string" || !preset.name.trim() || preset.name.length > MAX_NAME_CHARS) {
-        return fail3(settings, "INVALID_PAYLOAD", "提示词名称必填且不超过 64 字。");
+      if (typeof preset.name !== "string" || !preset.name.trim()) {
+        return fail3(settings, "INVALID_PAYLOAD", "提示词名称必填。");
       }
       const text2 = typeof preset.systemPrompt === "string" ? preset.systemPrompt.trim() : "";
       const segments = normalizePromptSegments(preset.segments);
@@ -7995,15 +7929,11 @@ function applySettingsCommand(settings, command, deps = {}) {
       if (segments.length > 0 && !segments.some((segment) => segment.enabled !== false)) {
         return fail3(settings, "INVALID_PAYLOAD", "请至少启用一个非空提示词条目，再保存预设。");
       }
-      if (text2.length > MAX_PROMPT_CHARS) return fail3(settings, "FIELD_LIMIT_EXCEEDED", `提示词不超过 ${MAX_PROMPT_CHARS} 字。`);
       const targetId = preset.id === void 0 ? null : normalizeId(preset.id);
       if (preset.id !== void 0 && targetId === null) return fail3(settings, "INVALID_PAYLOAD", "预设 ID 形状非法。");
       const existingIndex = targetId ? settings.promptPresets.findIndex((p) => p.id === targetId) : -1;
       if (command.create === true && existingIndex >= 0) return fail3(settings, "INVALID_PAYLOAD", "新建提示词标识已存在。");
       if (targetId && existingIndex < 0 && command.create !== true) return fail3(settings, "INVALID_PAYLOAD", "要更新的提示词预设不存在（另存为请省略 id）。");
-      if (existingIndex < 0 && settings.promptPresets.length >= MAX_PRESETS_PER_LIBRARY) {
-        return fail3(settings, "FIELD_LIMIT_EXCEEDED", `最多保存 ${MAX_PRESETS_PER_LIBRARY} 条提示词预设。`);
-      }
       const usedNames = new Set(settings.promptPresets.filter((_, i) => i !== existingIndex).map((p) => p.name));
       const entry = {
         id: targetId ?? resolveId("prompt", settings.promptPresets.length, text2, deps, new Set(settings.promptPresets.map((p) => p.id))),
@@ -8023,10 +7953,6 @@ function applySettingsCommand(settings, command, deps = {}) {
       const source = settings.promptPresets.find((p) => p.id === id);
       if (!source) return fail3(settings, "INVALID_PAYLOAD", "要迁移的提示词预设不存在。");
       const built = command.action === "prompt.migrate-sql" ? buildSqlCompatiblePrompt(source) : buildTableDeltaCompatiblePrompt(source);
-      if (!built) return fail3(settings, "FIELD_LIMIT_EXCEEDED", "原预设已有 16 个条目，兼容草稿没有空间加入 SQL 策略；请先复制整理条目。原预设未改动。");
-      if (settings.promptPresets.length >= MAX_PRESETS_PER_LIBRARY) {
-        return fail3(settings, "FIELD_LIMIT_EXCEEDED", `最多保存 ${MAX_PRESETS_PER_LIBRARY} 条提示词预设；请先删除一条再迁移。`);
-      }
       const usedNames = new Set(settings.promptPresets.map((p) => p.name));
       const entry = {
         id: resolveId("prompt", settings.promptPresets.length, `${built.name}:${built.systemPrompt}`, deps, new Set(settings.promptPresets.map((p) => p.id))),
@@ -8103,7 +8029,7 @@ function applySettingsCommand(settings, command, deps = {}) {
     }
     case "replace.save": {
       const preset = command.preset;
-      const name = typeof preset.name === "string" ? preset.name.trim().slice(0, MAX_NAME_CHARS) : "";
+      const name = typeof preset.name === "string" ? preset.name.trim() : "";
       const start = typeof preset.start === "string" ? preset.start.trim().slice(0, 256) : "";
       const end = typeof preset.end === "string" ? preset.end.trim().slice(0, 256) : "";
       if (!name || !start || !end) {
@@ -8164,7 +8090,6 @@ function applyLegacySettingsPatch(settings, body, deps = {}) {
       timeoutMs: p.timeoutMs
     }) === fingerprint);
     if (existing) return existing.id;
-    if (next.apiPresets.length >= MAX_PRESETS_PER_LIBRARY) return null;
     const id = resolveId("api", next.apiPresets.length, fingerprint, deps, usedIds);
     const names = new Set(next.apiPresets.map((p) => p.name));
     next = {
@@ -8186,10 +8111,9 @@ function applyLegacySettingsPatch(settings, body, deps = {}) {
   };
   const upsertPrompt = (legacy) => {
     const text2 = legacy.systemPrompt.trim();
-    if (!text2 || text2.length > MAX_PROMPT_CHARS) return null;
+    if (!text2) return null;
     const existing = next.promptPresets.find((p) => p.systemPrompt === text2);
     if (existing) return existing.id;
-    if (next.promptPresets.length >= MAX_PRESETS_PER_LIBRARY) return null;
     const id = resolveId("prompt", next.promptPresets.length, text2, deps, usedPromptIds);
     const names = new Set(next.promptPresets.map((p) => p.name));
     next = {
@@ -8225,7 +8149,6 @@ function applyLegacySettingsPatch(settings, body, deps = {}) {
       const legacy = parseLegacyPreset(record.worldTurn);
       if (!legacy) return fail3(settings, "INVALID_PAYLOAD", "worldTurn 预设字段非法（name / endpoint / model / apiKey 或数值超限）");
       const apiId = upsertConnection(legacy);
-      if (!apiId) return fail3(settings, "FIELD_LIMIT_EXCEEDED", `最多保存 ${MAX_PRESETS_PER_LIBRARY} 条 API 连接。`);
       const promptId = upsertPrompt(legacy);
       next = { ...next, activeApiPresetId: apiId, activePromptPresetId: promptId };
     }
@@ -14019,7 +13942,7 @@ function createTavernProfileFetch(deps) {
 
 // src/atlas-starter-world.ts
 init_define_ATLAS_BUILD_INFO();
-var MAX_NAME_CHARS2 = 60;
+var MAX_NAME_CHARS = 60;
 var MAX_DESCRIPTION_CHARS = 2e3;
 var FNV_OFFSET_64 = 0xcbf29ce484222325n;
 var FNV_PRIME_64 = 0x100000001b3n;
@@ -14034,10 +13957,10 @@ function starterWorldIdForChat(chatId) {
   return `world-auto-${hash.toString(16).padStart(16, "0")}`;
 }
 function buildStarterWorld(options) {
-  const cardName = (options.name ?? "").trim().slice(0, MAX_NAME_CHARS2);
+  const cardName = (options.name ?? "").trim().slice(0, MAX_NAME_CHARS);
   const worldName = cardName ? `${cardName} 的世界` : "新世界";
   const description = (options.description ?? "").trim().slice(0, MAX_DESCRIPTION_CHARS);
-  const playerName = (options.playerName ?? "").trim().slice(0, MAX_NAME_CHARS2) || "主角";
+  const playerName = (options.playerName ?? "").trim().slice(0, MAX_NAME_CHARS) || "主角";
   const playerDescription = (options.playerDescription ?? "").trim().slice(0, 1e3);
   return {
     schemaVersion: 1,

@@ -4,10 +4,11 @@ import { projectReferenceFlows } from './atlas-reference-flows.mjs';
 import { projectMapContext } from './atlas-map-context.mjs';
 import { projectSpaceNavigation } from './atlas-space-navigation.mjs';
 
-export const REFERENCE_LEVELS = [
-  ['world','L0','世界'],['region','L1','地区'],['city','L2','城市'],['district','L3','街区'],
-  ['building','L4','建筑'],['floor','L5','楼层'],['room','L6','房间'],['detail','L7','陈设'],
-].map(([key,code,name])=>({key,code,name}));
+/** Descriptive categories, independent of the actual parent/child map tree. */
+const MAP_CATEGORY_NAMES = {
+  world:'世界',region:'地区',city:'城市',district:'街区',building:'建筑',floor:'楼层',
+  room:'房间',detail:'陈设',other:'场所',vehicle:'载具',natural:'自然区域',
+};
 const COLORS = ['#43e0ff','#9b6bff','#ffc247','#39e0a0','#7fd4ff','#ff5f92'];
 
 /** M6-02：「未挂接」分组的稳定 ID。坏图不随便挂到某座城市下。 */
@@ -15,28 +16,14 @@ export const UNCLASSIFIED = '__unclassified__';
 /** 旧适配器用 'world' 表示「挂在世界根」；只在没有同名地图时才按哨兵解释。 */
 const ROOT_SENTINEL = 'world';
 
-/**
- * M6-02③：地点种类 → 导航层级。
- *
- * 只有「容器地点」能决定一张图在导航里是什么层级：车厢/载具画成楼层样式的内景（floor），
- * 但一栋建筑必须是 building —— 画法（有没有 floor 布局）不等于结构。
- * 没有容器或容器不可见（POV 下被裁掉）时回落到几何推断的结果，不猜。
- */
-const CONTAINER_NAV_KIND = {region:'region',city:'city',district:'district',building:'building',floor:'floor',room:'room',vehicle:'floor',natural:'region',
-  // P06/N01：other 是合法场所（庭院/官道/停靠区）。画法是 overview，但**不等于「世界」**；
-  // 结构层级用中性且合法的 region，绝不给尚未定义的 renderKind=place，也不默认成「建筑」。
-  other:'region'};
-/**
- * P06：中性场所标签。`kind` 必须仍取合法结构 key（导航处理器认这些），
- * 展示层用 categoryLabel 说人话，避免把「庭院」显示成「地区/建筑」。
- */
+/** Real place types describe a map; renderKind separately chooses its drawing template. */
 const NEUTRAL_CATEGORY_LABELS = {other:'场所',vehicle:'载具',natural:'自然区域'};
 function navigationCategoryLabel(map) {
   return NEUTRAL_CATEGORY_LABELS[text(map?.containerLocationKind)] ?? null;
 }
 function navigationKind(map, geometricKind) {
   const containerKind = text(map?.containerLocationKind);
-  return (containerKind && CONTAINER_NAV_KIND[containerKind]) || geometricKind;
+  return containerKind || geometricKind;
 }
 const items = dto => Array.isArray(dto?.items) ? dto.items : [];
 const text = value => String(value ?? '');
@@ -59,7 +46,7 @@ const LEGACY_FURN_CLASS = {bench:'table', chair:'table', stairs:'desk'};
 
 export function emptyReferenceData(meta = {}) {
   return {meta:{worldName:'尚未建立世界',turn:0,revision:0,timeMinutes:0,viewMode:'player',initialNodeId:'world',...meta},
-    LEVELS:REFERENCE_LEVELS,ROOT:{id:'world',name:meta.worldName||'尚未建立世界',kind:'world',code:'L0',children:[],geo:{},marks:[],host:true},
+    ROOT:{id:'world',name:meta.worldName||'尚未建立世界',kind:'world',tag:'世界',children:[],geo:{},marks:[],host:true},
     LOCATIONS:[],CAST:[],ITEMS:[],MESSAGES:[],TASKS:[],EVENTS:[],RECEIPTS:[],LORE:[],DIAGNOSTICS:[],FLOWS:{},JOURNEYS:{},PROMPTS:[]};
 }
 
@@ -225,7 +212,8 @@ export function referenceGeometry(map, document, {viewMode='author',visibleLocat
     x,y,name:text(p.name),sub:quality,quality,proxy:proxy==='proxy',
     hero:p.isProtagonist===true,silent:p.silent===true,c:COLORS[i%COLORS.length],locationId:p.locationId??p.roomId??null};});
   const containerKind=map.containerLocationKind;
-  let kind=REFERENCE_LEVELS.some(l=>l.key===containerKind)?containerKind:REFERENCE_LEVELS.some(l=>l.key===map.kind)?map.kind:({site:'building',interior:'room'}[map.kind]??'world'),geo={};
+  const renderKinds=['world','region','city','district','building','floor','room','detail'];
+  let kind=renderKinds.includes(containerKind)?containerKind:renderKinds.includes(map.kind)?map.kind:({site:'building',interior:'room'}[map.kind]??'world'),geo={};
   if(layout?.kind==='city') {
     kind='city';
     const river=layout.river;
@@ -373,13 +361,10 @@ export function projectReferenceData({state={},mapView,sceneView,catalogView,tas
     const saved=scenes.get(m.mapId);
     const overview=!saved&&projectOverview?projectOverview({view:mapView,mapId:m.mapId,scope:{chatId:state.chatId,branchId:mapView.branchId,revision:mapView.revision,viewMode}})?.scene:null;
     const g=referenceGeometry(m,saved??overview,{viewMode,visibleLocationIds:items(catalogView).filter(c=>c.entityKind==='location').map(c=>c.entityId)});
-    // M6-02③：导航层级先用 SQL 的 containerKind（真实空间类别）。
-    // 不能因为「这张图有 floor 布局」就把一栋建筑当成楼层 —— 画法不等于结构。
+    // Category and drawing template do not impose a sequence on parentMapId.
     const navKind=navigationKind(m,g.kind);
-    const level=REFERENCE_LEVELS.find(l=>l.key===navKind)??REFERENCE_LEVELS.find(l=>l.key===g.kind)??REFERENCE_LEVELS[0];
-    // P06：other 容器用中性场所标签展示；结构 key 仍是合法层级。
     const categoryLabel=navigationCategoryLabel(m);
-    nodes.set(m.mapId,{id:m.mapId,mapId:m.mapId,name:m.name||m.mapId,code:level.code,tag:categoryLabel??level.name,categoryLabel,description:saved?'已保存的空间布局':'当前 SQL 地图概览；尚无已保存空间布局',
+    nodes.set(m.mapId,{id:m.mapId,mapId:m.mapId,name:m.name||m.mapId,tag:categoryLabel??MAP_CATEGORY_NAMES[navKind]??'地图',categoryLabel,description:saved?'已保存的空间布局':'当前 SQL 地图概览；尚无已保存空间布局',
       children:[],...g,renderKind:g.kind,kind:navKind,host:true,containerLocationId:m.containerLocationId??null,containerLocationKind:m.containerLocationKind??null,
       parentMapId:m.parentMapId??null,connectionQuality:m.connectionQuality??null,
       topologyIssueCodes:Array.isArray(m.topologyIssueCodes)?[...m.topologyIssueCodes]:[],
@@ -440,7 +425,7 @@ export function projectReferenceData({state={},mapView,sceneView,catalogView,tas
    * 只有「压根没有唯一根图」（0 张或 >1 张）才用合成容器兜底。
    */
   out.ROOT=roots.length===1?roots[0]:{...out.ROOT,name:out.meta.worldName,children:roots};
-  if(unclassified.length)out.ROOT.children.push({id:UNCLASSIFIED,name:'未挂接的图',kind:'region',code:'L2',tag:'未挂接',
+  if(unclassified.length)out.ROOT.children.push({id:UNCLASSIFIED,name:'未挂接的图',kind:'other',tag:'未挂接',
     description:'这些图找不到可信的父图（父环、缺父或结构损坏），先单独列出来，不随便挂到某座城市下。',
     children:unclassified,geo:{},marks:[],host:true,unclassified:true});
   const catalog=items(catalogView),detailIndex=new Map(details.map(x=>{const row=x.character??x.item??x.location;return [row?.id,x];}));

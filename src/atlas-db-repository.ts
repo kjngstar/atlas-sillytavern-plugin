@@ -1383,7 +1383,7 @@ export function createSqlRepository(options: RepositoryOptions) {
       generationOptions=normalizeGenerationOptions(await windowPort.generationOptions());
       if(currentRevision()!==rev||input.isCurrent&&!input.isCurrent())throw new AtlasDbError('STALE_BASE','读取分批设置期间世界或聊天已变化',{});
     }
-    input={...input,generationOptions,...(generationOptions.workBatching&&input.worldCompletion?{worldCompletion:{...input.worldCompletion,policy:{...input.worldCompletion.policy,budgetMode:'workload',maxNewLocations:ATLAS_RUNTIME_LIMITS.operationsPerResponse,maxNewRoutes:ATLAS_RUNTIME_LIMITS.operationsPerResponse,maxAdditionalDepth:ATLAS_RUNTIME_LIMITS.locationDepth}}}:{})};
+    input={...input,generationOptions,...(generationOptions.workBatching&&input.worldCompletion?{worldCompletion:{...input.worldCompletion,policy:{...input.worldCompletion.policy,budgetMode:'workload',maxNewLocations:ATLAS_RUNTIME_LIMITS.constructionOperationsPerBatch,maxNewRoutes:ATLAS_RUNTIME_LIMITS.constructionOperationsPerBatch,maxAdditionalDepth:ATLAS_RUNTIME_LIMITS.locationDepth}}}:{})};
 
     // 1) 隔离候选态
     const candidate = await createCandidateImpl(anchor, 'turn');

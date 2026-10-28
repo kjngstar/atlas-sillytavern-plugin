@@ -345,7 +345,7 @@ test("两库互不影响：API 命令不动提示词数据，提示词命令不�
   assert.equal(afterPrompt.activeApiPresetId, activeApiBefore, "提示词命令不动活动 API");
 });
 
-test("上限与校验：每库 20 条上限、非法 ID / 超长字段 / 非法参数被拒", () => {
+test("上限与校验：大预设库保留，非法 ID / 非法参数被拒", () => {
   let s = createDefaultSettingsV2();
   for (let i = 0; i < 20; i += 1) s = withApi(s, `渠道${i}`);
   assert.equal(s.apiPresets.length, 20);
@@ -355,7 +355,8 @@ test("上限与校验：每库 20 条上限、非法 ID / 超长字段 / 非法�
     apiKeyMode: "replace",
     apiKey: "",
   }, testDeps());
-  assert.equal(overflow.ok, false, "超过 20 条必须拒绝");
+  assert.equal(overflow.ok, true);
+  assert.equal(overflow.settings.apiPresets.length, 21);
 
   const base = createDefaultSettingsV2();
   const badId = applySettingsCommand(base, { action: "api.activate", id: "有中文 空格" }, testDeps());
@@ -600,7 +601,7 @@ test("replace.save：非法载荷拒绝；sanitize 旧档缺 contentReplaceRules
 // 0.9.17 chatbox 同款：按连接 System Prompt（可选）——落库 / 清空 / 视图回传 / 运行时优先级
 // ---------------------------------------------------------------------------
 
-test("api.save systemPrompt：落库 trim；空白清空；视图回传；超长拒绝", () => {
+test("api.save systemPrompt：落库 trim；空白清空；视图回传；长文本完整保留", () => {
   const base = createDefaultSettingsV2();
   const saved = applySettingsCommand(base, {
     action: "api.save",
@@ -628,7 +629,7 @@ test("api.save systemPrompt：落库 trim；空白清空；视图回传；超长
   const view = settingsViewV2(cleared.settings);
   assert.equal(view.apiPresets[0].systemPrompt, "");
 
-  // 超长（>8000）拒绝
+  // 超过原 8000 字边界的正文完整保留
   const tooLong = applySettingsCommand(base, {
     action: "api.save",
     preset: {
@@ -638,7 +639,8 @@ test("api.save systemPrompt：落库 trim；空白清空；视图回传；超长
     },
     apiKeyMode: "replace", apiKey: "",
   }, testDeps());
-  assert.equal(tooLong.ok, false, "超过 8000 字拒绝");
+  assert.equal(tooLong.ok, true);
+  assert.equal(tooLong.settings.apiPresets[0].systemPrompt, "x".repeat(8001));
 });
 
 test("resolveWorldTurnPreset systemPrompt 优先级：连接覆盖 > 提示词预设 > 空", () => {
@@ -727,7 +729,7 @@ test("promptPostProcessing 默认 strict（shujuku 同款）：缺失落库补 s
 // 0.9.18 分段提示词：落库 / 视图 / sanitize / 运行时 promptSegments 与优先级
 // ---------------------------------------------------------------------------
 
-test("prompt.save segments：非法角色与空段剔除；正文可空；超 16 段截断；视图与 sanitize 往返", () => {
+test("prompt.save segments：非法角色与空段剔除；正文可空；超过 16 段仍完整保留；视图与 sanitize 往返", () => {
   const base = createDefaultSettingsV2();
   const manySegments = Array.from({ length: 20 }, (_, i) => ({ role: "user", content: `段${i}` }));
   const saved = applySettingsCommand(base, {
@@ -745,15 +747,15 @@ test("prompt.save segments：非法角色与空段剔除；正文可空；超 16
   }, testDeps());
   assert.equal(saved.ok, true, saved.ok ? "" : saved.message);
   const p = saved.settings.promptPresets[0];
-  assert.equal(p.segments.length, 16, "剔除非法后截断到 16 段上限");
+  assert.equal(p.segments.length, 21, "仅剔除无效段，保留全部有效段");
   assert.equal(p.segments[0].content, "第一条");
   assert.equal(p.systemPrompt, "", "分段模式正文允许为空");
 
   // 视图回传 + sanitize 往返（结构化克隆模拟落盘重读）
   const view = settingsViewV2(saved.settings);
-  assert.equal(view.promptPresets[0].segments.length, 16);
+  assert.equal(view.promptPresets[0].segments.length, 21);
   const sanitized = sanitizeSettingsV2(JSON.parse(JSON.stringify(saved.settings)), testDeps());
-  assert.equal(sanitized.settings.promptPresets[0].segments.length, 16, "分段预设经 sanitize 存活");
+  assert.equal(sanitized.settings.promptPresets[0].segments.length, 21, "分段预设经 sanitize 存活");
   assert.equal(sanitized.diagnostics.promptSkipped, 0, "不丢条目");
 
   // 两者都空 → 拒绝

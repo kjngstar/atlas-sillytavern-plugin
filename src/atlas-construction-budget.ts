@@ -1,23 +1,6 @@
-/**
- * atlas-construction-budget.ts — 建设操作的共同操作预算（P02）。
- *
- * 来源：执行计划 v2 §8「共同预算、冻结来源和部分成功」。
- *
- * 这一版解决 F03：旧行为里「地点允许 64、路线允许 64」被理解成能同时输出 128 条，
- * 而解析器共同只收 64 条 —— 差额被静默丢弃，模型还以为自己交完了。
- *
- * 纪律：
- * - `totalOperations` 只有一个来源：`operationsPerResponse`（当前 64）。
- *   **所有**非 noop 操作共用这个额度：新增、更新、map.estimate、space.state.patch 都算。
- *   不因为有「地点配额」「路线配额」就变成 128。
- * - 类型配额（maxNewLocations / maxNewRoutes）是在共同总额**之内**的细分上限，
- *   不是额外的独立通道。
- * - 超限不静默截断：要么返回明确 issue 让上层重试，要么由 `selectWithinBudget`
- *   选出一个**依赖完整**的有用子集，并把余下的交回队列。
- * - 宁可少收也不能收半组：父地点没被接受时，子地点/路线一律不得进入 accepted。
+/** Construction selection applies only the explicit work quotas supplied by its caller.
+ * Completed model replies have no implicit operation-count limit.
  */
-
-import { ATLAS_RUNTIME_LIMITS } from './atlas-runtime-limits.ts';
 import type { Issue, ModelOperation } from './atlas-ops-contract.ts';
 
 /* ------------------------------------------------------------------ *
@@ -26,8 +9,8 @@ import type { Issue, ModelOperation } from './atlas-ops-contract.ts';
 
 export type ConstructionBudgetV1 = {
   version: 1;
-  /** 本批所有非 noop 操作的总额度，来自 operationsPerResponse。 */
-  totalOperations: number;
+  /** Explicit work budget; null means no additional total-operation cap. */
+  totalOperations: number | null;
   /** 共同额度内最多新增多少地点。 */
   maxNewLocations: number;
   /** 共同额度内最多新增多少路线。 */
@@ -77,27 +60,20 @@ export type ConstructionSelection = {
  * 2 构造与分类
  * ------------------------------------------------------------------ */
 
-/**
- * 构造预算。
- *
- * `totalOperations` 固定取运行时协议上限，**不接受调用方传入更大的值**：
- * 一旦允许「这次批大一点」，F03 就会以另一种形式复活。
- */
+/** Preserve explicit planning quotas without imposing another response limit. */
 export function constructionBudget(input: {
   maxNewLocations: number;
   maxNewRoutes: number;
-  /** 仅用于测试替换；生产不传，默认取协议上限。 */
+  /** A positive total opts into a bounded work selection; omitted/0 means unlimited. */
   totalOperations?: number;
 }): ConstructionBudgetV1 {
-  const total = input.totalOperations ?? ATLAS_RUNTIME_LIMITS.operationsPerResponse;
-  const normalizedTotal = Number.isFinite(total) && total > 0 ? Math.floor(total) : ATLAS_RUNTIME_LIMITS.operationsPerResponse;
-  const normalizeQuota = (value: number): number => (Number.isFinite(value) && value >= 0 ? Math.floor(value) : 0);
+  const total = input.totalOperations;
+  const normalizeQuota = (value: number): number => Number.isFinite(value) && value >= 0 ? Math.floor(value) : 0;
   return {
     version: CONSTRUCTION_BUDGET_VERSION,
-    totalOperations: normalizedTotal,
-    // 类型配额不能超过总额：它们本来就共用同一个通道
-    maxNewLocations: Math.min(normalizeQuota(input.maxNewLocations), normalizedTotal),
-    maxNewRoutes: Math.min(normalizeQuota(input.maxNewRoutes), normalizedTotal),
+    totalOperations: typeof total === 'number' && Number.isFinite(total) && total > 0 ? Math.floor(total) : null,
+    maxNewLocations: normalizeQuota(input.maxNewLocations),
+    maxNewRoutes: normalizeQuota(input.maxNewRoutes),
   };
 }
 
@@ -200,7 +176,7 @@ export function checkConstructionBudget(
   const { budget } = options;
   const issues: Issue[] = [];
 
-  if (usage.total > budget.totalOperations) {
+  if (budget.totalOperations !== null && usage.total > budget.totalOperations) {
     issues.push(budgetIssue(
       'WORLD_CONSTRUCTION_BUDGET_EXCEEDED',
       '$.operations',
@@ -263,7 +239,7 @@ export function selectWithinBudget(
 
   const canAdmit = (cls: OperationClass): boolean => {
     if (cls === 'noop') return true;
-    if (usage.total + 1 > budget.totalOperations) return false;
+    if (budget.totalOperations !== null && usage.total + 1 > budget.totalOperations) return false;
     if (cls === 'new-location' && usage.newLocations + 1 > budget.maxNewLocations) return false;
     if (cls === 'new-route' && usage.newRoutes + 1 > budget.maxNewRoutes) return false;
     return true;
@@ -343,7 +319,7 @@ export function selectWithinBudget(
     issues.push(budgetIssue(
       'WORLD_CONSTRUCTION_BUDGET_DEFERRED',
       `$.operations[${entry.index}]`,
-      `${opName(entry.op)} 超出本批共同预算 ${budget.totalOperations} 条（或类型配额），留待下一批。`,
+      `${opName(entry.op)} 超出本批共同预算 ${budget.totalOperations ?? 'unlimited'} 条（或类型配额），留待下一批。`,
       true,
     ));
   }
@@ -353,7 +329,7 @@ export function selectWithinBudget(
 
 /** 用量摘要：给回执/诊断用的一行文字，不是给人看的散文。 */
 export function describeBudgetUsage(usage: BudgetUsage, budget: ConstructionBudgetV1): string {
-  return `ops ${usage.total}/${budget.totalOperations};`
+  return `ops ${usage.total}/${budget.totalOperations ?? 'unlimited'};`
     + ` newLoc ${usage.newLocations}/${budget.maxNewLocations};`
     + ` newRoute ${usage.newRoutes}/${budget.maxNewRoutes}`;
 }

@@ -25,12 +25,12 @@ const near = (a, b, eps = 1e-6) => Math.abs(a - b) <= eps;
  * 真实 SQL 概览夹具：400×400 的幅面里放一块 `size` 大小的场地 + 一个端点。
  * `bounds` 故意远大于内容 —— 这正是「一个点」的成因。
  */
-function overviewFixture({size = 10, origin = 0, extraPoints = [], extraRoutes = [], bounds = {x: 0, y: 0, w: 400, h: 400}} = {}) {
+function overviewFixture({metersPerCell = 2, size = 10, origin = 0, extraPoints = [], extraRoutes = [], bounds = {x: 0, y: 0, w: 400, h: 400}} = {}) {
   const area = {kind: 'polygon', points: [{x: origin, y: origin}, {x: origin + size, y: origin},
     {x: origin + size, y: origin + size}, {x: origin, y: origin + size}]};
   const map = {
     mapId: 'm1', name: '测试区域', kind: 'overview', containerLocationId: null, parentMapId: null,
-    connectionQuality: 'root', metersPerCell: 2,
+    connectionQuality: 'root', metersPerCell,
     points: [
       {entityId: 'yard', kind: 'location', name: '空庭院', mapId: 'm1', x: origin, y: origin, markerQuality: 'exact', area},
       {entityId: 'gate', kind: 'location', name: '入口', mapId: 'm1', x: origin + size / 2, y: origin + size / 2},
@@ -178,4 +178,58 @@ test('CAMP07 · 相机不可信/无内容时退回幅面，不产生 NaN 取景'
   const runtime = camera(st);
   assert.deepEqual(vm.runInContext('fitExtent()', runtime), [-660, 660, -400, 400]);
   assert.equal(vm.runInContext('fitPad()', runtime), 1.16);
+});
+
+function sparseGeography({metersPerCell=2,extra=[]}={}){
+  const far={entityId:'far',kind:'location',name:'远方城市',mapId:'m1',x:150,y:3100,
+    area:{kind:'polygon',points:[{x:130,y:3080},{x:170,y:3080},{x:170,y:3120},{x:130,y:3120}]}};
+  const {map,scene}=overviewFixture({origin:100,size:40,metersPerCell,extraPoints:[far,...extra],bounds:{x:0,y:0,w:8000,h:8000}});
+  const geometry=referenceGeometry(map,scene);
+  const st={geo:geometry.geo,node:{host:true,extent:geometry.extent,marks:geometry.marks,metric:geometry.metric}};
+  return {map,scene,geometry,st,runtime:camera(st)};
+}
+const conventionalFit=runtime=>vm.runInContext('(()=>{const [x0,x1,y0,y1]=fitExtent(),pad=fitPad();return Math.min(st.vw/((x1-x0)*pad),st.vh/((y1-y0)*pad));})()',runtime);
+
+test('CAMP08 · 稀疏地区图收紧屏幕间距，世界坐标与实际距离保持',()=>{
+  const {map,scene,geometry,st,runtime}=sparseGeography();
+  const before=structuredClone({map,scene,geometry});
+  const base=conventionalFit(runtime);
+  vm.runInContext('fit(false)',runtime);
+  assert.ok(st.cam.s<base,'只有少数分散地点时不再铺到视口两端');
+  const a=st.node.marks.find(m=>m.id==='yard'),b=st.node.marks.find(m=>m.id==='far');
+  const screenDistance=Math.hypot(a.x-b.x,a.y-b.y)*st.cam.s;
+  assert.ok(screenDistance<=220+1e-6,'默认视图把稀疏地点放在紧凑可读范围');
+  const physicalDistance=Math.hypot(100-150,100-3100)*2;
+  assert.ok(near(screenDistance/st.cam.s*geometry.metric,physicalDistance),'缩放后换回同一物理距离');
+  assert.deepEqual({map,scene,geometry},before,'不改存档、几何、格数或米/格');
+  const model=vm.createContext({module:{exports:{}}});
+  vm.runInContext(readFileSync(new URL('../ui/atlas-reference/js/ui-model.js',import.meta.url),'utf8'),model);
+  const oldBar=model.module.exports.fixedScale(base,geometry.metric),newBar=model.module.exports.fixedScale(st.cam.s,geometry.metric);
+  assert.ok(newBar.distance>oldBar.distance,'缩小地图时同长标尺表达更长距离');
+  assert.ok(near(newBar.distance/oldBar.distance,base/st.cam.s),'标尺随实际相机比例精确更新');
+});
+
+test('CAMP09 · 窄屏仍以相同比例缩放两轴，未标定图继续用格',()=>{
+  const {geometry,st,runtime}=sparseGeography({metersPerCell:null});
+  st.vw=320;st.vh=720;
+  vm.runInContext(cut('function W2S(', 'function S2W('),runtime);
+  vm.runInContext('fit(false)',runtime);
+  const places=st.node.marks;
+  for(const a of places)for(const b of places){
+    const p=vm.runInContext(`W2S(${a.x},${a.y})`,runtime),q=vm.runInContext(`W2S(${b.x},${b.y})`,runtime);
+    assert.ok(near(Math.hypot(p[0]-q[0],p[1]-q[1]),Math.hypot(a.x-b.x,a.y-b.y)*st.cam.s));
+    assert.ok(Math.hypot(p[0]-q[0],p[1]-q[1])<=320*.42+1e-6);
+  }
+  assert.equal(geometry.metric,null,'未标定不因紧凑取景变成米制');
+});
+
+test('CAMP10 · 密集地点、城市以及丰富地形保留通常取景',()=>{
+  const extra=Array.from({length:3},(_,i)=>({entityId:'extra'+i,kind:'location',name:'其他地点',mapId:'m1',x:250+i*100,y:1000+i*300}));
+  const dense=sparseGeography({extra});
+  assert.equal(vm.runInContext('fitScale()',dense.runtime),conventionalFit(dense.runtime));
+  const city=sparseGeography();city.st.kind='city';
+  assert.equal(vm.runInContext('fitScale()',city.runtime),conventionalFit(city.runtime));
+  const terrain=sparseGeography();
+  terrain.st.geo.overviewFeatures.push({id:'forest',type:'forest_texture',poly:terrain.st.geo.overviewShapes[0].pts});
+  assert.equal(vm.runInContext('fitScale()',terrain.runtime),conventionalFit(terrain.runtime));
 });

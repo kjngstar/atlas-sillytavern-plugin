@@ -373,7 +373,7 @@ test('W11: 相同输入第二次重试复用已建地点，不造同名重复地
 // P02 · 共同额度与来源别名必须写进模型看得见的提示词
 // ---------------------------------------------------------------------------
 
-test('P02: 提示词写明共同总额 64，并标明地点/路线不是各自配额', async () => {
+test('P02: 提示词说明真实工作配额，没有额外的固定响应条数上限', async () => {
   const f = await fixture();
   const task = buildSqlWorldCompletionTask(
     f.tables,
@@ -392,9 +392,9 @@ test('P02: 提示词写明共同总额 64，并标明地点/路线不是各自�
   assert.ok(task, '存在缺项时必须发出建设任务');
   const prompt = task.request.messages.map((m) => m.content).join('\n');
 
-  assert.match(prompt, /totalOperations=64/, '预算行必须写出共同总额');
-  assert.match(prompt, /不是额外通道/, '必须说明类型配额不是额外通道');
-  assert.match(prompt, /不要以为「地点 64、路线 64」就能输出 128 条/, '必须直接点破 128 的误解');
+  assert.match(prompt, /totalOperations=unlimited/);
+  assert.match(prompt, /没有额外的固定条数限制/);
+  assert.match(prompt, /maxNewLocations=12、maxNewRoutes=16/);
 
   // 来源别名：按 key 字典序分配，提示词同时保留完整 key
   assert.match(prompt, /SRC1｜LB_BUILDING_A/, '第一个来源拿到 SRC1');

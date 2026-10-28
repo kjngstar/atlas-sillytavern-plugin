@@ -291,27 +291,6 @@
 #atlasDemo .sec-h em{font-style:normal;color:var(--txt-3);letter-spacing:.04em;}
 #atlasDemo .sec-h em.ok{color:var(--green);}
 
-/* ── 层级阶梯 ── */
-#atlasDemo .depth-ladder{
-  flex:0 0 auto;display:flex;gap:3px;padding:11px 12px 12px;border-bottom:1px solid var(--line);
-  background:rgba(6,11,19,.35);
-}
-#atlasDemo .dl-cell{flex:1;display:flex;flex-direction:column;align-items:center;gap:5px;cursor:pointer;}
-#atlasDemo .dl-bar{width:100%;height:16px;border-radius:4px;position:relative;overflow:hidden;
-  background:linear-gradient(180deg,rgba(120,180,255,.10),rgba(120,180,255,.03));
-  border:1px solid rgba(120,180,255,.12);transition:.22s;}
-#atlasDemo .dl-cell:hover .dl-bar{background:rgba(67,224,255,.16);border-color:var(--line-3);}
-#atlasDemo .dl-cell.done .dl-bar{background:linear-gradient(180deg,rgba(67,224,255,.32),rgba(67,224,255,.1));
-  border-color:rgba(67,224,255,.4);}
-#atlasDemo .dl-cell.cur .dl-bar{
-  background:linear-gradient(180deg,#6eeaff,#1ea8cc);border-color:#9df3ff;
-  box-shadow:0 0 14px 1px rgba(67,224,255,.75);}
-#atlasDemo .dl-cell.cur .dl-bar::after{content:"";position:absolute;inset:0;
-  background:linear-gradient(90deg,transparent,rgba(255,255,255,.85),transparent);
-  animation:shimmer 2.2s ease-in-out infinite;}
-@keyframes shimmer{0%{transform:translateX(-100%)}60%,100%{transform:translateX(110%)}}
-#atlasDemo .dl-lb{font-family:var(--mono);font-size:7.5px;color:var(--txt-4);letter-spacing:.02em;white-space:nowrap;}
-#atlasDemo .dl-cell.cur .dl-lb{color:var(--cyan);}
 
 /* ── 地图树 ── */
 #atlasDemo .tree{display:flex;flex-direction:column;gap:1px;}

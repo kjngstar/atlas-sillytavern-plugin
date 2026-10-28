@@ -521,7 +521,7 @@ test("settings：非法预设被拒绝", async () => {
   assertionCount += 2;
 });
 
-test("settings v2：两库命令——入库 / 指纹去重 / 脱敏 / 两库独立 / 持久化 / 上限", async () => {
+test("settings v2：两库命令——入库 / 指纹去重 / 脱敏 / 两库独立 / 持久化 / 大预设库", async () => {
   const { core, store } = await setup(null, { skipSettings: true });
   const saveApi = (name, endpoint) => ({
     action: "api.save",
@@ -585,8 +585,8 @@ test("settings v2：两库命令——入库 / 指纹去重 / 脱敏 / 两库独
   }
   equal(last.body.data.apiPresets.length, 20, "封顶 20 条");
   const overflow = await core.handle("PUT", "/settings", saveApi("第21条", "https://c.example.invalid/v1/chat/completions"), { local: true });
-  equal(overflow.status, 413, "第 21 条被拒（FIELD_LIMIT_EXCEEDED → 413）");
-  equal(overflow.body.error.code, ATLAS_ERROR_CODES.FIELD_LIMIT_EXCEEDED, "上限错误码");
+  equal(overflow.status, 200, "第 21 条可正常保存");
+  equal(overflow.body.data.apiPresets.length, 21, "全部连接保留");
 
   // 悬挂引用：激活不存在的 ID 必须失败且存储不变
   const ghost = await core.handle("PUT", "/settings", { action: "api.activate", id: "ghost-id" }, { local: true });
@@ -1829,13 +1829,13 @@ test("systemPrompt：自定义系统提示词生效，留空回退内置默认�
   }
 });
 
-test("提示词预设：服务端校验（上限 8000 / 空拒绝 / 内置默认不可覆盖删除）", async () => {
+test("提示词预设：服务端校验（长提示词保留 / 空拒绝 / 内置默认不可覆盖删除）", async () => {
   const { core } = sessionCore(createMemoryDocumentStore());
   const good = await core.handle("PUT", "/settings", { action: "prompt.save", preset: { name: "长提示词", systemPrompt: "好".repeat(8000) } }, { local: true });
   equal(good.status, 200, "8000 字以内接受");
   const over = await core.handle("PUT", "/settings", { action: "prompt.save", preset: { name: "超长", systemPrompt: "长".repeat(8001) } }, { local: true });
-  equal(over.status, 413, "超 8000 字拒绝（FIELD_LIMIT_EXCEEDED → 413）");
-  equal(over.body.error.code, ATLAS_ERROR_CODES.FIELD_LIMIT_EXCEEDED, "超限错误码");
+  equal(over.status, 200, "超 8000 字可正常保存");
+  equal(over.body.data.promptPresets.at(-1).systemPrompt, "长".repeat(8001), "长提示词保留到末尾");
   const empty = await core.handle("PUT", "/settings", { action: "prompt.save", preset: { name: "空", systemPrompt: "   " } }, { local: true });
   equal(empty.status, 400, "空提示词拒绝（空 = 内置默认，无需保存）");
   const builtin = await core.handle("PUT", "/settings", { action: "prompt.save", preset: { id: "builtin-default", name: "内置默认", systemPrompt: "偷改" } }, { local: true });

@@ -28,6 +28,42 @@ test('road textures need a local zone and never generate a map-wide path',()=>{
  assert.equal(layout.features.some(f=>f.id==='unbound'),false);
 });
 
+test('前庭 near 建筑并指定 south 时按建筑位置向南排，不按整张图的南侧排',()=>{
+ for(const width of [1000,1000000]){
+  for(const seed of ['first','second','third']){
+   const input={id:'site',width,height:width,seed,zones:[
+    {id:'A-yard',name:'测试楼前庭',near:'Z-building',sector:'south',physicalSize:{w:12,h:8}},
+    {id:'Z-building',name:'测试楼',physicalSize:{w:20,h:16}},
+   ]};
+   const layout=overview(input),a=layout.pins.find(p=>p.id==='A-yard'),b=layout.pins.find(p=>p.id==='Z-building');
+   assert.ok(a&&b,JSON.stringify(layout.issues));
+   assert.ok(a.y>b.y,'前庭应在参照建筑的南侧');
+   assert.ok(Math.abs(a.x-b.x)<1e-6,'相对南向不应受整张图中心影响');
+   assert.ok(Math.hypot(a.x-b.x,a.y-b.y)<30,'局部间距取决于两个空间的尺寸，而非地图跨度');
+   assert.deepEqual(overview({...input,zones:[...input.zones].reverse()}),layout);
+  }
+ }
+});
+
+test('新增邻近空间时已保存位置、确认锁和实际轮廓尺寸保持不变',()=>{
+ const spec={id:'site',width:10000,height:10000,zones:[
+  {id:'Z-building',physicalSize:{w:20,h:16},locked:{x:4800,y:4700}},
+ ]};
+ const first=overview(spec),next=overview({...spec,zones:[...spec.zones,
+  {id:'A-yard',near:'Z-building',sector:'south',physicalSize:{w:12,h:8}},
+ ]},first);
+ assert.deepEqual(next.shapes.find(s=>s.id==='Z-building'),first.shapes[0]);
+ assert.deepEqual(next.pins.find(p=>p.id==='Z-building'),first.pins[0]);
+ const yard=next.shapes.find(s=>s.id==='A-yard');
+ assert.equal(Math.max(...yard.polygon.map(p=>p.x))-Math.min(...yard.polygon.map(p=>p.x)),12);
+ assert.equal(Math.max(...yard.polygon.map(p=>p.y))-Math.min(...yard.polygon.map(p=>p.y)),8);
+ const second=overview({...spec,zones:[...spec.zones,{id:'A-yard',near:'Z-building',sector:'south',physicalSize:{w:12,h:8}},
+  {id:'B-store',near:'A-yard',sector:'east',physicalSize:{w:4,h:4}},
+ ]},next);
+ assert.deepEqual(second.shapes.find(s=>s.id==='A-yard'),yard);
+ assert.deepEqual(second.pins.find(p=>p.id==='A-yard'),next.pins.find(p=>p.id==='A-yard'));
+});
+
 const box=(id,x0,x1,y0=0,y1=30)=>({id,name:id,quality:'estimated',pts:[[x0,y0],[x1,y0],[x1,y1],[x0,y1]]});
 function corridorFixture(){
  const locations=[{id:'A',name:'甲城',entityKind:'city',mapId:'world',parentLocationId:'country'},
@@ -69,17 +105,21 @@ function familyFixture(){
  const outer=make('outer-map','outer'),inner=make('inner-map','inner');parent.children=[outer,inner];
  return {parent,outer,inner,nodes:new Map([['inner-map',inner],['outer-map',outer],['city',parent]]),locations:[{id:'outer',name:'外区'},{id:'inner',name:'内区'}]};
 }
-test('child maps inherit the parent polygon and preserve adjacent sibling direction and navigation',()=>{
- const {nodes,locations,outer}=familyFixture();projectMapContext(nodes,locations);
- const context=outer.geo.parentContext;assert.equal(context.parentMapId,'city');
- assert.deepEqual(context.active.pts,[[-50,-37.5],[50,-37.5],[37.5,37.5],[-50,31.25]]);
- assert.deepEqual(outer.geo.districts[0].pts,context.active.pts);
- const marker=outer.marks.find(m=>m.id==='inner');assert.ok(marker.x>50);assert.equal(marker.node.id,'inner-map');assert.equal(marker.context,true);
- assert.ok(outer.extent[1]>100);
+test('子图保留自己的坐标系；兄弟地图只留在父图中，不扩大子图取景',()=>{
+ const {nodes,locations,outer,parent}=familyFixture(),before=structuredClone(outer);
+ projectMapContext(nodes,locations);
+ assert.deepEqual(outer,before);
+ assert.equal(outer.parentMapId,parent.id);
+ assert.deepEqual(parent.children.map(n=>n.id),['outer-map','inner-map']);
+ assert.equal(outer.marks.some(m=>m.id==='inner'),false);
 });
-test('only visible sibling maps enter the inherited context',()=>{
- const f=familyFixture();f.nodes.delete('inner-map');f.parent.children=[f.outer];f.parent.geo.districts=f.parent.geo.districts.filter(s=>s.id==='outer');projectMapContext(f.nodes,[f.locations[0]]);
- assert.deepEqual(f.outer.geo.parentContext.siblings,[]);assert.equal(f.outer.marks.some(m=>m.id==='inner'),false);
+test('远方兄弟地图及其显隐变化不改变本图几何、坐标、尺寸或取景',()=>{
+ const f=familyFixture();
+ f.parent.geo.districts[1]=box('inner',1000000,2000000,1000000,2000000);
+ const before=structuredClone(f.outer);
+ projectMapContext(f.nodes,f.locations);assert.deepEqual(f.outer,before);
+ f.nodes.delete('inner-map');f.parent.children=[f.outer];f.parent.geo.districts=f.parent.geo.districts.filter(s=>s.id==='outer');
+ projectMapContext(f.nodes,[f.locations[0]]);assert.deepEqual(f.outer,before);
 });
 
 test('室内图按物理房间显示，不把室外同级地图纳入适应视野范围',()=>{
@@ -89,7 +129,7 @@ test('室内图按物理房间显示，不把室外同级地图纳入适应视�
  assert.deepEqual(f.outer.extent,extent);
  assert.deepEqual(f.outer.geo,geometry);
  assert.equal(f.outer.marks.some(m=>m.context),false);
- assert.ok(f.inner.geo.parentContext,'地理分区仍保留父图上下文');
+ assert.equal(f.inner.geo.parentContext,undefined,'所有子图均使用自己的局部坐标系');
 });
 
 const input=extra=>({anchor:{chatUid:IDS.chatA,branchId:IDS.branchMain,parentTurnId:IDS.seedTurn,hostMessageUid:'hierarchy-fix',variantKey:'v1',baseRevision:0,baseStorageRevision:0,inputHash:'hierarchy-fix'},userText:'',assistantText:'查看地图。',sourceSnapshot:[],manual:true,sceneOnly:true,phaseBatches:[],operations:[],...extra});

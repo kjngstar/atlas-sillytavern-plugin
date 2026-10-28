@@ -141,12 +141,9 @@ export function overview(spec,previous=null){
   if(unitScale!==1&&previous)previous=scaleLayout(previous,unitScale);
   const issues=[];
   if(!plain(spec)||typeof spec.id!=='string'||!spec.id)return {ok:false,issues:[{id:null,code:'OVERVIEW_INPUT_INVALID'}],kept};
-  const zonesIn=ordered(Array.isArray(spec.zones)?spec.zones:[]).slice(0,LIMITS.zones);
-  const linksIn=ordered(Array.isArray(spec.links)?spec.links:[]).slice(0,LIMITS.links);
-  const featuresIn=ordered(Array.isArray(spec.features)?spec.features:[]).slice(0,LIMITS.features);
-  if((spec.zones??[]).length>LIMITS.zones)issues.push({id:null,code:'OVERVIEW_ZONE_LIMIT'});
-  if((spec.links??[]).length>LIMITS.links)issues.push({id:null,code:'OVERVIEW_LINK_LIMIT'});
-  if((spec.features??[]).length>LIMITS.features)issues.push({id:null,code:'OVERVIEW_FEATURE_LIMIT'});
+  const zonesIn=ordered(Array.isArray(spec.zones)?spec.zones:[]);
+  const linksIn=ordered(Array.isArray(spec.links)?spec.links:[]);
+  const featuresIn=ordered(Array.isArray(spec.features)?spec.features:[]);
   let w=spec.width,h=spec.height;
   if(!finite(w)||!finite(h)||w<=0||h<=0)return {ok:false,issues:[...issues,{id:spec.id,code:'OVERVIEW_EXTENT_INVALID'}],kept};
   // ── 步 1：幅面与锁。锁可以把幅面撑大，但只增不减，因此不会每轮抖动。
@@ -169,29 +166,62 @@ export function overview(spec,previous=null){
     const ratio=SIZE_RATIO[SIZE_SET.has(z.size)?z.size:'medium'];
     baseRadius.set(z.id,z.physicalSize?Math.max(z.physicalSize.w,z.physicalSize.h)/2:S*ratio);
   }
-  const occupied=[];
-  for(const z of zonesIn)if(finite(z.locked?.x)&&finite(z.locked.y))occupied.push({id:z.id,point:pt(z.locked.x,z.locked.y),radius:baseRadius.get(z.id)});
+  // Keep drawing sizes separate from collision envelopes: rectangle corners
+  // and the jitter in natural outlines extend beyond the nominal radius.
+  const footprintRadius=new Map(zonesIn.map(z=>[z.id,z.lockedPolygon?.length>=3
+    ?Math.max(...z.lockedPolygon.map(p=>distance(p,z.locked??centroid(z.lockedPolygon))))
+    :z.physicalSize?Math.hypot(z.physicalSize.w,z.physicalSize.h)/2
+      :Math.max(...zonePolygon(z,0,0,baseRadius.get(z.id),seed).map(p=>Math.hypot(p.x,p.y)))]));
+  const structureKeyOf=z=>stable({role:z.role??null,size:z.size??null,...(z.physicalSize?{physicalSize:z.physicalSize}:{}),sector:z.sector??null,near:z.near??null,locked:z.locked??null,lockedPolygon:z.lockedPolygon??null,placementPolicy:3});
+  const occupied=[],sites=new Map(),reasons=new Map();
+  for(const z of zonesIn){
+    const old=prevShapes.get(z.id),pin=prevPins.get(z.id);
+    const locked=finite(z.locked?.x)&&finite(z.locked.y)?z.locked:null;
+    const saved=old?.structureKey===structureKeyOf(z)&&old.polygon?.length>=3&&finite(pin?.x)&&finite(pin.y)?pin:null;
+    const fixed=locked??(z.lockedPolygon?.length>=3?centroid(z.lockedPolygon):saved);
+    if(fixed){
+      const point=pt(fixed.x,fixed.y);sites.set(z.id,point);
+      reasons.set(z.id,locked?'locked':'saved');
+      const polygon=z.lockedPolygon??(saved?old.polygon:null);
+      const radius=polygon?.length>=3?Math.max(...polygon.map(p=>distance(p,point))):footprintRadius.get(z.id);
+      footprintRadius.set(z.id,radius);
+      occupied.push({id:z.id,point,radius});
+    }
+  }
   const obstacles=[];
   for(const z of zonesIn)if(z.lockedPolygon?.length>=3)obstacles.push({id:z.id,polygon:z.lockedPolygon});
   // 注意：上一轮的估计多边形不进 obstacles——它是本程序自己的输出，且已通过 occupied 占位；
   // 把它当障碍会让"新增一个 zone"把老 zone 重新排位（G04 不允许）。
-  const sites=new Map(),reasons=new Map();
   const minGap=S/12;
-  for(const z of zonesIn){
-    if(finite(z.locked?.x)&&finite(z.locked.y)){sites.set(z.id,pt(z.locked.x,z.locked.y));reasons.set(z.id,'locked');continue;}
-    const r=baseRadius.get(z.id);
-    const near=z.near&&sites.get(z.near)?sites.get(z.near):null;
+  const pending=zonesIn.filter(z=>!sites.has(z.id));
+  while(pending.length){
+    // Resolve anchors first. When all remaining nodes depend on each other,
+    // start inside the actual cycle, not at an external dependent sorted first.
+    let ready=pending.findIndex(z=>!z.near||!pending.some(other=>other.id===z.near));
+    if(ready<0){
+      let anchor=pending[0];const visited=new Set();
+      while(!visited.has(anchor.id)){visited.add(anchor.id);anchor=pending.find(z=>z.id===anchor.near);}
+      ready=pending.indexOf(anchor);
+    }
+    const z=pending.splice(ready,1)[0];
+    const r=footprintRadius.get(z.id);
+    const near=z.near?sites.get(z.near):null;
+    const nearRadius=near?footprintRadius.get(z.near)??r:0;
+    // Nearby footprints need spacing based on their sizes, not on the entire
+    // world's width. A direction with near is relative to that anchor.
+    const spacing=near?Math.max(r,nearRadius):z.physicalSize?r:minGap;
     const angle=SECTOR_ANGLE[z.sector];
-    const target=angle!==undefined?pt(W*(.5+.24*Math.cos(angle)),H*(.5+.24*Math.sin(angle))):near?pt(clamp(near.x,box.x0,box.x1),clamp(near.y,box.y0,box.y1)):pt((box.x0+box.x1)/2,(box.y0+box.y1)/2);
+    const offset=near?r+nearRadius+spacing*.15:0;
+    const target=near?pt(near.x+(angle===undefined?0:offset*Math.cos(angle)),near.y+(angle===undefined?0:offset*Math.sin(angle))):angle!==undefined?pt(W*(.5+.24*Math.cos(angle)),H*(.5+.24*Math.sin(angle))):pt((box.x0+box.x1)/2,(box.y0+box.y1)/2);
     const startIndex=hashOf(`${seed}\u0000${z.id}`)%MAX_CANDIDATES;
     let chosen=null;
     for(const factor of GAP_FACTORS){
-      const gap=minGap*factor;
+      const gap=spacing*factor;
       for(let step=0;step<MAX_CANDIDATES;step++){
-        const index=startIndex+step,radius=gap*Math.sqrt(step+1),angle=index*GOLDEN_ANGLE;
+        const index=startIndex+step,radius=gap*Math.sqrt(near?step:step+1),angle=index*GOLDEN_ANGLE;
         const c=pt(target.x+radius*Math.cos(angle),target.y+radius*Math.sin(angle));
         if(c.x<box.x0+r||c.x>box.x1-r||c.y<box.y0+r||c.y>box.y1-r)continue;
-        if(!occupied.every(o=>distance(c,o.point)>=r+(o.radius??0)+gap*.15))continue;
+        if(!occupied.every(o=>distance(c,o.point)+EPS>=r+(o.radius??0)+gap*.15))continue;
         if(!obstacles.every(o=>!pointInPolygon(o.polygon,c)))continue;
         chosen=c;break;
       }
@@ -208,7 +238,7 @@ export function overview(spec,previous=null){
   for(const z of zonesIn){
     const site=sites.get(z.id);
     if(!site)continue;
-    const structureKey=stable({role:z.role??null,size:z.size??null,...(z.physicalSize?{physicalSize:z.physicalSize}:{}),sector:z.sector??null,near:z.near??null,locked:z.locked??null,lockedPolygon:z.lockedPolygon??null,placementPolicy:3});
+    const structureKey=structureKeyOf(z);
     const placement=z.placement==='proxy'?'proxy':undefined;
     const prevShape=prevShapes.get(z.id);
     if(prevShape&&prevShape.structureKey===structureKey&&prevShape.polygon?.length>=3){

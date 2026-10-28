@@ -2209,15 +2209,15 @@ function decisionActorBudget(maxTokens) {
   const raw = Math.floor((Number(maxTokens) - ATLAS_RUNTIME_LIMITS.decisionOutputReserveTokens) / ATLAS_RUNTIME_LIMITS.decisionActorOutputTokens);
   return Math.max(1, raw);
 }
-var ATLAS_RUNTIME_LIMITS, ATLAS_FIELD_LIMITS, ACTION_PAYLOAD_REF_LIMIT, ACTION_DEPENDS_LIMIT, CAPABILITY_LIMIT, MOBILITY_PROFILE_LIMIT, ALIAS_LIMIT, PARTICIPANTS_LIMIT, GEOMETRY_VERTEX_LIMIT, MENTION_RECENT_LIMIT, MENTION_LOREBOOK_LIMIT, MENTION_CONTEXT_SUMMARY_CHARS, WHY_MAX_CHARS, ITEM_PROPERTY_LIMIT;
+var ATLAS_RUNTIME_LIMITS, ATLAS_FIELD_LIMITS, ACTION_PAYLOAD_REF_LIMIT, ACTION_DEPENDS_LIMIT, GEOMETRY_VERTEX_LIMIT, MENTION_RECENT_LIMIT, MENTION_LOREBOOK_LIMIT, MENTION_CONTEXT_SUMMARY_CHARS, WHY_MAX_CHARS;
 var init_atlas_runtime_limits = __esm({
   "src/atlas-runtime-limits.ts"() {
     "use strict";
     init_define_ATLAS_BUILD_INFO();
     ATLAS_RUNTIME_LIMITS = {
       responseUtf8Bytes: 256 * 1024,
-      operationsPerResponse: 64,
-      operationUtf8Bytes: 8 * 1024,
+      /** Planned construction work per window; never a parser or response acceptance limit. */
+      constructionOperationsPerBatch: 64,
       /** map.layout.request 的 spec 预算（与空间生成器 inputBytes 一致）。 */
       layoutSpecUtf8Bytes: 64 * 1024,
       responseJsonDepth: 16,
@@ -2255,12 +2255,6 @@ var init_atlas_runtime_limits = __esm({
       /** 单个批次最多把本次目标再向下展开的父边数。 */
       additionalParentDepthPerBatch: 2,
       batchOutputReserveTokens: 384,
-      /** 单张概览图的分区上限（G11 场景体积预算）。 */
-      overviewZoneLimit: 64,
-      /** 单张概览图的地物上限。 */
-      overviewFeatureLimit: 128,
-      /** 单张概览图的连接（路线/水系）上限。 */
-      overviewLinkLimit: 128,
       /** 保存场景（maps.frame_json.atlasScene）的 UTF-8 字节上限，与 vendor 生成器一致。 */
       sceneSaveUtf8Bytes: 512 * 1024,
       /** 定向引用目录单次解析的最大条目数（超过则要求更窄的目标范围）。 */
@@ -2275,11 +2269,6 @@ var init_atlas_runtime_limits = __esm({
       feedTurnJournalMax: 2e3
     };
     ATLAS_FIELD_LIMITS = {
-      aliasLimit: 8,
-      capabilityLimit: 16,
-      mobilityProfileLimit: 8,
-      itemPropertyLimit: 16,
-      participantsLimit: 16,
       geometryVertexLimit: 256,
       mentionRecentLimit: 8,
       journeySegmentLimit: 32,
@@ -2288,16 +2277,11 @@ var init_atlas_runtime_limits = __esm({
     };
     ACTION_PAYLOAD_REF_LIMIT = 8;
     ACTION_DEPENDS_LIMIT = 8;
-    CAPABILITY_LIMIT = 16;
-    MOBILITY_PROFILE_LIMIT = 8;
-    ALIAS_LIMIT = 8;
-    PARTICIPANTS_LIMIT = 16;
     GEOMETRY_VERTEX_LIMIT = 256;
     MENTION_RECENT_LIMIT = 8;
     MENTION_LOREBOOK_LIMIT = 8;
     MENTION_CONTEXT_SUMMARY_CHARS = 200;
     WHY_MAX_CHARS = 200;
-    ITEM_PROPERTY_LIMIT = 16;
   }
 });
 
@@ -4365,6 +4349,11 @@ function parseWholeArguments(value) {
 function checkSceneDocument(doc) {
   const issues = [];
   if (!plain(doc) || doc.kind !== SCENE_KIND || doc.version !== SCENE_VERSION) return [diagnostic("SCENE_VERSION_UNSUPPORTED", "$", "不支持的场景文档版本")];
+  try {
+    if (bytes(doc) > LIMITS.sceneBytes) return [diagnostic("SCENE_TOO_LARGE", "$", "场景超过 512 KiB，保留原场景")];
+  } catch {
+    return [diagnostic("SCENE_SERIALIZATION_FAILED", "$", "场景无法序列化")];
+  }
   if (typeof doc.mapId !== "string" || !doc.mapId || typeof doc.branchId !== "string" || !doc.branchId) issues.push(diagnostic("SCENE_ID_INVALID", "$.mapId", "需要地图与分支标识"));
   if (!["meters", "cells"].includes(doc.units) || !plain(doc.layout) || !["floor", "city", "overview"].includes(doc.layout.kind)) issues.push(diagnostic("SCENE_LAYOUT_INVALID", "$.layout", "需要已生成的布局与明确单位"));
   const b = doc.layout?.bounds;
@@ -4381,9 +4370,9 @@ function checkSceneDocument(doc) {
   const bad = (value, validate, path) => {
     if (!validate(value)) issues.push(diagnostic("SCENE_GEOMETRY_INVALID", path, "保存的几何字段不可绘制，使用 SQL 概览"));
   };
-  const collection2 = (key, validate, max = 4096) => {
+  const collection2 = (key, validate, max) => {
     if (!Array.isArray(shape?.[key])) return;
-    if (shape[key].length > max) {
+    if (max !== void 0 && shape[key].length > max) {
       issues.push(diagnostic("SCENE_COLLECTION_LIMIT", "$.layout." + key, "保存的几何集合超出预算"));
       return;
     }
@@ -4398,7 +4387,7 @@ function checkSceneDocument(doc) {
       else if (Array.isArray(shape.rooms) && shape.rooms.some((r) => r && r.id === c.entityId)) issues.push(diagnostic("SCENE_CORRIDOR_DUPLICATED", "$.layout.corridor.entityId", "绑定的走廊地点不得同时出现在普通房间列表中"));
     }
     if (plain(c) && c.name !== void 0 && c.name !== null && typeof c.name !== "string") issues.push(diagnostic("SCENE_CORRIDOR_INVALID", "$.layout.corridor.name", "命名走廊的名称必须是字符串"));
-    collection2("rooms", (p) => rect(p) && ["north", "south"].includes(p.side), LIMITS.rooms);
+    collection2("rooms", (p) => rect(p) && ["north", "south"].includes(p.side));
     if (shape.areas !== void 0) {
       if (!Array.isArray(shape.areas)) issues.push(diagnostic("SCENE_FUNCTIONAL_AREAS_INVALID", "$.layout.areas", "功能分区必须是数组"));
       const hosts = [...shape.rooms, ...shape.hostArea ? [shape.hostArea] : []], ids2 = /* @__PURE__ */ new Set();
@@ -4407,12 +4396,12 @@ function checkSceneDocument(doc) {
         const valid = rect(p) && p.version === 1 && typeof p.id === "string" && p.id.length > 0 && typeof p.name === "string" && !ids2.has(p.id) && !hosts.some((r) => r.id === p.id) && ["estimated", "confirmed"].includes(p.quality) && host && p.x >= host.x - eps && p.y >= host.y - eps && p.x + p.w <= host.x + host.w + eps && p.y + p.h <= host.y + host.h + eps;
         ids2.add(p?.id);
         return valid;
-      }, LIMITS.zones);
+      });
     }
-    collection2("groups", (p) => rect(p) && Array.isArray(p.bodies) && p.bodies.every(rect), LIMITS.contents);
+    collection2("groups", (p) => rect(p) && Array.isArray(p.bodies) && p.bodies.every(rect));
     collection2("bodies", rect);
-    collection2("actors", point, LIMITS.actors);
-    collection2("items", point, LIMITS.items);
+    collection2("actors", point);
+    collection2("items", point);
     collection2("doors", (p) => point(p) && finite(p.width) && p.width > 0);
     collection2("windows", point);
     collection2("lamps", point);
@@ -4430,7 +4419,7 @@ function checkSceneDocument(doc) {
       bad(shape.dock, (p) => point(p) && finite(p.width) && p.width > 0, "$.layout.dock");
       bad(shape.river, (p) => plain(p) && [p.cx, p.amplitude, p.width, p.height].every(finite) && p.width > 0 && p.height > 0, "$.layout.river");
     } else if (shape.riverPolygon?.length || shape.dock !== null) issues.push(diagnostic("SCENE_GEOMETRY_INVALID", "$.layout.river", "无河流的城市不能保留水域或码头"));
-    collection2("districts", (p) => plain(p) && polygon2(p.polygon) && point(p.site), LIMITS.districts);
+    collection2("districts", (p) => plain(p) && polygon2(p.polygon) && point(p.site));
     collection2("buildings", rect);
     collection2("gates", point);
     for (const key of ["roads", "segments"]) collection2(key, (p) => plain(p) && point(p.a) && point(p.b) && finite(p.width) && p.width > 0);
@@ -4455,9 +4444,9 @@ function checkSceneDocument(doc) {
     const shapeRef = (p) => plain(p) && polygon2(p.polygon) && p.polygon.every(inside2);
     const routeRef = (p) => plain(p) && Array.isArray(p.path) && p.path.length >= 2 && p.path.every(inside2);
     collection2("pins", inside2, LIMITS.markers);
-    collection2("shapes", shapeRef, LIMITS.zones);
-    collection2("routes", routeRef, LIMITS.links);
-    collection2("features", feature, LIMITS.features);
+    collection2("shapes", shapeRef);
+    collection2("routes", routeRef);
+    collection2("features", feature);
     if (shape.selfArea !== void 0 && shape.selfArea !== null) {
       const sa = shape.selfArea, ok = plain(sa) && typeof sa.locationId === "string" && !!sa.locationId && Array.isArray(sa.polygon) && sa.polygon.length >= 3 && sa.polygon.every(inside2) && SELF_AREA_QUALITIES.includes(sa.quality) && SELF_AREA_SOURCES.includes(sa.source);
       if (!ok) issues.push(diagnostic("SCENE_SELF_AREA_INVALID", "$.layout.selfArea", "自身示意需要合法的容器引用、范围多边形、质量与来源"));
@@ -4502,14 +4491,9 @@ function checkSceneDocument(doc) {
   scan(doc, "$");
   if (invalidNumber) issues.push(diagnostic("SCENE_NUMBER_INVALID", invalidNumber, "场景坐标和尺寸必须是有限数值"));
   if (invalidCycle) issues.push(diagnostic("SCENE_STRUCTURE_INVALID", "$", "场景不得含循环或过深结构"));
-  try {
-    if (bytes(doc) > LIMITS.sceneBytes) issues.push(diagnostic("SCENE_TOO_LARGE", "$", "场景超过 512 KiB，保留原场景"));
-  } catch {
-    issues.push(diagnostic("SCENE_SERIALIZATION_FAILED", "$", "场景无法序列化"));
-  }
   return issues;
 }
-var KIT_VERSION, SCENE_KIND, SCENE_VERSION, FRAME_SCENE_KEY, FRAME_SPACE_CANONICAL_KEY, SPACE_CANONICAL_MAX_FURNISHING, LIMITS, OVERVIEW_FEATURE_TYPES, OVERVIEW_SURFACES, OVERVIEW_ZONE_ROLES, OVERVIEW_ZONE_SIZES, OVERVIEW_DENSITIES, OVERVIEW_SECTORS, OVERVIEW_WIDTH_CLASSES, CITY_ENCLOSURES, SCENE_QUALITIES, SELF_AREA_QUALITIES, SELF_AREA_SOURCES, clone, finite, plain, bytes;
+var KIT_VERSION, SCENE_KIND, SCENE_VERSION, FRAME_SCENE_KEY, FRAME_SPACE_CANONICAL_KEY, LIMITS, OVERVIEW_FEATURE_TYPES, OVERVIEW_SURFACES, OVERVIEW_ZONE_ROLES, OVERVIEW_ZONE_SIZES, OVERVIEW_DENSITIES, OVERVIEW_SECTORS, OVERVIEW_WIDTH_CLASSES, CITY_ENCLOSURES, SCENE_QUALITIES, SELF_AREA_QUALITIES, SELF_AREA_SOURCES, clone, finite, plain, bytes;
 var init_contracts = __esm({
   "vendor/atlas-spatial/contracts.mjs"() {
     "use strict";
@@ -4519,8 +4503,7 @@ var init_contracts = __esm({
     SCENE_VERSION = 1;
     FRAME_SCENE_KEY = "atlasScene";
     FRAME_SPACE_CANONICAL_KEY = "atlasSpaceCanonical";
-    SPACE_CANONICAL_MAX_FURNISHING = 128;
-    LIMITS = Object.freeze({ inputBytes: 65536, sceneBytes: 524288, rooms: 24, contents: 128, actors: 128, items: 256, districts: 16, buildings: 64, blocksPerDistrict: 24, floorSide: 100, roomSide: 40, citySide: 2e4, navigationCells: 18e4, markers: 512, overlays: 256, pathPoints: 2048, zones: 64, features: 128, links: 128, watercourseSegments: 24 });
+    LIMITS = Object.freeze({ inputBytes: 65536, sceneBytes: 524288, blocksPerDistrict: 24, navigationCells: 18e4, markers: 512, overlays: 256, pathPoints: 2048, watercourseSegments: 24 });
     OVERVIEW_FEATURE_TYPES = Object.freeze(["forest_texture", "ridge", "shore", "building_cluster", "road_texture", "ruins_scatter", "watercourse"]);
     OVERVIEW_SURFACES = Object.freeze(["mixed", "urban", "forest", "mountain", "water", "indoor", "void"]);
     OVERVIEW_ZONE_ROLES = Object.freeze(["city", "settlement", "forest", "water", "mountain", "ruins", "district", "campus", "land", "other"]);
@@ -5518,12 +5501,9 @@ function overview(spec, previous = null) {
   if (unitScale !== 1 && previous) previous = scaleLayout(previous, unitScale);
   const issues = [];
   if (!plain(spec) || typeof spec.id !== "string" || !spec.id) return { ok: false, issues: [{ id: null, code: "OVERVIEW_INPUT_INVALID" }], kept };
-  const zonesIn = ordered3(Array.isArray(spec.zones) ? spec.zones : []).slice(0, LIMITS.zones);
-  const linksIn = ordered3(Array.isArray(spec.links) ? spec.links : []).slice(0, LIMITS.links);
-  const featuresIn = ordered3(Array.isArray(spec.features) ? spec.features : []).slice(0, LIMITS.features);
-  if ((spec.zones ?? []).length > LIMITS.zones) issues.push({ id: null, code: "OVERVIEW_ZONE_LIMIT" });
-  if ((spec.links ?? []).length > LIMITS.links) issues.push({ id: null, code: "OVERVIEW_LINK_LIMIT" });
-  if ((spec.features ?? []).length > LIMITS.features) issues.push({ id: null, code: "OVERVIEW_FEATURE_LIMIT" });
+  const zonesIn = ordered3(Array.isArray(spec.zones) ? spec.zones : []);
+  const linksIn = ordered3(Array.isArray(spec.links) ? spec.links : []);
+  const featuresIn = ordered3(Array.isArray(spec.features) ? spec.features : []);
   let w = spec.width, h = spec.height;
   if (!finite(w) || !finite(h) || w <= 0 || h <= 0) return { ok: false, issues: [...issues, { id: spec.id, code: "OVERVIEW_EXTENT_INVALID" }], kept };
   const locked = confirmedSpots(zonesIn, linksIn);
@@ -5549,31 +5529,56 @@ function overview(spec, previous = null) {
     const ratio = SIZE_RATIO[SIZE_SET.has(z.size) ? z.size : "medium"];
     baseRadius.set(z.id, z.physicalSize ? Math.max(z.physicalSize.w, z.physicalSize.h) / 2 : S * ratio);
   }
-  const occupied = [];
-  for (const z of zonesIn) if (finite(z.locked?.x) && finite(z.locked.y)) occupied.push({ id: z.id, point: pt2(z.locked.x, z.locked.y), radius: baseRadius.get(z.id) });
+  const footprintRadius = new Map(zonesIn.map((z) => [z.id, z.lockedPolygon?.length >= 3 ? Math.max(...z.lockedPolygon.map((p) => distance2(p, z.locked ?? centroid(z.lockedPolygon)))) : z.physicalSize ? Math.hypot(z.physicalSize.w, z.physicalSize.h) / 2 : Math.max(...zonePolygon(z, 0, 0, baseRadius.get(z.id), seed).map((p) => Math.hypot(p.x, p.y)))]));
+  const structureKeyOf = (z) => stable({ role: z.role ?? null, size: z.size ?? null, ...z.physicalSize ? { physicalSize: z.physicalSize } : {}, sector: z.sector ?? null, near: z.near ?? null, locked: z.locked ?? null, lockedPolygon: z.lockedPolygon ?? null, placementPolicy: 3 });
+  const occupied = [], sites = /* @__PURE__ */ new Map(), reasons = /* @__PURE__ */ new Map();
+  for (const z of zonesIn) {
+    const old = prevShapes.get(z.id), pin = prevPins.get(z.id);
+    const locked2 = finite(z.locked?.x) && finite(z.locked.y) ? z.locked : null;
+    const saved = old?.structureKey === structureKeyOf(z) && old.polygon?.length >= 3 && finite(pin?.x) && finite(pin.y) ? pin : null;
+    const fixed = locked2 ?? (z.lockedPolygon?.length >= 3 ? centroid(z.lockedPolygon) : saved);
+    if (fixed) {
+      const point = pt2(fixed.x, fixed.y);
+      sites.set(z.id, point);
+      reasons.set(z.id, locked2 ? "locked" : "saved");
+      const polygon2 = z.lockedPolygon ?? (saved ? old.polygon : null);
+      const radius = polygon2?.length >= 3 ? Math.max(...polygon2.map((p) => distance2(p, point))) : footprintRadius.get(z.id);
+      footprintRadius.set(z.id, radius);
+      occupied.push({ id: z.id, point, radius });
+    }
+  }
   const obstacles = [];
   for (const z of zonesIn) if (z.lockedPolygon?.length >= 3) obstacles.push({ id: z.id, polygon: z.lockedPolygon });
-  const sites = /* @__PURE__ */ new Map(), reasons = /* @__PURE__ */ new Map();
   const minGap = S / 12;
-  for (const z of zonesIn) {
-    if (finite(z.locked?.x) && finite(z.locked.y)) {
-      sites.set(z.id, pt2(z.locked.x, z.locked.y));
-      reasons.set(z.id, "locked");
-      continue;
+  const pending = zonesIn.filter((z) => !sites.has(z.id));
+  while (pending.length) {
+    let ready = pending.findIndex((z2) => !z2.near || !pending.some((other) => other.id === z2.near));
+    if (ready < 0) {
+      let anchor = pending[0];
+      const visited = /* @__PURE__ */ new Set();
+      while (!visited.has(anchor.id)) {
+        visited.add(anchor.id);
+        anchor = pending.find((z2) => z2.id === anchor.near);
+      }
+      ready = pending.indexOf(anchor);
     }
-    const r = baseRadius.get(z.id);
-    const near = z.near && sites.get(z.near) ? sites.get(z.near) : null;
+    const z = pending.splice(ready, 1)[0];
+    const r = footprintRadius.get(z.id);
+    const near = z.near ? sites.get(z.near) : null;
+    const nearRadius = near ? footprintRadius.get(z.near) ?? r : 0;
+    const spacing = near ? Math.max(r, nearRadius) : z.physicalSize ? r : minGap;
     const angle = SECTOR_ANGLE[z.sector];
-    const target2 = angle !== void 0 ? pt2(W * (0.5 + 0.24 * Math.cos(angle)), H * (0.5 + 0.24 * Math.sin(angle))) : near ? pt2(clamp(near.x, box.x0, box.x1), clamp(near.y, box.y0, box.y1)) : pt2((box.x0 + box.x1) / 2, (box.y0 + box.y1) / 2);
+    const offset = near ? r + nearRadius + spacing * 0.15 : 0;
+    const target2 = near ? pt2(near.x + (angle === void 0 ? 0 : offset * Math.cos(angle)), near.y + (angle === void 0 ? 0 : offset * Math.sin(angle))) : angle !== void 0 ? pt2(W * (0.5 + 0.24 * Math.cos(angle)), H * (0.5 + 0.24 * Math.sin(angle))) : pt2((box.x0 + box.x1) / 2, (box.y0 + box.y1) / 2);
     const startIndex = hashOf(`${seed}\0${z.id}`) % MAX_CANDIDATES;
     let chosen = null;
     for (const factor of GAP_FACTORS) {
-      const gap = minGap * factor;
+      const gap = spacing * factor;
       for (let step = 0; step < MAX_CANDIDATES; step++) {
-        const index = startIndex + step, radius = gap * Math.sqrt(step + 1), angle2 = index * GOLDEN_ANGLE;
+        const index = startIndex + step, radius = gap * Math.sqrt(near ? step : step + 1), angle2 = index * GOLDEN_ANGLE;
         const c = pt2(target2.x + radius * Math.cos(angle2), target2.y + radius * Math.sin(angle2));
         if (c.x < box.x0 + r || c.x > box.x1 - r || c.y < box.y0 + r || c.y > box.y1 - r) continue;
-        if (!occupied.every((o) => distance2(c, o.point) >= r + (o.radius ?? 0) + gap * 0.15)) continue;
+        if (!occupied.every((o) => distance2(c, o.point) + EPS3 >= r + (o.radius ?? 0) + gap * 0.15)) continue;
         if (!obstacles.every((o) => !pointInPolygon(o.polygon, c))) continue;
         chosen = c;
         break;
@@ -5593,7 +5598,7 @@ function overview(spec, previous = null) {
   for (const z of zonesIn) {
     const site = sites.get(z.id);
     if (!site) continue;
-    const structureKey = stable({ role: z.role ?? null, size: z.size ?? null, ...z.physicalSize ? { physicalSize: z.physicalSize } : {}, sector: z.sector ?? null, near: z.near ?? null, locked: z.locked ?? null, lockedPolygon: z.lockedPolygon ?? null, placementPolicy: 3 });
+    const structureKey = structureKeyOf(z);
     const placement = z.placement === "proxy" ? "proxy" : void 0;
     const prevShape = prevShapes.get(z.id);
     if (prevShape && prevShape.structureKey === structureKey && prevShape.polygon?.length >= 3) {
@@ -5906,7 +5911,6 @@ function fitEstimatedFloor(generate, value, context2) {
       if (context2.locks?.rooms?.[r.id] || context2.planningProjection) continue;
       r.w = Math.ceil(original.w * factor * 4) / 4;
       r.h = Math.ceil(original.h * factor * 4) / 4;
-      if (r.w > LIMITS.roomSide || r.h > LIMITS.roomSide) return best;
     }
     const width = Math.max(...["north", "south"].map((side) => next.rooms.filter((r) => r.side === side).reduce((n2, r) => n2 + r.w, 1)));
     const heights = ["north", "south"].map((side) => Math.max(0, ...next.rooms.filter((r) => r.side === side).map((r) => r.h)));
@@ -5914,7 +5918,6 @@ function fitEstimatedFloor(generate, value, context2) {
     const required = { widthM: single ? next.rooms[0].w : width, heightM: single ? next.rooms[0].h : 2 * Math.max(...heights) + (next.corridorWidth ?? 2) + 1 };
     const current2 = context2.spaceSize ?? context2.spaceCanonical?.size ?? { widthM: context2.map.metersPerCell > 0 ? context2.map.frame.cols * context2.map.metersPerCell : value.width, heightM: context2.map.metersPerCell > 0 ? context2.map.frame.rows * context2.map.metersPerCell : value.height };
     const size = canGrowCanvas ? { ...current2, widthM: Math.ceil(Math.max(current2.widthM, required.widthM) * 4) / 4, heightM: Math.ceil(Math.max(current2.heightM, required.heightM) * 4) / 4, quality: "estimated" } : current2;
-    if (size.widthM > LIMITS.floorSide || size.heightM > LIMITS.floorSide) break;
     const map = canGrowCanvas ? { ...context2.map, metersPerCell: 0.25, frame: { ...context2.map.frame, cols: size.widthM / 0.25, rows: size.heightM / 0.25 } } : context2.map;
     const result = generate(next, { ...context2, map, childSpaces: children, spaceSize: size });
     const n = count(result);
@@ -5985,7 +5988,6 @@ function setup(value, context2, kind) {
       metricProposal = { metersPerCell: mpp, scaleQuality: "estimated", basis: { source: "layout-extent", widthM: w, heightM: h } };
     }
   }
-  if (kind === "floor" && (w > LIMITS.floorSide || h > LIMITS.floorSide) || kind === "city" && (w > LIMITS.citySide || h > LIMITS.citySide)) throw new Error("EXTENT_TOO_LARGE");
   const issues = [], spec = { id: map.id, parentId: map.containerLocationId ?? null, name: label(map.name) || label(input.name) || map.id, width: w, height: h };
   if (kind === "overview") {
     spec.containerKind = map.containerKind ?? null;
@@ -5995,9 +5997,9 @@ function setup(value, context2, kind) {
   }
   return { scope, input, map, known, spec, issues, mpp, units, metricProposal, previous: context2.previousScene ?? null };
 }
-function collection(s, key, limit, kind, normalize2) {
+function collection(s, key, kind, normalize2) {
   const values = s.input[key] ?? [];
-  if (!Array.isArray(values) || values.length > limit) throw new Error("COLLECTION_LIMIT:" + key);
+  if (!Array.isArray(values)) throw new Error("COLLECTION_INVALID:" + key);
   const seen = /* @__PURE__ */ new Set(), out = [];
   for (let n = 0; n < values.length; n++) {
     const raw = values[n], path = "$." + key + "[" + n + "]";
@@ -6041,8 +6043,8 @@ function deletionSet(s, key) {
   }
   return out;
 }
-function collectAndMerge(s, key, limit, kind, normalize2) {
-  const requestRows = collection(s, key, limit, kind, normalize2);
+function collectAndMerge(s, key, kind, normalize2) {
+  const requestRows = collection(s, key, kind, normalize2);
   if (s.input.rebuild === true) return requestRows;
   const saved = s.previous?.constraints;
   if (!plain(saved) || !Array.isArray(saved[key])) return requestRows;
@@ -6059,10 +6061,6 @@ function collectAndMerge(s, key, limit, kind, normalize2) {
     } catch (e) {
       s.issues.push(diagnostic(String(e.message), "$.previousScene.constraints." + key, "已保存约束条目不可用，其他独立项继续处理", { entityId: raw.id }));
     }
-  }
-  if (out.size > limit) {
-    s.issues.push(diagnostic("COLLECTION_LIMIT:" + key, "$." + key, "合并已保存约束后超出预算，仅保留本次请求条目"));
-    return requestRows;
   }
   return sort([...out.values()]);
 }
@@ -6129,11 +6127,11 @@ function generateFloorOnce(value, context2) {
       const lock = rectLockOf(ctx, s.spec.corridorLocationRef);
       if (lock) s.spec.corridorLock = lock;
     }
-    s.spec.rooms = collectAndMerge(s, "rooms", LIMITS.rooms, "locations", (r) => {
+    s.spec.rooms = collectAndMerge(s, "rooms", "locations", (r) => {
       if (r.id !== s.map.containerLocationId && ctx.locationsById?.[r.id]?.kind === "floor") throw new Error("VERTICAL_SPACE_NAVIGATION_ONLY");
       const authority = r.id === s.map.containerLocationId ? ctx.spaceSize ?? ctx.spaceCanonical?.size : ctx.childSpaces?.[r.id];
       const d = ctx.locks?.rooms?.[r.id]?.w > 0 ? dimensions(ctx.locks.rooms[r.id]) : authority ? dimensions({ w: authority.widthM, h: authority.heightM }) : dimensions(r);
-      if (d.w > LIMITS.roomSide || d.h > LIMITS.roomSide || !["north", "south"].includes(r.side) || r.role !== void 0 && !["indoor", "outdoor", "garden"].includes(r.role)) throw new Error("ROOM_CONSTRAINT_UNSUPPORTED");
+      if (!["north", "south"].includes(r.side) || r.role !== void 0 && !["indoor", "outdoor", "garden"].includes(r.role)) throw new Error("ROOM_CONSTRAINT_UNSUPPORTED");
       const locked = trustedLock(ctx, "rooms", r.id);
       return { ...d, side: r.side, ...r.role ? { role: r.role } : {}, ...locked ? { locked } : {}, ...proxyPlacement(ctx, r.id) };
     });
@@ -6209,20 +6207,20 @@ function generateFloorOnce(value, context2) {
       if (seeded.length) s.input.contents = [...seeded, ...Array.isArray(s.input.contents) ? s.input.contents : []];
       if (seededItems.length) s.input.items = [...seededItems, ...Array.isArray(s.input.items) ? s.input.items : []];
     }
-    s.spec.contents = collectAndMerge(s, "contents", LIMITS.contents, null, (r) => {
+    s.spec.contents = collectAndMerge(s, "contents", null, (r) => {
       if (!roomIds.has(r.roomId)) throw new Error("ROOM_REF_UNKNOWN");
       if (!FLOOR_FURNITURE_TYPES.includes(r.type)) throw new Error("FURNITURE_TYPE_UNSUPPORTED");
       const locked = trustedLock(ctx, "contents", r.id);
       return { ...dimensions(r), roomId: r.roomId, type: r.type, ...locked ? { locked } : {} };
     });
     const groups = new Set(s.spec.contents.map((g) => g.id));
-    s.spec.actors = collectAndMerge(s, "actors", LIMITS.actors, "characters", (r) => {
+    s.spec.actors = collectAndMerge(s, "actors", "characters", (r) => {
       if (!roomIds.has(r.roomId) && !(r.roomId === s.map.containerLocationId && !s.spec.singleRoom)) throw new Error("ROOM_REF_UNKNOWN");
       if (r.near && !groups.has(r.near)) throw new Error("NEAR_REF_UNKNOWN");
       const position = trustedLock(ctx, "actors", r.id);
       return { roomId: r.roomId, ...r.near ? { near: r.near } : {}, ...position ? { position } : {} };
     });
-    s.spec.items = collectAndMerge(s, "items", LIMITS.items, "items", (r) => {
+    s.spec.items = collectAndMerge(s, "items", "items", (r) => {
       if (!groups.has(r.on)) throw new Error("ITEM_SUPPORT_UNKNOWN");
       return { on: r.on };
     });
@@ -6243,19 +6241,19 @@ function generateCity(value, context2) {
     s.spec.blocksPerDistrict = Number.isInteger(s.input.blocksPerDistrict) ? Math.max(0, Math.min(LIMITS.blocksPerDistrict, s.input.blocksPerDistrict)) : s.previous?.constraints?.blocksPerDistrict ?? 0;
     if (s.input.enclosure !== void 0 && !CITY_ENCLOSURES.includes(s.input.enclosure)) s.issues.push(diagnostic("ENCLOSURE_INVALID", "$.enclosure", "城市边界策略只能是 open 或 wall；已按既有/默认策略处理", { severity: "warning" }));
     s.spec.enclosure = CITY_ENCLOSURES.includes(s.input.enclosure) ? s.input.enclosure : s.previous ? s.previous.constraints?.enclosure ?? "wall" : "open";
-    s.spec.districts = collectAndMerge(s, "districts", LIMITS.districts, "locations", (r) => {
+    s.spec.districts = collectAndMerge(s, "districts", "locations", (r) => {
       if (!["west", "east"].includes(r.bank) || !finite(r.order)) throw new Error("DISTRICT_CONSTRAINT_INVALID");
       return { bank: r.bank, order: r.order, ...proxyPlacement(ctx, r.id) };
     });
     const districtIds = new Set(s.spec.districts.map((d) => d.id));
-    s.spec.buildings = collectAndMerge(s, "buildings", LIMITS.buildings, "locations", (r) => {
+    s.spec.buildings = collectAndMerge(s, "buildings", "locations", (r) => {
       let districtId = r.districtId;
       const row3 = ctx.locationsById?.[r.id], parent = row3?.parent_location_id, assigned = ctx.locationsById?.[districtId];
       const locked = trustedLock(ctx, "buildings", r.id);
       if (parent && assigned?.kind === "district" && districtId !== parent) {
         if (locked) throw new Error("DISTRICT_MEMBERSHIP_CONFLICT");
         if (districtIds.has(parent)) districtId = parent;
-        else if (parent === s.map.containerLocationId && s.spec.districts.length < LIMITS.districts) {
+        else if (parent === s.map.containerLocationId) {
           s.spec.districts.push({ id: parent, name: s.map.containerName ?? s.map.name, bank: "west", order: s.spec.districts.length });
           districtIds.add(parent);
           districtId = parent;
@@ -6278,7 +6276,6 @@ function generateOverview(value, context2) {
   if (!sizes.length) return first;
   const widthM = Math.ceil(Math.max(context2.map.frame.cols * context2.map.metersPerCell, sizes.reduce((n, s) => n + s.widthM + 2, 2)) * 4) / 4;
   const heightM = Math.ceil(Math.max(context2.map.frame.rows * context2.map.metersPerCell, 2 * Math.max(...sizes.map((s) => s.heightM)) + 2) * 4) / 4;
-  if (widthM > LIMITS.citySide || heightM > LIMITS.citySide) return first;
   const result = generateOverviewOnce(value, { ...context2, map: { ...context2.map, metersPerCell: 0.25, frame: { ...context2.map.frame, cols: widthM / 0.25, rows: heightM / 0.25 } } });
   if (result.ok && !result.issues.some((i) => i.severity === "error")) {
     result.plannedSize = { widthM, heightM };
@@ -6297,7 +6294,7 @@ function generateOverviewOnce(value, context2) {
     s.spec.seed = label(context2.seed) || s.map.id;
     if (s.input.seed !== void 0 && s.input.seed !== s.spec.seed) s.issues.push(diagnostic("SEED_OVERRIDDEN", "$.seed", "seed 由程序按地图给定，模型提供的值已忽略；已保存几何不会因此重排", { severity: "warning" }));
     s.spec.units = s.units;
-    s.spec.geometryPolicyVersion = 3;
+    s.spec.geometryPolicyVersion = 4;
     {
       const prevScene = context2?.previousScene;
       const flips = prevScene && prevScene.units !== s.units;
@@ -6312,7 +6309,7 @@ function generateOverviewOnce(value, context2) {
       const p = ctx.locks?.points?.[id];
       return p && finite(p.x) && finite(p.y) ? { x: p.x, y: p.y } : null;
     };
-    s.spec.zones = collectAndMerge(s, "zones", LIMITS.zones, "locations", (r) => {
+    s.spec.zones = collectAndMerge(s, "zones", "locations", (r) => {
       if (r.id !== s.map.containerLocationId && ctx.locationsById?.[r.id]?.kind === "floor") throw new Error("VERTICAL_SPACE_NAVIGATION_ONLY");
       const out = {};
       const size = ctx.childSpaces?.[r.id];
@@ -6340,7 +6337,7 @@ function generateOverviewOnce(value, context2) {
     s.spec.zones = s.spec.zones.filter((z) => z.id !== s.map.containerLocationId);
     const zoneIds = new Set(s.spec.zones.map((z) => z.id));
     for (const z of s.spec.zones) if (z.near && !zoneIds.has(z.near) && !s.known.locations.has(z.near)) s.issues.push(diagnostic("ZONE_NEAR_UNKNOWN", "$.zones", "near 指向的地点不在本分支引用表中，已忽略该提示", { severity: "warning", entityId: z.id }));
-    s.spec.links = collectAndMerge(s, "links", LIMITS.links, "routes", (r) => {
+    s.spec.links = collectAndMerge(s, "links", "routes", (r) => {
       const row3 = ctx.routesById?.[r.id], locked = ctx.locks?.routes?.[r.id], out = {};
       const from = row3?.from_location_id ?? null, to = row3?.to_location_id ?? null;
       if (from) out.fromLocationId = from;
@@ -6351,7 +6348,7 @@ function generateOverviewOnce(value, context2) {
       if (locked?.path?.length >= 2) out.locked = { quality: locked.quality === "confirmed" ? "confirmed" : "estimated", path: locked.path, fromLocationId: locked.fromLocationId ?? from, toLocationId: locked.toLocationId ?? to };
       return out;
     });
-    s.spec.features = collectAndMerge(s, "features", LIMITS.features, null, (r) => {
+    s.spec.features = collectAndMerge(s, "features", null, (r) => {
       if (ctx.locationsById?.[r.zoneId]?.kind === "floor") throw new Error("VERTICAL_SPACE_NAVIGATION_ONLY");
       if (!OVERVIEW_FEATURE_TYPES.includes(r.type)) throw new Error("FEATURE_TYPE_UNSUPPORTED");
       const out = { type: r.type };
@@ -6573,7 +6570,6 @@ function canonicalForScene(scene, previous, locationId, authorSize, deletedConte
   const prevList = Array.isArray(previous?.furnishing) ? previous.furnishing.filter(plain) : [];
   const prevByLocal = new Map(prevList.filter((e) => typeof e.localId === "string").map((e) => [e.localId, e]));
   const furnishing = [], seen = /* @__PURE__ */ new Set();
-  let droppedPrev = 0;
   for (const content of groups) {
     if (typeof content.id !== "string" || !content.id) continue;
     const parsedId = parseSpaceLocalId(content.id);
@@ -6588,16 +6584,12 @@ function canonicalForScene(scene, previous, locationId, authorSize, deletedConte
   for (const prev of prevList) {
     if (deletedContents.includes(prev.localId) || deletedContents.includes(parseSpaceLocalId(prev.localId)?.contentId)) continue;
     if (typeof prev.localId !== "string" || seen.has(prev.localId)) continue;
-    if (furnishing.length >= SPACE_CANONICAL_MAX_FURNISHING) {
-      droppedPrev += 1;
-      continue;
-    }
     furnishing.push(prev);
     seen.add(prev.localId);
   }
   const changed = !previous || stable(previous.size ?? null) !== stable(size) || stable(previous.furnishing ?? []) !== stable(furnishing);
   const revision = previous && Number.isInteger(previous.revision) && previous.revision >= 0 ? changed ? previous.revision + 1 : previous.revision : 1;
-  return { version: 1, locationId, revision, size, furnishing, droppedPrev };
+  return { version: 1, locationId, revision, size, furnishing };
 }
 function readSceneFrame(frame, { branchId, mapId } = {}) {
   try {
@@ -6636,14 +6628,10 @@ function buildSceneMutation({ result, mapRow, scope, currentScope, turnId, opera
       const previous = plain(prevRaw) && prevRaw.version === 1 && prevRaw.locationId === containerId ? prevRaw : null;
       const authorSize = plain(spaceSize?.resolution) && spaceSize.resolution.source === "author" ? { widthM: spaceSize.resolution.widthM, heightM: spaceSize.resolution.heightM, referenceId: plain(spaceSize.resolution.basis) && typeof spaceSize.resolution.basis.referenceId === "string" ? spaceSize.resolution.basis.referenceId : null, note: "作者确认的地点轮廓" } : null;
       const next = canonicalForScene(result.scene, previous, containerId, authorSize, result.deletedContents);
-      if (next.furnishing.length > SPACE_CANONICAL_MAX_FURNISHING || next.droppedPrev > 0) {
-        issues.push(diagnostic("SPACE_FURNISHING_DEFERRED", "$." + FRAME_SPACE_CANONICAL_KEY, "本空间陈设条目超过首版上限 " + SPACE_CANONICAL_MAX_FURNISHING + "（本轮还需丢弃 " + next.droppedPrev + " 条既有条目）：明确 deferred 并保留原账本（不静默裁剪）", { severity: "warning", entityId: containerId }));
-      } else {
-        const probe = record(frame);
-        probe[FRAME_SPACE_CANONICAL_KEY] = clone(next);
-        if (bytes(probe) <= LIMITS.sceneBytes + 65536) frame[FRAME_SPACE_CANONICAL_KEY] = next;
-        else issues.push(diagnostic("SPACE_CANONICAL_TOO_LARGE", "$." + FRAME_SPACE_CANONICAL_KEY, "空间权威写入后超出框架预算：保留原账本，不放宽 LIMITS.sceneBytes", { severity: "warning", entityId: containerId }));
-      }
+      const probe = record(frame);
+      probe[FRAME_SPACE_CANONICAL_KEY] = clone(next);
+      if (bytes(probe) <= LIMITS.sceneBytes + 65536) frame[FRAME_SPACE_CANONICAL_KEY] = next;
+      else return failure("SPACE_CANONICAL_TOO_LARGE", "$." + FRAME_SPACE_CANONICAL_KEY, "空间权威与场景总量超出框架预算，原记录未修改");
     }
     if (bytes(frame) > LIMITS.sceneBytes + 65536) return failure("FRAME_TOO_LARGE", "$.frame_json", "框架与细节总量超限，保留原行");
     const after = { ...before, frame_json: frame, row_rev: before.row_rev + 1, updated_turn_id: turnId };
@@ -7874,7 +7862,7 @@ function readSpaceCanonical(raw, locationId) {
     furnishing.push({ localId: entry.localId, type: entry.type, name: typeof entry.name === "string" && entry.name ? entry.name : entry.type, itemId: typeof entry.itemId === "string" && entry.itemId ? entry.itemId : null, widthM: entry.widthM, heightM: entry.heightM, quality: entry.quality === "confirmed" ? "confirmed" : "layout" });
   }
   const revision = Number.isInteger(raw.revision) && raw.revision >= 0 ? raw.revision : 0;
-  return { version: 1, locationId, revision, size, furnishing, deferred: furnishing.length > SPACE_CANONICAL_MAX_FURNISHING };
+  return { version: 1, locationId, revision, size, furnishing, deferred: false };
 }
 function buildLayoutContext({ scope, mapRow, maps = [], locations = [], characters = [], items = [], routes = [] } = {}) {
   try {
@@ -8060,7 +8048,7 @@ function compileSceneGroup({ request, scope, currentScope, mapRow, locations, ch
     if (request.kind === "floor") {
       ctx.childCanonical = Object.fromEntries(maps.filter((m) => m.branch_id === scope.branchId && m.status === "active" && locations.some((l) => l.id === m.container_location_id && l.map_id === mapRow.id)).flatMap((m) => {
         const frame = typeof m.frame_json === "string" ? JSON.parse(m.frame_json) : m.frame_json, record3 = frame?.[FRAME_SPACE_CANONICAL_KEY];
-        return record3?.version === 1 && record3.locationId === m.container_location_id && record3.furnishing?.length <= SPACE_CANONICAL_MAX_FURNISHING ? [[record3.locationId, record3]] : autoPlan ? [[String(m.container_location_id), { furnishing: [] }]] : [];
+        return record3?.version === 1 && record3.locationId === m.container_location_id && Array.isArray(record3.furnishing) ? [[record3.locationId, record3]] : autoPlan ? [[String(m.container_location_id), { furnishing: [] }]] : [];
       }));
       ctx.itemsById = Object.fromEntries((items ?? []).filter((i) => i.branch_id === scope.branchId && i.status === "active" && !i.holder_character_id && !i.container_item_id).map((i) => [i.id, i]));
       if (autoPlan) {
@@ -8138,7 +8126,6 @@ function compileSceneGroup({ request, scope, currentScope, mapRow, locations, ch
       if ((!plain(previous) || previous.version !== 1 || previous.locationId !== room.id) && !autoPlan) continue;
       const projection = { ...result.scene, layout: { ...result.scene.layout, bounds: { x: 0, y: 0, w: room.w, h: room.h } } };
       const next = canonicalForScene(projection, previous, room.id, null, result.deletedContents);
-      if (next.furnishing.length > SPACE_CANONICAL_MAX_FURNISHING || next.droppedPrev > 0) return failure("SPACE_FURNISHING_DEFERRED", "$.childSpaces", "子空间陈设超出预算，保留父子原记录");
       if (stable(next) === stable(previous ?? null)) continue;
       frame[FRAME_SPACE_CANONICAL_KEY] = next;
       delete frame.atlasLayoutContext;
@@ -8630,8 +8617,8 @@ function declareRefs(ops, ctx) {
       continue;
     }
     firstDeclaration.set(alias, { opId: op.opId, line: op.line });
-    const opName2 = typeof value?.op === "string" ? value.op : "";
-    const kind = kindFromOp(opName2) ?? hints.get(alias) ?? "mention";
+    const opName = typeof value?.op === "string" ? value.op : "";
+    const kind = kindFromOp(opName) ?? hints.get(alias) ?? "mention";
     const rawId = makeId(kind, op.opId, alias);
     const id = typeof rawId === "string" && rawId.trim().length > 0 ? rawId.trim() : defaultMakeId(ctx.anchor, alias, op.opId, kind);
     const entry = { alias, id, kind, rowRev: null, declaredByOpId: op.opId };
@@ -8835,9 +8822,9 @@ function resolveLayoutSpecRefs(spec, scope, where) {
           }
           continue;
         }
-        const isNewRef2 = rawText.startsWith(NEW_PREFIX);
+        const isNewRef = rawText.startsWith(NEW_PREFIX);
         for (const item of resolved.issues) {
-          if (!isNewRef2 && item.code === "REF_UNKNOWN") continue;
+          if (!isNewRef && item.code === "REF_UNKNOWN") continue;
           issues.push(item);
         }
       }
@@ -8897,9 +8884,9 @@ function resolveLayoutSpecRefs(spec, scope, where) {
           }
           continue;
         }
-        const isNewRef2 = rawText.startsWith(NEW_PREFIX);
+        const isNewRef = rawText.startsWith(NEW_PREFIX);
         for (const item of resolved.issues) {
-          if (!isNewRef2 && item.code === "REF_UNKNOWN") continue;
+          if (!isNewRef && item.code === "REF_UNKNOWN") continue;
           issues.push(item);
         }
         nextList.push(rawText);
@@ -9388,21 +9375,6 @@ function normalizeLayoutSpec(data, op) {
         ]
       };
     }
-    const limit = key === "zones" ? ATLAS_RUNTIME_LIMITS.overviewZoneLimit : key === "features" ? ATLAS_RUNTIME_LIMITS.overviewFeatureLimit : key === "links" ? ATLAS_RUNTIME_LIMITS.overviewLinkLimit : null;
-    if (limit !== null && value.length > limit) {
-      return {
-        ok: false,
-        spec: null,
-        issues: [
-          issue2(
-            ATLAS_ERROR_CODES.OPERATION_TOO_LARGE,
-            `$.data.spec.${key}`,
-            `map.layout.request: spec.${key} has ${value.length} entries, over the ${limit} limit; split the request`,
-            { severity: "error", retryable: true, opId: op?.opId, line: op?.line }
-          )
-        ]
-      };
-    }
     const seenIds = /* @__PURE__ */ new Set();
     for (let i = 0; i < value.length; i += 1) {
       const entry = value[i];
@@ -9565,10 +9537,6 @@ function normalizeSpaceStateUpdates(data, parsed) {
     push("SPACE_PATCH_EMPTY", "$.data.updates", "space.state.patch 的 updates 为空：没有状态变化就不要发这个操作（无变化用 noop）");
     return { ok: false, issues };
   }
-  if (raw.length > SPACE_STATE_PATCH_LIMIT) {
-    push("SPACE_PATCH_TOO_MANY", "$.data.updates", `一次最多 ${SPACE_STATE_PATCH_LIMIT} 个对象状态；${raw.length} 项超限，按批拆分而不是靠嵌套数组绕开容量`);
-    return { ok: false, issues };
-  }
   raw.forEach((entry, index) => {
     const path = `$.data.updates[${index}]`;
     if (!isPlainObject2(entry)) {
@@ -9655,10 +9623,10 @@ function matchEnum(value, dict) {
   }
   return null;
 }
-function coerceNumeric(value, path, opName2, issues) {
+function coerceNumeric(value, path, opName, issues) {
   const reject = (shown) => {
     issues.push(
-      issue2(ATLAS_ERROR_CODES.INVARIANT_FAILED, path, `${opName2}: ${path} is ${shown}; NaN/Infinity are never legal`, {
+      issue2(ATLAS_ERROR_CODES.INVARIANT_FAILED, path, `${opName}: ${path} is ${shown}; NaN/Infinity are never legal`, {
         severity: "error",
         retryable: true
       })
@@ -9682,9 +9650,9 @@ function coerceNumeric(value, path, opName2, issues) {
   }
   return { value, rejected: false };
 }
-function normalizeValues(opName2, data, issues) {
-  const dicts = OP_ENUM_DICTS[opName2] ?? {};
-  const numeric = new Set(NUMERIC_FIELDS[opName2] ?? []);
+function normalizeValues(opName, data, issues) {
+  const dicts = OP_ENUM_DICTS[opName] ?? {};
+  const numeric = new Set(NUMERIC_FIELDS[opName] ?? []);
   const out = {};
   for (const key of Object.keys(data)) {
     let next = data[key];
@@ -9694,7 +9662,7 @@ function normalizeValues(opName2, data, issues) {
       if (fixed !== null) next = fixed;
     }
     if (numeric.has(key)) {
-      const coerced = coerceNumeric(next, `$.data.${key}`, opName2, issues);
+      const coerced = coerceNumeric(next, `$.data.${key}`, opName, issues);
       if (coerced.rejected) continue;
       next = coerced.value;
     }
@@ -9702,7 +9670,7 @@ function normalizeValues(opName2, data, issues) {
       const position = { ...next };
       for (const axis of ["x", "y"]) {
         if (!hasOwn(position, axis)) continue;
-        const coerced = coerceNumeric(position[axis], `$.data.position.${axis}`, opName2, issues);
+        const coerced = coerceNumeric(position[axis], `$.data.position.${axis}`, opName, issues);
         if (coerced.rejected) delete position[axis];
         else position[axis] = coerced.value;
       }
@@ -9714,7 +9682,7 @@ function normalizeValues(opName2, data, issues) {
         issue2(
           ATLAS_ERROR_CODES.FIELD_IGNORED,
           "$.data.why",
-          `${opName2}: why is ${next.length} chars, over the ${WHY_MAX_CHARS} char limit; truncated to ${truncated.length}`
+          `${opName}: why is ${next.length} chars, over the ${WHY_MAX_CHARS} char limit; truncated to ${truncated.length}`
         )
       );
       next = truncated;
@@ -9730,9 +9698,9 @@ function normalizeOperation(raw, phase, allowedOps) {
   const allowed = new Set(allowedOps ?? allowedOpsForPhase(phase));
   allowed.add(ATLAS_NOOP);
   const allowedList = [...allowed].sort().join(", ");
-  const opName2 = typeof raw?.op === "string" ? raw.op.trim() : "";
-  if (opName2 === "" || !allowed.has(opName2)) {
-    const reason = opName2 === "" ? "operation is missing op" : isSemanticOp(opName2) ? `op ${opName2} is not allowed in phase ${phase}` : `unknown op ${JSON.stringify(opName2)}`;
+  const opName = typeof raw?.op === "string" ? raw.op.trim() : "";
+  if (opName === "" || !allowed.has(opName)) {
+    const reason = opName === "" ? "operation is missing op" : isSemanticOp(opName) ? `op ${opName} is not allowed in phase ${phase}` : `unknown op ${JSON.stringify(opName)}`;
     issues.push(
       issue2(ATLAS_ERROR_CODES.UNKNOWN_OPERATION, "$.op", `${reason}; allowed: ${allowedList}`, {
         severity: "error",
@@ -9741,15 +9709,15 @@ function normalizeOperation(raw, phase, allowedOps) {
     );
     return { op: null, issues, ignoredFields, systemFields };
   }
-  const op = { op: opName2 };
+  const op = { op: opName };
   if (typeof raw.ref === "string") {
     const ref2 = raw.ref.trim();
     if (ref2 !== "") op.ref = ref2;
   } else if (raw.ref !== void 0 && raw.ref !== null) {
-    issues.push(issue2(ATLAS_ERROR_CODES.FIELD_IGNORED, "$.ref", `${opName2}: ref must be a string; ignored`));
+    issues.push(issue2(ATLAS_ERROR_CODES.FIELD_IGNORED, "$.ref", `${opName}: ref must be a string; ignored`));
   }
   if (raw.source !== void 0 && typeof raw.source !== "string" && (!Array.isArray(raw.source) || raw.source.some((entry) => typeof entry !== "string"))) {
-    issues.push(issue2("SOURCE_UNKNOWN", "$.source", `${opName2}: source must contain only source reference strings; operation rejected`, { severity: "error", retryable: true }));
+    issues.push(issue2("SOURCE_UNKNOWN", "$.source", `${opName}: source must contain only source reference strings; operation rejected`, { severity: "error", retryable: true }));
     return { op: null, issues, ignoredFields, systemFields };
   }
   if (typeof raw.source === "string") {
@@ -9764,32 +9732,32 @@ function normalizeOperation(raw, phase, allowedOps) {
         issue2(
           ATLAS_ERROR_CODES.FIELD_IGNORED,
           "$.why",
-          `${opName2}: why is ${raw.why.length} chars, over the ${WHY_MAX_CHARS} char limit; truncated to ${op.why.length}`
+          `${opName}: why is ${raw.why.length} chars, over the ${WHY_MAX_CHARS} char limit; truncated to ${op.why.length}`
         )
       );
     } else {
       op.why = raw.why;
     }
   } else if (raw.why !== void 0 && raw.why !== null) {
-    issues.push(issue2(ATLAS_ERROR_CODES.FIELD_IGNORED, "$.why", `${opName2}: why must be a string; ignored`));
+    issues.push(issue2(ATLAS_ERROR_CODES.FIELD_IGNORED, "$.why", `${opName}: why must be a string; ignored`));
   }
   if (typeof raw.ticket === "string") op.ticket = raw.ticket.trim();
   let data = null;
   if (raw.data !== void 0 && raw.data !== null) {
     if (!isPlainObject2(raw.data)) {
-      issues.push(issue2(ATLAS_ERROR_CODES.FIELD_IGNORED, "$.data", `${opName2}: data must be an object; ignored`));
+      issues.push(issue2(ATLAS_ERROR_CODES.FIELD_IGNORED, "$.data", `${opName}: data must be an object; ignored`));
     } else {
       const sourceData = raw.data;
       const collected = {};
       for (const key of Object.keys(sourceData)) {
         const value = sourceData[key];
-        if (SYSTEM_OWNED_FIELDS.includes(key) && !isKnownFieldForOp(opName2, key)) {
+        if (SYSTEM_OWNED_FIELDS.includes(key) && !isKnownFieldForOp(opName, key)) {
           systemFields.push(key);
           issues.push(
             issue2(
               ATLAS_ERROR_CODES.SYSTEM_FIELD_IGNORED,
               `$.data.${key}`,
-              `${opName2}: program-owned field ${key} ignored`
+              `${opName}: program-owned field ${key} ignored`
             )
           );
           continue;
@@ -9797,10 +9765,10 @@ function normalizeOperation(raw, phase, allowedOps) {
         const aliasTarget = hasOwn(OP_FIELD_ALIASES, key) ? OP_FIELD_ALIASES[key] : void 0;
         if (aliasTarget !== void 0) {
           if (aliasTarget === "position.x" || aliasTarget === "position.y") {
-            if (!isKnownFieldForOp(opName2, "position")) {
+            if (!isKnownFieldForOp(opName, "position")) {
               ignoredFields.push(key);
               issues.push(
-                issue2(ATLAS_ERROR_CODES.FIELD_IGNORED, `$.data.${key}`, `${opName2}: alias ${key} → position is not a legal field; ignored`)
+                issue2(ATLAS_ERROR_CODES.FIELD_IGNORED, `$.data.${key}`, `${opName}: alias ${key} → position is not a legal field; ignored`)
               );
               continue;
             }
@@ -9809,7 +9777,7 @@ function normalizeOperation(raw, phase, allowedOps) {
             if (existing !== void 0 && existing !== null && !isPlainObject2(existing)) {
               ignoredFields.push(key);
               issues.push(
-                issue2(ATLAS_ERROR_CODES.FIELD_IGNORED, `$.data.${key}`, `${opName2}: position is not an object; alias ${key} ignored`)
+                issue2(ATLAS_ERROR_CODES.FIELD_IGNORED, `$.data.${key}`, `${opName}: position is not an object; alias ${key} ignored`)
               );
               continue;
             }
@@ -9817,7 +9785,7 @@ function normalizeOperation(raw, phase, allowedOps) {
             if (hasOwn(position, axis)) {
               ignoredFields.push(key);
               issues.push(
-                issue2(ATLAS_ERROR_CODES.FIELD_IGNORED, `$.data.${key}`, `${opName2}: position.${axis} already provided; alias ${key} ignored`)
+                issue2(ATLAS_ERROR_CODES.FIELD_IGNORED, `$.data.${key}`, `${opName}: position.${axis} already provided; alias ${key} ignored`)
               );
               collected["position"] = position;
               continue;
@@ -9826,7 +9794,7 @@ function normalizeOperation(raw, phase, allowedOps) {
             collected["position"] = position;
             continue;
           }
-          if (isKnownFieldForOp(opName2, aliasTarget) && !hasOwn(sourceData, aliasTarget)) {
+          if (isKnownFieldForOp(opName, aliasTarget) && !hasOwn(sourceData, aliasTarget)) {
             collected[aliasTarget] = value;
             continue;
           }
@@ -9835,18 +9803,18 @@ function normalizeOperation(raw, phase, allowedOps) {
             issue2(
               ATLAS_ERROR_CODES.FIELD_IGNORED,
               `$.data.${key}`,
-              `${opName2}: alias ${key} → ${aliasTarget} is not usable here (target illegal or already present); ignored`
+              `${opName}: alias ${key} → ${aliasTarget} is not usable here (target illegal or already present); ignored`
             )
           );
           continue;
         }
-        if (!isKnownFieldForOp(opName2, key)) {
+        if (!isKnownFieldForOp(opName, key)) {
           ignoredFields.push(key);
           issues.push(
             issue2(
               ATLAS_ERROR_CODES.FIELD_IGNORED,
               `$.data.${key}`,
-              `${opName2}: unknown field ${key} ignored (operation continues)`
+              `${opName}: unknown field ${key} ignored (operation continues)`
             )
           );
           continue;
@@ -9854,14 +9822,14 @@ function normalizeOperation(raw, phase, allowedOps) {
         const previous = collected[key];
         collected[key] = isPlainObject2(previous) && isPlainObject2(value) ? { ...value, ...previous } : value;
       }
-      data = normalizeValues(opName2, collected, issues);
+      data = normalizeValues(opName, collected, issues);
     }
   }
   if (data !== null) op.data = data;
   return { op, issues, ignoredFields, systemFields };
 }
 function validateMinimum(op, phase, parsed) {
-  const opName2 = typeof op?.op === "string" ? op.op.trim() : "";
+  const opName = typeof op?.op === "string" ? op.op.trim() : "";
   const rawData = op?.data;
   const data = isPlainObject2(rawData) ? rawData : {};
   const ref2 = typeof op?.ref === "string" ? op.ref.trim() : "";
@@ -9893,7 +9861,7 @@ function validateMinimum(op, phase, parsed) {
       if (!meaningful("name")) {
         return fail4(
           "$.data.name",
-          `${opName2} requires data.name (non-empty string) when creating; example: {"op":"${opName2}","ref":"new:${exampleName}","data":{"name":"…"}}`
+          `${opName} requires data.name (non-empty string) when creating; example: {"op":"${opName}","ref":"new:${exampleName}","data":{"name":"…"}}`
         );
       }
       return { ok: true };
@@ -9901,12 +9869,12 @@ function validateMinimum(op, phase, parsed) {
     if (!changed) {
       return fail4(
         "$.data",
-        `${opName2} modifies an existing object: requires ref plus at least one changed field in data; example: {"op":"${opName2}","ref":"${ref2}","data":{"description":"…"}}`
+        `${opName} modifies an existing object: requires ref plus at least one changed field in data; example: {"op":"${opName}","ref":"${ref2}","data":{"description":"…"}}`
       );
     }
     return { ok: true };
   };
-  switch (opName2) {
+  switch (opName) {
     case "location.upsert":
       return createOrModify("school");
     case "character.upsert": {
@@ -10176,7 +10144,7 @@ function validateMinimum(op, phase, parsed) {
         ok: false,
         issue: toIssue(
           new Error(
-            `unknown or unsupported op ${JSON.stringify(opName2)}; supported: ${[...ATLAS_SEMANTIC_OPS, ATLAS_NOOP].join(", ")} (phase ${phase})`
+            `unknown or unsupported op ${JSON.stringify(opName)}; supported: ${[...ATLAS_SEMANTIC_OPS, ATLAS_NOOP].join(", ")} (phase ${phase})`
           ),
           {
             code: ATLAS_ERROR_CODES.UNKNOWN_OPERATION,
@@ -10195,7 +10163,7 @@ function isKnownFieldForOp(op, field) {
   if (!list3) return false;
   return list3.includes(field);
 }
-var LAYOUT_REQUEST_KINDS, LAYOUT_SPEC_COLLECTIONS, LAYOUT_KIND_COLLECTIONS, LAYOUT_OVERVIEW_FEATURE_TYPES, LAYOUT_OVERVIEW_SURFACES, LAYOUT_OVERVIEW_ZONE_ROLES, LAYOUT_OVERVIEW_ZONE_SIZES, LAYOUT_OVERVIEW_DENSITIES, LAYOUT_OVERVIEW_SECTORS, LAYOUT_OVERVIEW_ZONE_SECTORS, LAYOUT_OVERVIEW_WIDTH_CLASSES, LAYOUT_CITY_ENCLOSURES, LAYOUT_SPEC_SCALARS, LAYOUT_SPEC_PROGRAM_KEYS, MAX_LAYOUT_SPEC_ID_CHARS, SPACE_STATE_PATCH_LIMIT, SPACE_PATCH_CHANGE_FIELDS, SPACE_PATCH_ALLOWED_FIELDS, SPACE_PATCH_IMMUTABLE_FIELDS, SPACE_PATCH_OPENING_STATES, SPACE_PATCH_MATERIALS, SPACE_PATCH_BOOLEAN_FIELDS, OP_KNOWN_FIELDS, OP_ENUM_DICTS, ZH_ENUM_CANDIDATES, NUMERIC_FIELDS, FULL_NUMBER_RE, EXPLICIT_NON_FINITE_RE, PLAN_CHANGES, EVENT_PHASES, BELIEFS;
+var LAYOUT_REQUEST_KINDS, LAYOUT_SPEC_COLLECTIONS, LAYOUT_KIND_COLLECTIONS, LAYOUT_OVERVIEW_FEATURE_TYPES, LAYOUT_OVERVIEW_SURFACES, LAYOUT_OVERVIEW_ZONE_ROLES, LAYOUT_OVERVIEW_ZONE_SIZES, LAYOUT_OVERVIEW_DENSITIES, LAYOUT_OVERVIEW_SECTORS, LAYOUT_OVERVIEW_ZONE_SECTORS, LAYOUT_OVERVIEW_WIDTH_CLASSES, LAYOUT_CITY_ENCLOSURES, LAYOUT_SPEC_SCALARS, LAYOUT_SPEC_PROGRAM_KEYS, MAX_LAYOUT_SPEC_ID_CHARS, SPACE_PATCH_CHANGE_FIELDS, SPACE_PATCH_ALLOWED_FIELDS, SPACE_PATCH_IMMUTABLE_FIELDS, SPACE_PATCH_OPENING_STATES, SPACE_PATCH_MATERIALS, SPACE_PATCH_BOOLEAN_FIELDS, OP_KNOWN_FIELDS, OP_ENUM_DICTS, ZH_ENUM_CANDIDATES, NUMERIC_FIELDS, FULL_NUMBER_RE, EXPLICIT_NON_FINITE_RE, PLAN_CHANGES, EVENT_PHASES, BELIEFS;
 var init_atlas_ops_normalize = __esm({
   "src/atlas-ops-normalize.ts"() {
     "use strict";
@@ -10288,7 +10256,6 @@ var init_atlas_ops_normalize = __esm({
       "inputSignature"
     ];
     MAX_LAYOUT_SPEC_ID_CHARS = 160;
-    SPACE_STATE_PATCH_LIMIT = 32;
     SPACE_PATCH_CHANGE_FIELDS = ["openingState", "locked", "material", "present", "destroyed", "canOpen", "blocksMovement", "blocksSight"];
     SPACE_PATCH_ALLOWED_FIELDS = ["objectRef", "locationRef", "mapRef", ...SPACE_PATCH_CHANGE_FIELDS];
     SPACE_PATCH_IMMUTABLE_FIELDS = ["widthM", "heightM", "depthM", "footprintCells", "size", "geometry", "frame", "scene"];
@@ -11917,7 +11884,7 @@ var init_atlas_space_estimate = __esm({
 
 // src/atlas-space-canonical.ts
 function validSide(value) {
-  return finite2(value) && value >= SPACE_MIN_SIDE_M && value <= SPACE_MAX_SIDE_M;
+  return finite2(value) && value >= SPACE_MIN_SIDE_M;
 }
 function sizesAgree2(left, right, tolerance = SPACE_SIZE_REL_TOLERANCE) {
   const near = (a, b) => {
@@ -11936,7 +11903,7 @@ function readFurnishing(raw, locationId) {
   if (!localId || !type) return null;
   const parsed = parseSpaceLocalId(localId);
   if (!parsed || parsed.locationId !== locationId) return null;
-  if (!finite2(raw.widthM) || raw.widthM <= 0 || raw.widthM > SPACE_MAX_SIDE_M || !finite2(raw.heightM) || raw.heightM <= 0 || raw.heightM > SPACE_MAX_SIDE_M) return null;
+  if (!finite2(raw.widthM) || raw.widthM <= 0 || !finite2(raw.heightM) || raw.heightM <= 0) return null;
   const itemId = asId(raw.itemId);
   return {
     localId,
@@ -12009,16 +11976,7 @@ function readSpaceCanonical2(frame, expectedLocationId) {
     }
     furnishing.push(entry);
   }
-  const deferred = furnishing.length > SPACE_CANONICAL_MAX_FURNISHING2;
-  if (deferred) {
-    issues.push(issue4(
-      "SPACE_FURNISHING_DEFERRED",
-      `${path}.furnishing`,
-      `空间陈设账本已有 ${furnishing.length} 条，超过首版上限 ${SPACE_CANONICAL_MAX_FURNISHING2}：本轮明确 deferred（不追加、不静默裁剪），原记录完整保留`,
-      "warning"
-    ));
-  }
-  return { ok: true, canonical: { version: 1, locationId, revision, size: readSize(raw.size), furnishing }, deferred, issues };
+  return { ok: true, canonical: { version: 1, locationId, revision, size: readSize(raw.size), furnishing }, deferred: false, issues };
 }
 function confirmedAreaSize(row3, parentMap) {
   if (!row3) return null;
@@ -12270,7 +12228,7 @@ function resolveMapSpaceSize(input) {
   if (!resolution) return null;
   return { locationId: containerId, holder: holder.holder, canonical, resolution, issues };
 }
-var SPACE_CANONICAL_FRAME_KEY, SPACE_CANONICAL_VERSION, SPACE_CANONICAL_MAX_FURNISHING2, SPACE_SIZE_REL_TOLERANCE, SPACE_MIN_SIDE_M, SPACE_MAX_SIDE_M, plain2, asId, finite2, asText, isActive;
+var SPACE_CANONICAL_FRAME_KEY, SPACE_CANONICAL_VERSION, SPACE_SIZE_REL_TOLERANCE, SPACE_MIN_SIDE_M, plain2, asId, finite2, asText, isActive;
 var init_atlas_space_canonical = __esm({
   "src/atlas-space-canonical.ts"() {
     "use strict";
@@ -12280,10 +12238,8 @@ var init_atlas_space_canonical = __esm({
     init_atlas_spatial();
     SPACE_CANONICAL_FRAME_KEY = FRAME_SPACE_CANONICAL_KEY;
     SPACE_CANONICAL_VERSION = 1;
-    SPACE_CANONICAL_MAX_FURNISHING2 = SPACE_CANONICAL_MAX_FURNISHING;
     SPACE_SIZE_REL_TOLERANCE = 5e-3;
     SPACE_MIN_SIDE_M = 0.2;
-    SPACE_MAX_SIDE_M = 2e4;
     plain2 = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
     asId = (value) => typeof value === "string" && value ? value : null;
     finite2 = (value) => typeof value === "number" && Number.isFinite(value);
@@ -12656,12 +12612,6 @@ function ensureAliases(value, op, path) {
   if (value === null) return { value: [], issues: [] };
   if (!Array.isArray(value)) return { value: null, issues: [issue6("FIELD_TYPE_INVALID", path, "aliases 必须是字符串数组", op)] };
   const list3 = value.filter((v) => typeof v === "string" && v.trim().length > 0).map((v) => v.trim());
-  if (list3.length > ALIAS_LIMIT) {
-    return {
-      value: list3.slice(0, ALIAS_LIMIT),
-      issues: [issue6("FIELD_LIMIT_EXCEEDED", path, `aliases 最多 ${ALIAS_LIMIT} 个，收到 ${list3.length} 个`, op)]
-    };
-  }
   return { value: list3, issues: [] };
 }
 function applyPosition(target2, data, op, issues, scope) {
@@ -12961,13 +12911,11 @@ function compileCharacterUpsert(op, ctx) {
   if (Object.prototype.hasOwnProperty.call(data, "mobility_profiles")) {
     const list3 = Array.isArray(data.mobility_profiles) ? data.mobility_profiles : null;
     if (!list3) result.issues.push(issue6("FIELD_TYPE_INVALID", "$.data.mobility_profiles", "mobility_profiles 必须是数组", op));
-    else if (list3.length > MOBILITY_PROFILE_LIMIT) result.issues.push(issue6("FIELD_LIMIT_EXCEEDED", "$.data.mobility_profiles", `最多 ${MOBILITY_PROFILE_LIMIT} 种移动方式`, op));
     else changes.mobility_profiles_json = list3;
   }
   if (Object.prototype.hasOwnProperty.call(data, "capabilities")) {
     const list3 = Array.isArray(data.capabilities) ? data.capabilities : null;
     if (!list3) result.issues.push(issue6("FIELD_TYPE_INVALID", "$.data.capabilities", "capabilities 必须是数组", op));
-    else if (list3.length > CAPABILITY_LIMIT) result.issues.push(issue6("FIELD_LIMIT_EXCEEDED", "$.data.capabilities", `最多 ${CAPABILITY_LIMIT} 项能力`, op));
     else changes.capabilities_json = list3;
   }
   if (ctx.phase === "decision" && !creating) {
@@ -13067,7 +13015,6 @@ function compileItemUpsert(op, ctx) {
   if (Object.prototype.hasOwnProperty.call(data, "properties")) {
     const list3 = Array.isArray(data.properties) ? data.properties : null;
     if (!list3) result.issues.push(issue6("FIELD_TYPE_INVALID", "$.data.properties", "properties 必须是数组", op));
-    else if (list3.length > ITEM_PROPERTY_LIMIT) result.issues.push(issue6("FIELD_LIMIT_EXCEEDED", "$.data.properties", `properties 最多 ${ITEM_PROPERTY_LIMIT} 项`, op));
     else changes.properties_json = list3;
   }
   if (creating && Object.prototype.hasOwnProperty.call(data, "placement")) {
@@ -13368,7 +13315,6 @@ function compileFactionUpsert(op, ctx) {
   if (Object.prototype.hasOwnProperty.call(data, "capabilities")) {
     const list3 = Array.isArray(data.capabilities) ? data.capabilities : null;
     if (!list3) result.issues.push(issue6("FIELD_TYPE_INVALID", "$.data.capabilities", "capabilities 必须是数组", op));
-    else if (list3.length > CAPABILITY_LIMIT) result.issues.push(issue6("FIELD_LIMIT_EXCEEDED", "$.data.capabilities", `最多 ${CAPABILITY_LIMIT} 项能力`, op));
     else changes.capabilities_json = list3;
   }
   ensureLocationRef(data, "headquarters_ref", op, result.issues, changes, "headquarters_location_id", ["location"], ctx.scope);
@@ -13405,7 +13351,6 @@ var init_atlas_ops_entities = __esm({
     init_atlas_db_defaults();
     init_atlas_db_mentions();
     init_atlas_ops_refs();
-    init_atlas_runtime_limits();
     init_atlas_location_kinds();
     init_atlas_space_canonical();
     init_atlas_furnishing_promotion();
@@ -16570,14 +16515,13 @@ var init_atlas_world_build_state = __esm({
   "src/atlas-world-build-state.ts"() {
     "use strict";
     init_define_ATLAS_BUILD_INFO();
-    init_atlas_runtime_limits();
     init_atlas_hash();
     init_atlas_construction_progress();
     init_atlas_construction_scheduler();
     init_atlas_world_build_plan();
     init_atlas_world_build_contract();
     init_atlas_world_fact_policy();
-    WORLD_BUILD_PAYLOAD_BUDGET_BYTES = ATLAS_RUNTIME_LIMITS.operationUtf8Bytes;
+    WORLD_BUILD_PAYLOAD_BUDGET_BYTES = 8 * 1024;
     PAYLOAD_KIND_FIELD = "payloadKind";
     WORLD_BUILD_WORK_LAYERS = {
       "source-scan": 0,
@@ -17317,7 +17261,6 @@ function buildSqlLayoutTask(db, branchId, input, turnId, report) {
   const batchLimit = Math.min(
     plannedSize,
     config.mapsPerBatch || Infinity,
-    ATLAS_RUNTIME_LIMITS.operationsPerResponse,
     typeof retryLimit === "number" && Number.isSafeInteger(retryLimit) && retryLimit > 0 ? retryLimit : Infinity
   );
   const outputBudget = Math.max(0, planningOutputTokens(input.generationOptions) - ATLAS_RUNTIME_LIMITS.batchOutputReserveTokens);
@@ -17465,8 +17408,8 @@ function buildSqlLayoutTask(db, branchId, input, turnId, report) {
         widthM: entry.spaceSize.resolution.widthM,
         heightM: entry.spaceSize.resolution.heightM,
         revision: entry.spaceSize.canonical?.revision ?? 0,
-        furnishing: Math.min(entry.spaceSize.canonical?.furnishing.length ?? 0, SPACE_CANONICAL_MAX_FURNISHING2),
-        furnishingInventory: (entry.spaceSize.canonical?.furnishing ?? []).slice(0, SPACE_CANONICAL_MAX_FURNISHING2).map((item) => ({
+        furnishing: entry.spaceSize.canonical?.furnishing.length ?? 0,
+        furnishingInventory: (entry.spaceSize.canonical?.furnishing ?? []).map((item) => ({
           id: item.localId,
           type: item.type,
           name: item.name,
@@ -17475,7 +17418,7 @@ function buildSqlLayoutTask(db, branchId, input, turnId, report) {
           quality: item.quality,
           ...item.itemId ? { item: ref2(item.itemId) } : {}
         })),
-        furnishingReview: Object.values((entry.spaceSize.canonical?.furnishing ?? []).slice(0, SPACE_CANONICAL_MAX_FURNISHING2).reduce((groups, item) => {
+        furnishingReview: Object.values((entry.spaceSize.canonical?.furnishing ?? []).reduce((groups, item) => {
           const name = item.name.trim();
           if (name) (groups[name] ??= []).push(item.localId);
           return groups;
@@ -17509,8 +17452,8 @@ function buildSqlLayoutTask(db, branchId, input, turnId, report) {
       actors: characters.filter((row3) => localIds.has(String(row3.location_id ?? "")) && ref2(row3.id) && ref2(row3.location_id)).sort((a, b) => {
         const priority = (row3) => row3.role === "protagonist" || input.requiredRefs?.some((r) => r.kind === "character" && r.id === row3.id) ? 0 : 1;
         return priority(a) - priority(b) || byId6(String(a.id), String(b.id));
-      }).slice(0, LIMITS.actors).map((row3) => ({ ref: ref2(row3.id), name: row3.name, roomId: ref2(physicalRoom(row3.location_id)) })),
-      items: items.filter((row3) => localIds.has(String(row3.location_id ?? "")) && !row3.holder_character_id && !row3.container_item_id && ref2(row3.id) && ref2(row3.location_id)).slice(0, LIMITS.items).map((row3) => ({ ref: ref2(row3.id), name: row3.name, kind: row3.kind, description: row3.description, roomId: ref2(physicalRoom(row3.location_id)) })),
+      }).map((row3) => ({ ref: ref2(row3.id), name: row3.name, roomId: ref2(physicalRoom(row3.location_id)) })),
+      items: items.filter((row3) => localIds.has(String(row3.location_id ?? "")) && !row3.holder_character_id && !row3.container_item_id && ref2(row3.id) && ref2(row3.location_id)).map((row3) => ({ ref: ref2(row3.id), name: row3.name, kind: row3.kind, description: row3.description, roomId: ref2(physicalRoom(row3.location_id)) })),
       savedConstraints: aliasLayoutRefs(retainedConstraints, catalogue.knownRefs),
       constraintStatus: savedRequest ? savedRequest.status ?? "pending" : "saved",
       layoutIssues: aliasLayoutRefs([...Array.isArray(sceneLayout?.issues) ? sceneLayout.issues : [], ...Array.isArray(savedRequest?.issues) ? savedRequest.issues : []], catalogue.knownRefs)
@@ -17758,7 +17701,6 @@ function planFunctionalAreaProjections(input) {
     }
     const host = scene.layout.hostArea ?? scene.layout.rooms.find((room) => room.id === container?.id);
     if (!host) throw new AtlasDbError("FUNCTIONAL_AREA_HOST_MISSING", "功能分区缺少已生成的父房间范围", { mapId });
-    if (members.length > LIMITS.zones) throw new AtlasDbError("FUNCTIONAL_AREA_LIMIT", "功能分区数量超过场景容量", { mapId });
     const areas = members.map((member, index) => {
       const ids3 = new Set(occupants.filter((row3) => row3.location_id === member.id).map((row3) => row3.id));
       const anchors = [...scene.layout.actors, ...scene.layout.items].filter((point) => ids3.has(point.id));
@@ -21308,9 +21250,6 @@ function validateCandidate(db, options) {
     if ((status === "occurred" || status === "ongoing") && (ev.occurred_at_s === null || ev.occurred_at_s === void 0)) {
       violations.push(violation("INVARIANT_EVENT_OCCURRED_NEEDS_TIME", "events", id, "occurred_at_s", "occurred/ongoing 事件必须有实际发生时刻"));
     }
-    if (Array.isArray(ev.participants_json) && ev.participants_json.length > PARTICIPANTS_LIMIT2) {
-      violations.push(violation("INVARIANT_EVENT_PARTICIPANTS_LIMIT", "events", id, "participants_json", `participants 最多 ${PARTICIPANTS_LIMIT2} 个`));
-    }
   }
   const knowledge = rowsOf(db, "knowledge", branchId);
   const seenKnower = /* @__PURE__ */ new Map();
@@ -21432,18 +21371,6 @@ function validateCandidate(db, options) {
   };
 }
 function checkListLimits(table, id, row3, out) {
-  const checks = [
-    ["aliases_json", ALIAS_LIMIT2],
-    ["capabilities_json", CAPABILITY_LIMIT2],
-    ["mobility_profiles_json", MOBILITY_PROFILE_LIMIT2],
-    ["properties_json", ITEM_PROPERTY_LIMIT2]
-  ];
-  for (const [column, limit] of checks) {
-    const value = row3[column];
-    if (Array.isArray(value) && value.length > limit) {
-      out.push(violation("INVARIANT_LIST_LIMIT", table, id, column, `${column} 超过上限 ${limit}`));
-    }
-  }
   const geometry = row3.area_geometry_json;
   if (geometry && typeof geometry === "object" && Array.isArray(geometry.coordinates)) {
     if (geometry.coordinates.length > GEOMETRY_VERTEX_LIMIT2) {
@@ -21539,7 +21466,7 @@ function collectConditionLeaves(condition, depth) {
 function validateGroup(db, branchId, tables, rowIds, pendingRows) {
   return validateCandidate(db, { branchId, tables, rowIds: new Set(rowIds), pendingRows });
 }
-var LOCATION_DEPTH, CONTAINER_DEPTH, ACTION_PLAN_DEPTH, CAPABILITY_LIMIT2, MOBILITY_PROFILE_LIMIT2, ALIAS_LIMIT2, PARTICIPANTS_LIMIT2, GEOMETRY_VERTEX_LIMIT2, ITEM_PROPERTY_LIMIT2, MENTION_RECENT_LIMIT2, TOPOLOGY_INVARIANT_CODES, TOPOLOGY_ISSUE_TARGET;
+var LOCATION_DEPTH, CONTAINER_DEPTH, ACTION_PLAN_DEPTH, GEOMETRY_VERTEX_LIMIT2, MENTION_RECENT_LIMIT2, TOPOLOGY_INVARIANT_CODES, TOPOLOGY_ISSUE_TARGET;
 var init_atlas_db_invariants = __esm({
   "src/atlas-db-invariants.ts"() {
     "use strict";
@@ -21552,12 +21479,7 @@ var init_atlas_db_invariants = __esm({
     LOCATION_DEPTH = ATLAS_RUNTIME_LIMITS.locationDepth;
     CONTAINER_DEPTH = ATLAS_RUNTIME_LIMITS.containerDepth;
     ACTION_PLAN_DEPTH = ATLAS_RUNTIME_LIMITS.actionPlanDepth;
-    CAPABILITY_LIMIT2 = ATLAS_FIELD_LIMITS.capabilityLimit;
-    MOBILITY_PROFILE_LIMIT2 = ATLAS_FIELD_LIMITS.mobilityProfileLimit;
-    ALIAS_LIMIT2 = ATLAS_FIELD_LIMITS.aliasLimit;
-    PARTICIPANTS_LIMIT2 = ATLAS_FIELD_LIMITS.participantsLimit;
     GEOMETRY_VERTEX_LIMIT2 = ATLAS_FIELD_LIMITS.geometryVertexLimit;
-    ITEM_PROPERTY_LIMIT2 = ATLAS_FIELD_LIMITS.itemPropertyLimit;
     MENTION_RECENT_LIMIT2 = ATLAS_FIELD_LIMITS.mentionRecentLimit;
     TOPOLOGY_INVARIANT_CODES = {
       AMBIGUOUS_CONTAINER_MAP: "INVARIANT_MAP_CONTAINER_AMBIGUOUS",
@@ -23975,15 +23897,12 @@ function compileEventPropose(op, ctx) {
   }
   const participants = [];
   if (Array.isArray(data.participants)) {
-    for (const raw of data.participants.slice(0, PARTICIPANTS_LIMIT)) {
+    for (const raw of data.participants) {
       if (!isPlainObject9(raw)) continue;
       const refValue = raw.entity_ref ?? raw.ref ?? raw.entity_id;
       const id = resolveOne(refValue, ["character", "faction", "item", "location"], "participants");
       if (!id) continue;
       participants.push({ entity_id: id, role: typeof raw.role === "string" ? raw.role : "participant" });
-    }
-    if (data.participants.length > PARTICIPANTS_LIMIT) {
-      result.issues.push(issue15("FIELD_LIMIT_EXCEEDED", "$.data.participants", `participants 最多 ${PARTICIPANTS_LIMIT} 个`, op));
     }
   }
   let secrecy = "restricted";
@@ -24211,7 +24130,6 @@ var init_atlas_ops_events = __esm({
     init_atlas_db_defaults();
     init_atlas_ops_refs();
     init_atlas_ops_entities();
-    init_atlas_runtime_limits();
     init_atlas_furnishing_promotion();
     init_atlas_furnishing_promotion();
     init_atlas_space_canonical();
@@ -25492,10 +25410,6 @@ function compileSpaceStatePatch(op, ctx) {
     result.issues.push(issue19("SPACE_PATCH_EMPTY", "$.data.updates", "space.state.patch 需要至少一条 update；没有变化就输出 noop", op));
     return result;
   }
-  if (updates.length > SPACE_STATE_PATCH_LIMIT) {
-    result.issues.push(issue19("SPACE_PATCH_TOO_MANY", "$.data.updates", `一次最多 ${SPACE_STATE_PATCH_LIMIT} 个对象；${updates.length} 项超限，按批拆分`, op));
-    return result;
-  }
   const ref2 = str7(op.value.ref);
   if (ref2 === "") {
     result.issues.push(issue19("MINIMUM_FIELD_MISSING", "$.ref", "space.state.patch 需要 ref 指明本批冻结地图", op));
@@ -25715,7 +25629,6 @@ var init_atlas_ops_space_state = __esm({
     init_atlas_world_build_state();
     init_atlas_construction_progress();
     init_atlas_hash();
-    init_atlas_ops_normalize();
     SPACE_STATE_PATCH_PHASES = ["observe", "outcome", "repair"];
     FACT_ROW_PAGE = 500;
     FACT_ROW_MAX_PAGES = 20;
@@ -26366,23 +26279,8 @@ function parseOperations(payload, ctx) {
   } else {
     for (const candidate of lineCandidates(source)) candidates.push(candidate);
   }
-  const limit = ATLAS_RUNTIME_LIMITS.operationsPerResponse;
-  let validCount = 0;
-  let firstDroppedLine;
   for (const candidate of candidates) {
     const bytes2 = utf8ByteLength(candidate.raw);
-    if (bytes2 > ATLAS_RUNTIME_LIMITS.operationUtf8Bytes) {
-      issues.push(
-        issue20(
-          ATLAS_ERROR_CODES.OPERATION_TOO_LARGE,
-          "$",
-          `operation on line ${candidate.line} is ${bytes2} bytes, over the ${ATLAS_RUNTIME_LIMITS.operationUtf8Bytes} byte per-operation limit; line skipped, other lines unaffected`,
-          { line: candidate.line, retryable: true }
-        )
-      );
-      incomplete = true;
-      continue;
-    }
     let value;
     try {
       value = JSON.parse(candidate.raw);
@@ -26421,23 +26319,7 @@ function parseOperations(payload, ctx) {
       explicitNoop = true;
       continue;
     }
-    validCount += 1;
-    if (operations.length >= limit) {
-      if (firstDroppedLine === void 0) firstDroppedLine = candidate.line;
-      continue;
-    }
     operations.push(built.parsed);
-  }
-  if (validCount > limit) {
-    issues.push(
-      issue20(
-        ATLAS_ERROR_CODES.TOO_MANY_OPERATIONS,
-        "$",
-        `response contains ${validCount} valid operations, over the ${limit} per-response limit; kept the first ${limit} and reported the remaining ${validCount - limit} (no silent drop)`,
-        { line: firstDroppedLine, retryable: true }
-      )
-    );
-    incomplete = true;
   }
   return { operations, issues, explicitNoop, incomplete };
 }
@@ -26755,8 +26637,8 @@ function mergeRepair(original, repaired, tickets, ctx) {
       );
       continue;
     }
-    const opName2 = typeof model?.op === "string" ? model.op : "";
-    if (opName2 === "noop") {
+    const opName = typeof model?.op === "string" ? model.op : "";
+    if (opName === "noop") {
       usedTickets.add(ticketId);
       consumedTickets.push(ticketId);
       const why = oneLine(typeof model?.why === "string" ? model.why : "");
@@ -26772,13 +26654,13 @@ function mergeRepair(original, repaired, tickets, ctx) {
       );
       continue;
     }
-    if (!ticket.allowedOps.includes(opName2)) {
+    if (!ticket.allowedOps.includes(opName)) {
       exceededScope = true;
       issues.push(
         makeIssue4(
           "REPAIR_SCOPE_VIOLATION",
           "$.op",
-          `票据「${ticketId}」以操作「${opName2}」修复，超出该票据允许的操作集合：${ticket.allowedOps.length > 0 ? ticket.allowedOps.join("、") : "（无）"}。该条被拒绝，其它合法修复条目保留。`,
+          `票据「${ticketId}」以操作「${opName}」修复，超出该票据允许的操作集合：${ticket.allowedOps.length > 0 ? ticket.allowedOps.join("、") : "（无）"}。该条被拒绝，其它合法修复条目保留。`,
           "error",
           false,
           { line, opId: originalOp.opId }
@@ -38035,7 +37917,6 @@ function reconcileOccupantsSpec(input) {
     const near = text8(raw?.near) || previous?.near || "";
     pushActor({ id, roomId, ...near && groupIds.has(near) ? { near } : {} });
   }
-  const requestedActorIds = new Set(actors.map((actor) => actor.id));
   for (const row3 of characterRows) {
     const id = text8(row3?.id);
     const roomId = physicalRoom(text8(row3?.location_id));
@@ -38089,17 +37970,6 @@ function reconcileOccupantsSpec(input) {
       continue;
     }
     looseItemMarkers.push({ id, roomId: actualRoom, name: text8(row3.name) || id, type: "item" });
-  }
-  if (actors.length > LIMITS.actors) {
-    const priority = (actor) => charById.get(actor.id)?.role === "protagonist" ? 0 : requestedActorIds.has(actor.id) ? 1 : prevActors.has(actor.id) ? 2 : 3;
-    actors.sort((a, b) => priority(a) - priority(b) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
-    for (const actor of actors.splice(LIMITS.actors)) seenActors.delete(actor.id);
-    issues.push(warn("ACTOR_MARKER_BUDGET_DEFERRED", "$.actors", "人物标点达到本图绘制额度；未绘者仍保存在人物表与地点名单，未修改位置。"));
-  }
-  if (items.length > LIMITS.items) {
-    items.sort((a, b) => Number(!prevItems.has(a.id)) - Number(!prevItems.has(b.id)) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
-    for (const item of items.splice(LIMITS.items)) seenItems.delete(item.id);
-    issues.push(warn("ITEM_MARKER_BUDGET_DEFERRED", "$.items", "物品标点达到本图绘制额度；未绘者仍保存在物品表，未修改持有关系或位置。"));
   }
   const looseIds = new Set(looseItemMarkers.map((m) => m.id));
   const deleted = {
@@ -39354,73 +39224,21 @@ var init_atlas_world_completion_ownership = __esm({
 
 // src/atlas-construction-budget.ts
 function constructionBudget(input) {
-  const total = input.totalOperations ?? ATLAS_RUNTIME_LIMITS.operationsPerResponse;
-  const normalizedTotal = Number.isFinite(total) && total > 0 ? Math.floor(total) : ATLAS_RUNTIME_LIMITS.operationsPerResponse;
+  const total = input.totalOperations;
   const normalizeQuota = (value) => Number.isFinite(value) && value >= 0 ? Math.floor(value) : 0;
   return {
     version: CONSTRUCTION_BUDGET_VERSION,
-    totalOperations: normalizedTotal,
-    // 类型配额不能超过总额：它们本来就共用同一个通道
-    maxNewLocations: Math.min(normalizeQuota(input.maxNewLocations), normalizedTotal),
-    maxNewRoutes: Math.min(normalizeQuota(input.maxNewRoutes), normalizedTotal)
+    totalOperations: typeof total === "number" && Number.isFinite(total) && total > 0 ? Math.floor(total) : null,
+    maxNewLocations: normalizeQuota(input.maxNewLocations),
+    maxNewRoutes: normalizeQuota(input.maxNewRoutes)
   };
 }
-function isNewRef(ref2, knownIds) {
-  const value = typeof ref2 === "string" ? ref2.trim() : "";
-  if (value.length === 0) return false;
-  if (value.startsWith("new:")) return true;
-  return !knownIds.has(value);
-}
-function opName(op) {
-  return typeof op?.op === "string" ? op.op.trim() : "";
-}
-function classifyOperation(op, knownIds) {
-  const name = opName(op);
-  if (name === "noop") return "noop";
-  if (name === "location.upsert") {
-    return isNewRef(op.ref, knownIds) ? "new-location" : "location-update";
-  }
-  if (name === "route.propose") {
-    return isNewRef(op.ref, knownIds) ? "new-route" : "route-update";
-  }
-  if (name === "map.estimate") return "estimate";
-  if (name === "space.state.patch") return "state-patch";
-  return "other";
-}
-function emptyUsage() {
-  const byClass = {};
-  for (const name of OPERATION_CLASSES) byClass[name] = 0;
-  return { total: 0, newLocations: 0, newRoutes: 0, byClass };
-}
-function countInto(usage, cls) {
-  usage.byClass[cls] += 1;
-  if (cls === "noop") return;
-  usage.total += 1;
-  if (cls === "new-location") usage.newLocations += 1;
-  if (cls === "new-route") usage.newRoutes += 1;
-}
-function budgetUsage(operations, knownIds) {
-  const usage = emptyUsage();
-  for (const op of operations) countInto(usage, classifyOperation(op, knownIds));
-  return usage;
-}
-var CONSTRUCTION_BUDGET_VERSION, OPERATION_CLASSES;
+var CONSTRUCTION_BUDGET_VERSION;
 var init_atlas_construction_budget = __esm({
   "src/atlas-construction-budget.ts"() {
     "use strict";
     init_define_ATLAS_BUILD_INFO();
-    init_atlas_runtime_limits();
     CONSTRUCTION_BUDGET_VERSION = 1;
-    OPERATION_CLASSES = [
-      "new-location",
-      "new-route",
-      "location-update",
-      "route-update",
-      "estimate",
-      "state-patch",
-      "other",
-      "noop"
-    ];
   }
 });
 
@@ -39446,18 +39264,18 @@ function branchRootMapId(tables, branchId) {
   return branch2 ? asId5(branch2.root_map_id) : "";
 }
 function normalizeCompletionPolicy(policy) {
-  const clamp2 = (value, ceiling, floor3 = 0) => {
-    const raw = typeof value === "number" && Number.isFinite(value) ? Math.floor(value) : ceiling;
-    return Math.min(ceiling, Math.max(floor3, raw));
+  const workAmount = (value, fallback) => {
+    const raw = typeof value === "number" && Number.isFinite(value) ? Math.floor(value) : fallback;
+    return Math.max(0, raw);
   };
   const workload = policy?.budgetMode === "workload";
   return {
     version: 1,
     density: "balanced",
     ...workload ? { budgetMode: "workload" } : {},
-    maxNewLocations: clamp2(policy?.maxNewLocations, workload ? ATLAS_RUNTIME_LIMITS.operationsPerResponse : ATLAS_RUNTIME_LIMITS.newLocationsPerBatch),
-    maxNewRoutes: clamp2(policy?.maxNewRoutes, workload ? ATLAS_RUNTIME_LIMITS.operationsPerResponse : ATLAS_RUNTIME_LIMITS.newRoutesPerBatch),
-    maxAdditionalDepth: clamp2(policy?.maxAdditionalDepth, workload ? ATLAS_RUNTIME_LIMITS.locationDepth : ATLAS_RUNTIME_LIMITS.additionalParentDepthPerBatch)
+    maxNewLocations: workAmount(policy?.maxNewLocations, workload ? ATLAS_RUNTIME_LIMITS.constructionOperationsPerBatch : ATLAS_RUNTIME_LIMITS.newLocationsPerBatch),
+    maxNewRoutes: workAmount(policy?.maxNewRoutes, workload ? ATLAS_RUNTIME_LIMITS.constructionOperationsPerBatch : ATLAS_RUNTIME_LIMITS.newRoutesPerBatch),
+    maxAdditionalDepth: workAmount(policy?.maxAdditionalDepth, workload ? ATLAS_RUNTIME_LIMITS.locationDepth : ATLAS_RUNTIME_LIMITS.additionalParentDepthPerBatch)
   };
 }
 function isUnclassified(row3) {
@@ -39632,7 +39450,7 @@ function buildConstructionRequest(input, policy, focusIds, plan, catalogue, sour
     "未获已注册事实支持的新地点必须写 existence_quality=inferred，不要自称 confirmed。",
     "禁止输出 event / character / item / time 相关操作：本阶段只做空间结构。",
     // P02 §8 第 1 条：共同总额必须写在模型看得见的地方，不能只靠报错教育它。
-    "本批所有非 noop 操作共用一个总额（见【当前范围与预算】的 totalOperations）：新增地点、新增路线、地点更新、尺度估计一起占用这个额度。newLocations / newRoutes 是总额之内更细的分类上限，**不是额外通道**——不要以为「地点 64、路线 64」就能输出 128 条。超出的部分会被延后到下一批，本批视为未完成。",
+    "按本批 maxNewLocations / maxNewRoutes 和依赖范围建设；更新、尺度估计等有效操作没有额外的固定条数限制。未完成的建设目标保留到后续窗口。",
     '没有需要修改的数据时输出 {"op":"noop"}。'
   ].join("\n");
   const totalBudget = constructionBudget({
@@ -39646,7 +39464,7 @@ function buildConstructionRequest(input, policy, focusIds, plan, catalogue, sour
     `maxNewRoutes=${policy.maxNewRoutes}`,
     `maxAdditionalDepth=${policy.maxAdditionalDepth}`,
     // 共同总额放在行尾：`focus=…、maxNewLocations=…` 的前缀形状是既有下游解析依赖，不要插到中间。
-    `totalOperations=${totalBudget.totalOperations}`
+    `totalOperations=${totalBudget.totalOperations ?? "unlimited"}`
   ].join("、");
   const sourceCatalogue = buildSourceCatalogue(
     sources.chunks.map((chunk) => chunk.sourceKey).filter((key) => typeof key === "string" && key.length > 0).filter((key, index, all) => all.indexOf(key) === index).map((key) => ({ key, contentHash: "", kind: "" }))
@@ -39927,33 +39745,7 @@ function normalizeConstructionOps(input) {
     issues.push({ code: "WORLD_CONSTRUCTION_DEFERRED", path: `$.operations.${op.op}.${str19(op.ref)}`, message: `${str19(op.ref) || op.op} 超出本批地点/路线/深度预算或依赖待处理地点，留待下一批建设。`, severity: "warning", retryable: true });
     return false;
   });
-  const totalBudget = constructionBudget({
-    maxNewLocations: policy.maxNewLocations,
-    maxNewRoutes: policy.maxNewRoutes
-  });
-  const totalUsage = budgetUsage(bounded2, known);
-  const withinTotal = [];
-  let usedTotal = 0;
-  for (const op of bounded2) {
-    const cls = classifyOperation(op, known);
-    if (cls === "noop") {
-      withinTotal.push(op);
-      continue;
-    }
-    if (usedTotal + 1 > totalBudget.totalOperations) {
-      issues.push({
-        code: "WORLD_CONSTRUCTION_BUDGET_EXCEEDED",
-        path: `$.operations.${op.op}.${str19(op.ref)}`,
-        message: `${str19(op.ref) || op.op} 超出本批共同预算 ${totalBudget.totalOperations} 条非 noop 操作（本批共 ${totalUsage.total} 条；地点与路线共用同一总额，不是各 64 条）；留待下一批建设。`,
-        severity: "warning",
-        retryable: true
-      });
-      continue;
-    }
-    usedTotal += 1;
-    withinTotal.push(op);
-  }
-  return { operations: withinTotal, issues, downgraded, protectedDrops };
+  return { operations: bounded2, issues, downgraded, protectedDrops };
 }
 var WORLD_FILL_FRAME_KEY, WORLD_CONSTRUCTION_OPS, WORLD_CONSTRUCTION_POLICY_VERSION, CONSTRUCTION_FORBIDDEN_PREFIXES;
 var init_atlas_sql_world_completion = __esm({
@@ -42672,7 +42464,7 @@ function createSqlRepository(options) {
       generationOptions = normalizeGenerationOptions(await windowPort.generationOptions());
       if (currentRevision() !== rev || input.isCurrent && !input.isCurrent()) throw new AtlasDbError("STALE_BASE", "读取分批设置期间世界或聊天已变化", {});
     }
-    input = { ...input, generationOptions, ...generationOptions.workBatching && input.worldCompletion ? { worldCompletion: { ...input.worldCompletion, policy: { ...input.worldCompletion.policy, budgetMode: "workload", maxNewLocations: ATLAS_RUNTIME_LIMITS.operationsPerResponse, maxNewRoutes: ATLAS_RUNTIME_LIMITS.operationsPerResponse, maxAdditionalDepth: ATLAS_RUNTIME_LIMITS.locationDepth } } } : {} };
+    input = { ...input, generationOptions, ...generationOptions.workBatching && input.worldCompletion ? { worldCompletion: { ...input.worldCompletion, policy: { ...input.worldCompletion.policy, budgetMode: "workload", maxNewLocations: ATLAS_RUNTIME_LIMITS.constructionOperationsPerBatch, maxNewRoutes: ATLAS_RUNTIME_LIMITS.constructionOperationsPerBatch, maxAdditionalDepth: ATLAS_RUNTIME_LIMITS.locationDepth } } } : {} };
     const candidate = await createCandidateImpl(anchor, "turn");
     const candidateDb = candidates.get(candidate.token).db;
     const tables = createTableReadPort(candidateDb);

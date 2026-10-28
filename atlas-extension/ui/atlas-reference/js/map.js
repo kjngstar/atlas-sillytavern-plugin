@@ -328,7 +328,7 @@ function create(canvas, mini, hooks){
   const CONTENT_MIN_SPAN = 140;
   function contentExtent(){
     const g=st.geo||{};
-    if(st.kind==='floor'&&!g.parentContext)return null;
+    if(st.kind==='floor')return null;
     let x0=Infinity,y0=Infinity,x1=-Infinity,y1=-Infinity;
     const put=(x,y)=>{if(!Number.isFinite(x)||!Number.isFinite(y))return;if(x<x0)x0=x;if(x>x1)x1=x;if(y<y0)y0=y;if(y>y1)y1=y;};
     const pts=list=>{if(Array.isArray(list))for(const p of list)if(Array.isArray(p))put(p[0],p[1]);};
@@ -338,8 +338,6 @@ function create(canvas, mini, hooks){
     for(const r of g.corridorRoutes||[])pts(r.points);
     for(const f of g.overviewFeatures||[]){pts(f&&f.poly);pts(f&&f.line);}
     pts(g.selfArea&&g.selfArea.pts);
-    pts(g.parentContext?.active?.pts);
-    for(const sibling of g.parentContext?.siblings??[])pts(sibling.pts);
     for(const d of g.districts||[])pts(d&&d.pts);
     for(const L of g.lands||[])pts(L&&L.pts);
     for(const p of g.plots||[]){const r=p&&p.r;if(Array.isArray(r))put(r[0],r[1]),put(r[2],r[3]);}
@@ -360,7 +358,6 @@ function create(canvas, mini, hooks){
     return [x0,x1,y0,y1];
   }
   function fitExtent(){
-    if(st.geo.parentContext)return contentExtent()??extent();
     const host=st.geo.hostArea;
     if(host&&[host.x,host.y,host.w,host.h].every(Number.isFinite)&&host.w>0&&host.h>0)return [host.x,host.x+host.w,host.y,host.y+host.h];
     // Fit any standalone room to its actual geometry, without changing map units.
@@ -382,10 +379,35 @@ function create(canvas, mini, hooks){
     return extent();
   }
   function fitPad(){ return contentExtent()?1.12:1.16; }
+  function compactOverviewScale(base){
+    const g=st.geo||{};
+    if(!st.node?.host||!['world','region'].includes(st.kind)||g.parentContext||g.selfArea)return base;
+    if(!contentExtent())return base; // Out-of-frame outliers must not redefine this map's view.
+    // Detailed terrain needs its full geographic view, even with few POIs.
+    if((g.overviewFeatures||[]).some(f=>f.type!=='road_texture'))return base;
+    const places=[],seen=new Set();
+    for(const m of st.node.marks||[]){
+      if(m.type!=='poi'||m.silent||m.proxy||!Number.isFinite(m.x)||!Number.isFinite(m.y))continue;
+      const key=m.id??`${m.x},${m.y}`;
+      if(!seen.has(key)){seen.add(key);places.push(m);}
+    }
+    if(places.length<2||places.length>4)return base;
+    const [x0,x1,y0,y1]=fitExtent(),area=(x1-x0)*(y1-y0);
+    let occupied=0;
+    for(const shape of g.overviewShapes||[]){
+      const pts=(shape.pts||[]).filter(p=>Array.isArray(p)&&Number.isFinite(p[0])&&Number.isFinite(p[1]));
+      if(pts.length)occupied+=(Math.max(...pts.map(p=>p[0]))-Math.min(...pts.map(p=>p[0])))*(Math.max(...pts.map(p=>p[1]))-Math.min(...pts.map(p=>p[1])));
+    }
+    if(!(area>0)||occupied/area>=.45)return base;
+    let spread=0;
+    for(let i=0;i<places.length;i++)for(let j=0;j<i;j++)spread=Math.max(spread,Math.hypot(places[i].x-places[j].x,places[i].y-places[j].y));
+    const screenSpan=Math.min(220,Math.min(st.vw,st.vh)*.42);
+    return spread>0&&screenSpan>0?Math.min(base,screenSpan/spread):base;
+  }
   function fitScale(pad){
     const [x0,x1,y0,y1] = fitExtent();
     pad = pad==null?fitPad():pad;
-    return Math.min(st.vw/((x1-x0)*pad), st.vh/((y1-y0)*pad));
+    return compactOverviewScale(Math.min(st.vw/((x1-x0)*pad), st.vh/((y1-y0)*pad)));
   }
   function fit(anim){
     const s = fitScale();
@@ -438,15 +460,7 @@ function create(canvas, mini, hooks){
     }
     ctx.restore();
 
-    const context=g.parentContext;
-    if(context){
-      for(const sibling of context.siblings){
-        ctx.beginPath();sibling.pts.forEach((p,i)=>i?ctx.lineTo(...p):ctx.moveTo(...p));ctx.closePath();
-        ctx.fillStyle='rgba(100,130,170,.035)';ctx.fill();ctx.strokeStyle='rgba(140,170,200,.45)';ctx.lineWidth=1/st.cam.s;ctx.setLineDash([5/st.cam.s,4/st.cam.s]);ctx.stroke();ctx.setLineDash([]);
-      }
-    }
     ctx.save();
-    if(context?.active?.pts?.length>=3){ctx.beginPath();context.active.pts.forEach((p,i)=>i?ctx.lineTo(...p):ctx.moveTo(...p));ctx.closePath();ctx.clip();}
     if(st.node.host&&st.node.sceneStatus!=='ready') overviewMap(g);
     else if(g.overviewShapes||g.overviewRoutes) overviewMap(g);
     else if(st.kind==='world') worldMap(g);
@@ -458,7 +472,6 @@ function create(canvas, mini, hooks){
     else                       roomMap(g);
     for(const route of g.corridorRoutes??[]){ctx.beginPath();route.points.forEach((p,i)=>i?ctx.lineTo(...p):ctx.moveTo(...p));ctx.strokeStyle=skinColor('road','stroke','rgba(127,212,255,.5)');ctx.lineWidth=1.2/st.cam.s;ctx.setLineDash([6/st.cam.s,4/st.cam.s]);ctx.stroke();ctx.setLineDash([]);}
     ctx.restore();
-    if(context?.active){ctx.beginPath();context.active.pts.forEach((p,i)=>i?ctx.lineTo(...p):ctx.moveTo(...p));ctx.closePath();ctx.strokeStyle='rgba(67,224,255,.6)';ctx.lineWidth=1.4/st.cam.s;ctx.stroke();}
   }
 
   // SQL overview geometry is usable before a decorative floor/city layout

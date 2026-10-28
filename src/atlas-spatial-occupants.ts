@@ -12,7 +12,7 @@
 
 import type { Issue } from './atlas-ops-contract.ts';
 import type { SceneDocument } from '../vendor/atlas-spatial/index.mjs';
-import { placeMarkers, LIMITS } from '../vendor/atlas-spatial/index.mjs';
+import { placeMarkers } from '../vendor/atlas-spatial/index.mjs';
 import { spatialIssue } from './atlas-spatial-frame.ts';
 import { parseSpaceLocalId } from './atlas-space-canonical.ts';
 
@@ -269,7 +269,6 @@ export function reconcileOccupantsSpec(input: OccupantsInput): OccupantsResult {
     pushActor({ id, roomId, ...(near && groupIds.has(near) ? { near } : {}) });
   }
 
-  const requestedActorIds = new Set(actors.map((actor) => actor.id));
   // SQL 归属补齐：刚迁入这个房间的人物本轮就要有可点标点，不等下一轮。
   for (const row of characterRows) {
     const id = text(row?.id);
@@ -332,21 +331,6 @@ export function reconcileOccupantsSpec(input: OccupantsInput): OccupantsResult {
       continue;
     }
     looseItemMarkers.push({ id, roomId: actualRoom, name: text(row.name) || id, type: 'item' });
-  }
-
-  // Rendering budgets do not limit the SQL roster. Avoid an entire floor failing
-  // just because the reconciliation pass supplies more actors than the kit permits.
-  if (actors.length > LIMITS.actors) {
-    const priority = (actor: ActorSpec): number => charById.get(actor.id)?.role === 'protagonist' ? 0
-      : requestedActorIds.has(actor.id) ? 1 : prevActors.has(actor.id) ? 2 : 3;
-    actors.sort((a, b) => priority(a) - priority(b) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
-    for (const actor of actors.splice(LIMITS.actors)) seenActors.delete(actor.id);
-    issues.push(warn('ACTOR_MARKER_BUDGET_DEFERRED', '$.actors', '人物标点达到本图绘制额度；未绘者仍保存在人物表与地点名单，未修改位置。'));
-  }
-  if (items.length > LIMITS.items) {
-    items.sort((a, b) => Number(!prevItems.has(a.id)) - Number(!prevItems.has(b.id)) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
-    for (const item of items.splice(LIMITS.items)) seenItems.delete(item.id);
-    issues.push(warn('ITEM_MARKER_BUDGET_DEFERRED', '$.items', '物品标点达到本图绘制额度；未绘者仍保存在物品表，未修改持有关系或位置。'));
   }
 
   /* ── 迁出/失效锚点：省略=保持，所以必须显式表达删除 ── */

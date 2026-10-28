@@ -100,7 +100,8 @@ test('Q03: full prompt entry capacity cannot silently truncate a compatibility d
   const old = { id: 'full', name: '完整预设', systemPrompt: '', updatedAt: 1, segments: Array.from({length:16}, (_,i) => ({role:'user',content:`条目 ${i}`})) };
   f.settings.promptPresets = [old]; const before = JSON.stringify(f.settings);
   const built = applySettingsCommand(f.settings, {action:'prompt.migrate-sql',id:old.id});
-  assert.equal(built.ok, false); assert.equal(built.code, 'FIELD_LIMIT_EXCEEDED');
+  assert.equal(built.ok, true);
+  assert.deepEqual(built.settings.promptPresets[1].segments.slice(-16), old.segments);
   assert.equal(JSON.stringify(f.settings), before);
 });
 

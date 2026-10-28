@@ -64,30 +64,28 @@ function entryOf(derived, mapId) {
 /**
  * 注意（P02 之后）：这里断言的是**解析器层**的旧行为，它保持不变——
  * 解析器始终是最后一道 64 条防线。
- * F03 的修复在**上游**：`normalizeConstructionOps` 现在按共同总额提前延后超额操作，
- * 于是解析器根本收不到 65 条。新行为的验证在 `atlas-construction-budget.test.mjs`
- * 的「P02 集成」两条。这两条旧断言保留，用来证明「解析器没有被偷偷放宽」。
+ * F03 回归：完整操作不再被解析器或隐藏共同总额截断；显式工作配额另行验证。
+ * 这些断言验证原先丢失的第 65 条和后续路线现在都被保留。
  */
-test('F03 旧行为：65 条合法操作保留 64 条，第 65 条丢弃且不进入续跑', () => {
+test('F03 回归：65 条合法操作完整保留，第 65 条也进入执行', () => {
   const lines = Array.from(
     { length: 65 },
     (_v, i) => `{"op":"character.upsert","ref":"C${i + 1}","data":{"thought":"观察${i + 1}。"}}`,
   );
   const result = parseOperations(lines.join('\n'), { phase: 'observe' });
 
-  // 旧行为事实 1：只保留 64 条
-  assert.equal(result.operations.length, 64);
-  // 旧行为事实 2：超限只报一条计算错误，没有「剩余待补」的结构化队列
+  // 修复后完整保留已返回的有效操作
+  assert.equal(result.operations.length, 65);
+  // 不再生成旧的条数超限错误
   const tooMany = result.issues.filter((issue) => issue.code === 'TOO_MANY_OPERATIONS');
-  assert.equal(tooMany.length, 1);
-  assert.match(tooMany[0].message, /over the 64 per-response limit/);
-  // 旧行为事实 3：标记 incomplete，但没有续跑载体——丢的那条就是丢了
-  assert.equal(result.incomplete, true);
+  assert.equal(tooMany.length, 0);
+  // 第 65 条保留，回复不因条数被标为 incomplete
+  assert.equal(result.incomplete, false);
   const carried = result.operations.filter((op) => op.value.ref === 'C65');
-  assert.equal(carried.length, 0, '第 65 条不在保留结果里');
+  assert.equal(carried.length, 1, '第 65 条完整保留');
 });
 
-test('F03 旧行为：地点与路线各 64 条时总额 128 条，仍只按 64 条截断', () => {
+test('F03 回归：地点与路线各 64 条时完整接收 128 条', () => {
   // 计划 F03 记录：construction 允许地点/路线各 64，解析器共同只收 64。
   const ops = [];
   for (let i = 0; i < 64; i += 1) {
@@ -97,8 +95,8 @@ test('F03 旧行为：地点与路线各 64 条时总额 128 条，仍只按 64 
     ops.push(`{"op":"route.upsert","ref":"R${i}","data":{"from":"L0","to":"L1"}}`);
   }
   const result = parseOperations(ops.join('\n'), { phase: 'geography' });
-  assert.equal(result.operations.length, 64, '总额仍被截到 64，不是各自 64');
-  assert.equal(result.issues.some((issue) => issue.code === 'TOO_MANY_OPERATIONS'), true);
+  assert.equal(result.operations.length, 128, '完整接收已返回的有效操作');
+  assert.equal(result.issues.some((issue) => issue.code === 'TOO_MANY_OPERATIONS'), false);
 });
 
 /* ─────────────────────────── F06 ─────────────────────────── */

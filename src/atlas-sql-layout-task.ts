@@ -17,7 +17,7 @@
  */
 
 import { createTableReadPort, pageAllRows } from './atlas-db-readport.ts';
-import { collectMapLocations, LIMITS } from '../vendor/atlas-spatial/index.mjs';
+import { collectMapLocations } from '../vendor/atlas-spatial/index.mjs';
 import { readMetricDimensions } from '../vendor/atlas-spatial/index.mjs';
 import { mergeLayoutConstraints } from './atlas-spatial-request.ts';
 import { collectTaskRefs } from './atlas-sql-task-refs.ts';
@@ -47,7 +47,6 @@ import {
   locationSpaceSize,
   readSpaceCanonical,
   resolveMapSpaceSize,
-  SPACE_CANONICAL_MAX_FURNISHING,
   type MapSpaceSizeResult,
 } from './atlas-space-canonical.ts';
 import {
@@ -662,7 +661,7 @@ export function buildSqlLayoutTask(
   const retryLimit=input.layoutBatchMapLimit;
   const work=input.generationOptions?.workBatching;
   const plannedSize=work?workBatchSize(chosen.length,work.mapBatches):Infinity;
-  const batchLimit=Math.min(plannedSize,config.mapsPerBatch||Infinity,ATLAS_RUNTIME_LIMITS.operationsPerResponse,
+  const batchLimit=Math.min(plannedSize,config.mapsPerBatch||Infinity,
     typeof retryLimit==='number'&&Number.isSafeInteger(retryLimit)&&retryLimit>0?retryLimit:Infinity);
   const outputBudget=Math.max(0,planningOutputTokens(input.generationOptions)-ATLAS_RUNTIME_LIMITS.batchOutputReserveTokens);
   const first=chosen[0],selected:Entry[]=[];
@@ -831,13 +830,13 @@ export function buildSqlLayoutTask(
         widthM: entry.spaceSize.resolution.widthM,
         heightM: entry.spaceSize.resolution.heightM,
         revision: entry.spaceSize.canonical?.revision ?? 0,
-        furnishing: Math.min(entry.spaceSize.canonical?.furnishing.length ?? 0, SPACE_CANONICAL_MAX_FURNISHING),
-        furnishingInventory: (entry.spaceSize.canonical?.furnishing??[]).slice(0,SPACE_CANONICAL_MAX_FURNISHING).map(item=>({
+        furnishing: entry.spaceSize.canonical?.furnishing.length ?? 0,
+        furnishingInventory: (entry.spaceSize.canonical?.furnishing??[]).map(item=>({
           id:item.localId,type:item.type,name:item.name,w:item.widthM,h:item.heightM,
           quality:item.quality,
           ...(item.itemId?{item:ref(item.itemId)}:{}),
         })),
-        furnishingReview: Object.values((entry.spaceSize.canonical?.furnishing??[]).slice(0,SPACE_CANONICAL_MAX_FURNISHING).reduce<Record<string, string[]>>((groups,item)=>{
+        furnishingReview: Object.values((entry.spaceSize.canonical?.furnishing??[]).reduce<Record<string, string[]>>((groups,item)=>{
           const name=item.name.trim();
           if(name)(groups[name]??=[]).push(item.localId);
           return groups;
@@ -868,10 +867,10 @@ export function buildSqlLayoutTask(
           const priority = (row: SqlRow): number => row.role === 'protagonist' || input.requiredRefs?.some((r) => r.kind === 'character' && r.id === row.id) ? 0 : 1;
           return priority(a) - priority(b) || byId(String(a.id), String(b.id));
         })
-        .slice(0, LIMITS.actors)
+
         .map((row) => ({ ref: ref(row.id), name: row.name, roomId: ref(physicalRoom(row.location_id)) })),
       items: items.filter(row=>localIds.has(String(row.location_id??'')) && !row.holder_character_id && !row.container_item_id && ref(row.id) && ref(row.location_id))
-        .slice(0, LIMITS.items)
+
         .map(row=>({ref:ref(row.id),name:row.name,kind:row.kind,description:row.description,roomId:ref(physicalRoom(row.location_id))})),
       savedConstraints: aliasLayoutRefs(retainedConstraints, catalogue.knownRefs),
       constraintStatus: savedRequest?(savedRequest.status??'pending'):'saved',

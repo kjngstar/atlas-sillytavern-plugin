@@ -65,10 +65,9 @@ export function hasLegacySqlPromptProtocol(content: string): boolean {
 /** Copies every original segment. Only conflicting segments in the new copy are disabled. */
 export function buildSqlCompatiblePrompt(source: AtlasPromptPreset): {
   name: string; systemPrompt: string; segments: AtlasPromptSegment[]; replacedKeywords: string[];
-} | null {
+} {
   const original = source.segments?.length ? source.segments.map(s => ({ ...s }))
     : source.systemPrompt ? [{ role: 'system' as const, content: source.systemPrompt, name: '原预设' }] : [];
-  if (original.length >= 16) return null; // Never silently truncate an author's entries.
   const disabled: string[] = [];
   for (const [index, segment] of original.entries()) {
     if (hasLegacySqlPromptProtocol(segment.content)) {
@@ -76,8 +75,7 @@ export function buildSqlCompatiblePrompt(source: AtlasPromptPreset): {
       disabled.push(segment.name || `原条目 ${index + 1}`);
     }
   }
-  const defaults = original.length <= 10 ? DEFAULT_SQL_PROMPT_SEGMENTS.map(s => ({ ...s }))
-    : [{ role: 'system' as const, name: 'SQL 世界维护策略', content: DEFAULT_SQL_PROMPT_SEGMENTS.map(s => `${s.name}\n${s.content}`).join('\n\n') }];
-  return { name: `${source.name}（SQL 兼容草稿）`.slice(0, 64), systemPrompt: source.systemPrompt,
+  const defaults = DEFAULT_SQL_PROMPT_SEGMENTS.map(s => ({ ...s }));
+  return { name: `${source.name}（SQL 兼容草稿）`, systemPrompt: source.systemPrompt,
     segments: [...defaults, ...original], replacedKeywords: disabled };
 }

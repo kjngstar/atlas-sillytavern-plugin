@@ -1,4 +1,4 @@
-import {clone,LIMITS} from './contracts.mjs';
+import {clone} from './contracts.mjs';
 
 /** Finite physical-space planning. Furniture never shrinks to fit a drawing. */
 export function fitEstimatedFloor(generate,value,context){
@@ -22,7 +22,6 @@ export function fitEstimatedFloor(generate,value,context){
       if(known){r.w=original.w;r.h=original.h;continue;}
       if(context.locks?.rooms?.[r.id]||context.planningProjection)continue;
       r.w=Math.ceil(original.w*factor*4)/4;r.h=Math.ceil(original.h*factor*4)/4;
-      if(r.w>LIMITS.roomSide||r.h>LIMITS.roomSide)return best;
     }
     const width=Math.max(...['north','south'].map(side=>next.rooms.filter(r=>r.side===side).reduce((n,r)=>n+r.w,1)));
     const heights=['north','south'].map(side=>Math.max(0,...next.rooms.filter(r=>r.side===side).map(r=>r.h)));
@@ -30,7 +29,6 @@ export function fitEstimatedFloor(generate,value,context){
     const required={widthM:single?next.rooms[0].w:width,heightM:single?next.rooms[0].h:2*Math.max(...heights)+(next.corridorWidth??2)+1};
     const current=context.spaceSize??context.spaceCanonical?.size??{widthM:context.map.metersPerCell>0?context.map.frame.cols*context.map.metersPerCell:value.width,heightM:context.map.metersPerCell>0?context.map.frame.rows*context.map.metersPerCell:value.height};
     const size=canGrowCanvas?{...current,widthM:Math.ceil(Math.max(current.widthM,required.widthM)*4)/4,heightM:Math.ceil(Math.max(current.heightM,required.heightM)*4)/4,quality:'estimated'}:current;
-    if(size.widthM>LIMITS.floorSide||size.heightM>LIMITS.floorSide)break;
     // Re-express the frame together with its physical extent, including the first
     // uncalibrated layout. Otherwise rectangular growth fails aspect validation.
     const map=canGrowCanvas?{...context.map,metersPerCell:.25,frame:{...context.map.frame,cols:size.widthM/.25,rows:size.heightM/.25}}:context.map;
