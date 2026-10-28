@@ -1,5 +1,5 @@
 /** Functional regions share their host's open floor; they never create walls or obstacles. */
-import { readSceneFrame, sceneLocationGeometry, checkSceneDocument, LIMITS } from '../vendor/atlas-spatial/index.mjs';
+import { readSceneFrame, sceneLocationGeometry, checkSceneDocument } from '../vendor/atlas-spatial/index.mjs';
 import type { Bounds, FloorArea } from '../vendor/atlas-spatial/index.mjs';
 import type { AtomicGroup, Issue, RowMutation } from './atlas-ops-contract.ts';
 import type { TableReadPort } from './atlas-ops-compile-types.ts';
@@ -61,7 +61,6 @@ export function planFunctionalAreaProjections(input:{tables:TableReadPort;branch
     }
     const host=scene.layout.hostArea??scene.layout.rooms.find((room:Bounds&{id:string})=>room.id===container?.id);
     if(!host)throw new AtlasDbError('FUNCTIONAL_AREA_HOST_MISSING','功能分区缺少已生成的父房间范围',{mapId});
-    if(members.length>LIMITS.zones)throw new AtlasDbError('FUNCTIONAL_AREA_LIMIT','功能分区数量超过场景容量',{mapId});
     const areas=members.map((member,index)=>{
       const ids=new Set(occupants.filter(row=>row.location_id===member.id).map(row=>row.id));
       const anchors=[...scene.layout.actors,...scene.layout.items].filter((point:{id:string})=>ids.has(point.id));

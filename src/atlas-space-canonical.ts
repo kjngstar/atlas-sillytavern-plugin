@@ -22,7 +22,6 @@ import { normalizeFrame } from './atlas-spatial-frame.ts';
 import { estimateSpaceFromType } from './atlas-space-estimate.ts';
 import {
   FRAME_SPACE_CANONICAL_KEY,
-  SPACE_CANONICAL_MAX_FURNISHING as KIT_MAX_FURNISHING,
   spaceLocalId,
   parseSpaceLocalId,
   readMetricDimensions,
@@ -32,14 +31,10 @@ import type { PlanIssue } from './atlas-world-contract.ts';
 /** frame 里保存空间权威的命名空间（字面量唯一权威在 vendor/contracts.mjs）。 */
 export const SPACE_CANONICAL_FRAME_KEY = FRAME_SPACE_CANONICAL_KEY;
 export const SPACE_CANONICAL_VERSION = 1;
-/** 首版陈设条目上限（与提示词、测试共用一个权威）。 */
-export const SPACE_CANONICAL_MAX_FURNISHING = KIT_MAX_FURNISHING;
 /** 空间尺寸允许的相对误差（0.5%）：幅面与物理尺寸一致的判定口径。 */
 export const SPACE_SIZE_REL_TOLERANCE = 0.005;
 /** 空间尺寸的绝对下限（米）：小于它就不叫"空间尺寸"，叫噪声。 */
 export const SPACE_MIN_SIDE_M = 0.2;
-/** 空间尺寸的绝对上限（米）：与 LIMITS.citySide 同量级，超过就是不可能是真实空间。 */
-export const SPACE_MAX_SIDE_M = 20000;
 
 export type SpaceSizeQuality = 'estimated' | 'confirmed';
 export type SpaceSizeBasisKind = 'author' | 'source' | 'parent-footprint' | 'first-estimate';
@@ -86,7 +81,7 @@ const asText = (value: unknown): string | null => (typeof value === 'string' && 
 
 /** 单轴合法性：有限、正、在 0.2–20000 米之间。 */
 function validSide(value: unknown): value is number {
-  return finite(value) && value >= SPACE_MIN_SIDE_M && value <= SPACE_MAX_SIDE_M;
+  return finite(value) && value >= SPACE_MIN_SIDE_M;
 }
 
 /** 两轴差异是否超出 0.5%（任选一个轴当分母，两边都要过）。 */
@@ -138,8 +133,8 @@ function readFurnishing(raw: unknown, locationId: string): SpaceCanonicalFurnish
   const parsed = parseSpaceLocalId(localId);
   if (!parsed || parsed.locationId !== locationId) return null;
   // 陈设可小于房间的最小边长，例如薄门洞与小灯具。
-  if (!finite(raw.widthM) || raw.widthM <= 0 || raw.widthM > SPACE_MAX_SIDE_M
-    || !finite(raw.heightM) || raw.heightM <= 0 || raw.heightM > SPACE_MAX_SIDE_M) return null;
+  if (!finite(raw.widthM) || raw.widthM <= 0
+    || !finite(raw.heightM) || raw.heightM <= 0) return null;
   const itemId = asId(raw.itemId);
   return {
     localId,
@@ -220,16 +215,7 @@ export function readSpaceCanonical(frame: unknown, expectedLocationId?: string |
     }
     furnishing.push(entry);
   }
-  const deferred = furnishing.length > SPACE_CANONICAL_MAX_FURNISHING;
-  if (deferred) {
-    issues.push(issue(
-      'SPACE_FURNISHING_DEFERRED',
-      `${path}.furnishing`,
-      `空间陈设账本已有 ${furnishing.length} 条，超过首版上限 ${SPACE_CANONICAL_MAX_FURNISHING}：本轮明确 deferred（不追加、不静默裁剪），原记录完整保留`,
-      'warning',
-    ));
-  }
-  return { ok: true, canonical: { version: 1, locationId, revision, size: readSize(raw.size), furnishing }, deferred, issues };
+  return { ok: true, canonical: { version: 1, locationId, revision, size: readSize(raw.size), furnishing }, deferred: false, issues };
 }
 
 

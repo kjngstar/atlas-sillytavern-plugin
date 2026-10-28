@@ -25,9 +25,6 @@
 #atlasDemo .tree-link .tname{font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;}
 #atlasDemo .tree-link .tnum{font-size:10px;}
 #atlasDemo .tw{flex-shrink:0;width:16px;height:24px;}
-#atlasDemo .depth-ladder{gap:5px;padding:15px 11px;}
-#atlasDemo .dl-cell{min-width:0;flex:1;}
-#atlasDemo .dl-cell:disabled{cursor:default;}
 #atlasDemo .sw-row{width:100%;text-align:left;}
 #atlasDemo .scope-note{font-size:11px;color:var(--txt-2);line-height:1.65;}
 #atlasDemo .scope-caption{font-size:11px;color:var(--txt-2);margin:0 0 12px;}

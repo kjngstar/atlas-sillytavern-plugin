@@ -1,7 +1,6 @@
 /** Read-only map context. Display proxies never become SQL positions or travel progress. */
 const finitePoint=p=>Array.isArray(p)&&p.length===2&&p.every(Number.isFinite);
 const polygon=p=>Array.isArray(p)&&p.length>=3&&p.every(finitePoint);
-const bounds=pts=>({x0:Math.min(...pts.map(p=>p[0])),x1:Math.max(...pts.map(p=>p[0])),y0:Math.min(...pts.map(p=>p[1])),y1:Math.max(...pts.map(p=>p[1]))});
 const midpoint=pts=>[pts.reduce((s,p)=>s+p[0],0)/pts.length,pts.reduce((s,p)=>s+p[1],0)/pts.length];
 const boundaryPoint=(node,mark,target)=>{
  const shape=outline(node,mark.id),start=[mark.x,mark.y];if(!shape)return start;
@@ -59,31 +58,6 @@ export function projectMapContext(nodes,locations,{inTransit=new Set()}={}){
   node.marks.push({id:location.id,placeId:location.id,type:'vehicle',name:location.name,x,y,
    sub:`${road?'道路上':anchor.name+'附近'} · 具体位置未知`,quality:'proxy',proxy:true,c:'#ffc247',node:target?{id:target,known:true}:null});
  }
- const depth=node=>{let current=node,n=0;const seen=new Set();while(current&&!seen.has(current.id)){seen.add(current.id);n++;current=nodes.get(current.parentMapId);}return n;};
- for(const node of [...nodes.values()].sort((a,b)=>depth(a)-depth(b))){
-  // Interior coordinates describe physical rooms, not a geographic zoom into
-  // the parent's schematic footprint. Exterior peers must not expand its fit.
-  if((node.renderKind??node.kind)==='floor')continue;
-  // Macro positions are schematic, not a transform into local metres.
-  // Neighbouring cities belong in the parent map; districts still share their
-  // parent's boundary. A building's interior also has its own coordinate frame.
-  if(['city','building','room','floor'].includes(node.kind))continue;
-  if(!node.parentMapId||!node.containerLocationId||byId.get(node.containerLocationId)?.mobility==='mobile')continue;
-  const parent=nodes.get(node.parentMapId),active=parent&&outline(parent,node.containerLocationId);
-  if(!active)continue;
-  const b=bounds(active.pts),w=b.x1-b.x0,h=b.y1-b.y0,t=node.transform;
-  if(!(w>0&&h>0&&t?.bounds&&t.scale>0))continue;
-  const scale=Math.min(t.bounds.w*t.scale/w,t.bounds.h*t.scale/h),cx=(b.x0+b.x1)/2,cy=(b.y0+b.y1)/2;
-  const project=p=>[(p[0]-cx)*scale,(p[1]-cy)*scale];
-  const siblings=(parent.children??[]).filter(s=>s.id!==node.id&&!s.unclassified&&byId.get(s.containerLocationId)?.mobility!=='mobile').flatMap(s=>{
-   const shape=outline(parent,s.containerLocationId);return shape?[{...shape,nodeId:s.id,name:s.name,pts:shape.pts.map(project)}]:[];
-  });
-  node.geo.parentContext={parentMapId:parent.id,active:{...active,pts:active.pts.map(project)},siblings};
-  // A district is a zoom into its parent footprint, not another generic city
-  // outline. Keep the parent's exact polygon topology in the child projection.
-  if(node.kind==='district'&&node.geo.districts?.length===1&&node.geo.districts[0].id===node.containerLocationId)node.geo.districts[0].pts=active.pts.map(project);
-  for(const s of siblings){const [x,y]=midpoint(s.pts);node.marks.push({id:s.id,placeId:s.id,type:'poi',name:s.name,x,y,sub:'同级区域',context:true,quality:s.quality,c:s.c??'#7f94b3',node:{id:s.nodeId,known:true}});}
-  const all=[...active.pts.map(project),...siblings.flatMap(s=>s.pts)],e=bounds(all);
-  node.extent=[Math.min(node.extent[0],e.x0-30),Math.max(node.extent[1],e.x1+30),Math.min(node.extent[2],e.y0-30),Math.max(node.extent[3],e.y1+30)];
- }
+ // Parent/child links are navigation. Each map keeps its own coordinate frame:
+ // a sibling's footprint belongs on the parent and must not enlarge this map.
 }

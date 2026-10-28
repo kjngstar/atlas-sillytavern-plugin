@@ -1,7 +1,7 @@
 /**
  * atlas-construction-budget.test.mjs — P02 共同操作预算断言。
  *
- * 覆盖：总额只有一个来源（operationsPerResponse），地点/路线共用而非各 64；
+ * 覆盖：未设置共同总额时不额外限制，显式有限工作额度仍由地点/路线共用；
  * 分类计数（新增/更新/estimate/state-patch 都计入）；超限报出实际数字；
  * 部分成功只收依赖完整的子集、父未接收则子延后；noop 不占额度；顺序无关的依赖重试。
  */
@@ -18,12 +18,11 @@ import {
   describeBudgetUsage,
   OPERATION_CLASSES,
 } from '../src/atlas-construction-budget.ts';
-import { ATLAS_RUNTIME_LIMITS } from '../src/atlas-runtime-limits.ts';
 
 const KNOWN = new Set(['L1', 'L2', 'L3', 'R1']);
 
 function budget(maxNewLocations = 32, maxNewRoutes = 32) {
-  return constructionBudget({ maxNewLocations, maxNewRoutes });
+  return constructionBudget({ maxNewLocations, maxNewRoutes, totalOperations: 64 });
 }
 
 function loc(ref, parentRef) {
@@ -38,20 +37,17 @@ function route(ref, from, to) {
 
 /* ─────────────────────── 总额来源 ─────────────────────── */
 
-test('总额只有一个来源：operationsPerResponse，调用方不能把它撑大', () => {
-  const built = budget();
-  assert.equal(built.totalOperations, ATLAS_RUNTIME_LIMITS.operationsPerResponse);
-  assert.equal(built.totalOperations, 64);
-
-  // 传更大的值也没用——类型配额被夹在总额内
-  const greedy = constructionBudget({ maxNewLocations: 200, maxNewRoutes: 200 });
-  assert.equal(greedy.maxNewLocations, 64);
-  assert.equal(greedy.maxNewRoutes, 64);
+test('总额仅由显式工作预算决定，不再有隐藏的 64 条响应上限', () => {
+  const unbounded = constructionBudget({ maxNewLocations: 200, maxNewRoutes: 200 });
+  assert.equal(unbounded.totalOperations, null);
+  assert.equal(unbounded.maxNewLocations, 200);
+  assert.equal(unbounded.maxNewRoutes, 200);
+  assert.equal(budget().totalOperations, 64, '显式设置的工作额度仍生效');
 });
 
-test('显式替换总额也被夹回协议上限之外的合法整数', () => {
+test('0 总额表示不额外限制，非法负分类配额仍归零', () => {
   const custom = constructionBudget({ maxNewLocations: 10, maxNewRoutes: 10, totalOperations: 0 });
-  assert.equal(custom.totalOperations, ATLAS_RUNTIME_LIMITS.operationsPerResponse, '0 不是合法总额，回退协议值');
+  assert.equal(custom.totalOperations, null);
   const negative = constructionBudget({ maxNewLocations: -5, maxNewRoutes: 10 });
   assert.equal(negative.maxNewLocations, 0);
 });
@@ -255,7 +251,7 @@ test('分类表覆盖所有声明的类别，没有漏项', () => {
 
 /* ───────────── P02 集成：共同总额前移到生成侧（F03 修复） ───────────── */
 
-test('P02 集成：64 地点 + 64 路线 = 128 条，normalize 后只剩 64 条', async () => {
+test('P02 集成：64 地点与 64 路线均在各自配额内时完整保留 128 条', async () => {
   const { normalizeConstructionOps } = await import('../src/atlas-sql-world-completion.ts');
 
   const ops = [
@@ -278,13 +274,10 @@ test('P02 集成：64 地点 + 64 路线 = 128 条，normalize 后只剩 64 条'
   });
 
   const kept = result.operations.filter((op) => op.op !== 'noop');
-  assert.equal(kept.length, 64, '共同总额 64：不能因为地点/路线各 64 就放行 128');
-  assert.ok(kept.every((op) => op.op === 'location.upsert'), '按顺序保留前 64 条');
-
-  const overBudget = result.issues.filter((issue) => issue.code === 'WORLD_CONSTRUCTION_BUDGET_EXCEEDED');
-  assert.equal(overBudget.length, 64, '被延后的 64 条逐条报出，不是一句总数了事');
-  assert.ok(overBudget.every((issue) => issue.severity === 'warning' && issue.retryable === true));
-  assert.match(overBudget[0].message, /共用同一总额/);
+  assert.equal(kept.length, 128);
+  assert.equal(kept.filter(op => op.op === 'location.upsert').length, 64);
+  assert.equal(kept.filter(op => op.op === 'route.propose').length, 64);
+  assert.ok(!result.issues.some(issue => issue.code === 'WORLD_CONSTRUCTION_BUDGET_EXCEEDED'));
 });
 
 test('P02 集成：65 条地点在生成侧就被拦住，不会留到解析器截断', async () => {

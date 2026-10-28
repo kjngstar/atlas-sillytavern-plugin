@@ -14,7 +14,6 @@ import { emptyCompileResult } from './atlas-ops-compile-types.ts';
 import { createRow } from './atlas-db-defaults.ts';
 import { resolveRef } from './atlas-ops-refs.ts';
 import { fieldIgnoredWarning, asString, applyPatch, compileItemTransfer } from './atlas-ops-entities.ts';
-import { PARTICIPANTS_LIMIT } from './atlas-runtime-limits.ts';
 import { planFurnishingMove, planFurnishingPromotion } from './atlas-furnishing-promotion.ts';
 import type { FurnishingPromotionTarget } from './atlas-furnishing-promotion.ts';
 import { resolveFurnishingRef } from './atlas-furnishing-promotion.ts';
@@ -126,15 +125,12 @@ export function compileEventPropose(op: ParsedOperation, ctx: CompileContext): C
 
   const participants: Array<{ entity_id: string; role: string }> = [];
   if (Array.isArray(data.participants)) {
-    for (const raw of data.participants.slice(0, PARTICIPANTS_LIMIT)) {
+    for (const raw of data.participants) {
       if (!isPlainObject(raw)) continue;
       const refValue = raw.entity_ref ?? raw.ref ?? raw.entity_id;
       const id = resolveOne(refValue, ['character', 'faction', 'item', 'location'], 'participants');
       if (!id) continue;
       participants.push({ entity_id: id, role: typeof raw.role === 'string' ? raw.role : 'participant' });
-    }
-    if (data.participants.length > PARTICIPANTS_LIMIT) {
-      result.issues.push(issue('FIELD_LIMIT_EXCEEDED', '$.data.participants', `participants 最多 ${PARTICIPANTS_LIMIT} 个`, op));
     }
   }
 

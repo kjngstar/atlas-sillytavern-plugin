@@ -1371,24 +1371,19 @@ export function atlasUninstallGlobals() {
  * - 导入是预校验：通过后仍由服务端 prompt.save 的 normalizePromptSegments 权威归一。
  */
 export const ATLAS_PROMPT_PACK_PROTOCOL = "atlas-prompt-pack@1";
-export const ATLAS_PROMPT_PACK_BYTES_MAX = 512 * 1024;
-const ATLAS_PROMPT_PACK_NAME_MAX = 80;
-const ATLAS_PROMPT_PACK_SEGMENT_CHARS_MAX = 8000;
-const ATLAS_PROMPT_PACK_SEGMENTS_MAX = 16;
 
-/** 与 src/atlas-settings.ts normalizePromptSegments 同规则（角色白名单 / trim / 丢空段 / 上限）。 */
+/** 与 src/atlas-settings.ts normalizePromptSegments 同规则（角色白名单 / trim / 丢空段）。 */
 function normalizePromptPackSegments(raw) {
   if (!Array.isArray(raw)) return [];
   const out = [];
-  for (const entry of raw.slice(0, ATLAS_PROMPT_PACK_SEGMENTS_MAX * 2)) {
+  for (const entry of raw) {
     if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
     const role = typeof entry.role === "string" ? entry.role.trim().toLowerCase() : "";
     if (!["system", "user", "assistant"].includes(role)) continue;
     const content = typeof entry.content === "string" ? entry.content.trim() : "";
     if (!content) continue;
-    if (out.length >= ATLAS_PROMPT_PACK_SEGMENTS_MAX) break;
-    const segment = { role, content: content.slice(0, ATLAS_PROMPT_PACK_SEGMENT_CHARS_MAX) };
-    if (typeof entry.name === "string" && entry.name.trim()) segment.name = entry.name.trim().slice(0, 64);
+    const segment = { role, content: content };
+    if (typeof entry.name === "string" && entry.name.trim()) segment.name = entry.name.trim();
     if (entry.mainSlot === "A" || entry.mainSlot === "B" || entry.mainSlot === "") segment.mainSlot = entry.mainSlot;
     if (entry.deletable === false) segment.deletable = false;
     if (entry.enabled === false) segment.enabled = false;
@@ -1399,12 +1394,12 @@ function normalizePromptPackSegments(raw) {
 
 /** 导出预设为 JSON 包字符串（单提示词预设自动包成一段 system 段）。 */
 export function buildAtlasPromptPack(preset, now = Date.now()) {
-  const name = String(preset?.name ?? "").trim().slice(0, ATLAS_PROMPT_PACK_NAME_MAX) || "未命名预设";
+  const name = String(preset?.name ?? "").trim() || "未命名预设";
   const segments = normalizePromptPackSegments(preset?.segments);
   if (segments.length === 0) {
     const single = typeof preset?.systemPrompt === "string" ? preset.systemPrompt.trim() : "";
     if (!single) return null; // 空预设无导出价值：不产出空包（调用方如实报错）
-    segments.push({ role: "system", content: single.slice(0, ATLAS_PROMPT_PACK_SEGMENT_CHARS_MAX) });
+    segments.push({ role: "system", content: single });
   }
   // 同样只收真数字（字符串伪数值不导出，避免把本地脏数据带进包）
   const count = preset?.contextTurnCount;
@@ -1429,9 +1424,6 @@ export function buildAtlasPromptPack(preset, now = Date.now()) {
 export function parseAtlasPromptPack(raw) {
   const text = typeof raw === "string" ? raw : "";
   if (!text.trim()) return { ok: false, error: "文件为空。" };
-  if (new TextEncoder().encode(text).byteLength > ATLAS_PROMPT_PACK_BYTES_MAX) {
-    return { ok: false, error: `文件超过 ${String(Math.round(ATLAS_PROMPT_PACK_BYTES_MAX / 1024))} KiB 上限。` };
-  }
   let parsed;
   try {
     parsed = JSON.parse(text);
@@ -1450,9 +1442,6 @@ export function parseAtlasPromptPack(raw) {
   }
   const name = typeof preset.name === "string" ? preset.name.trim() : "";
   if (!name) return { ok: false, error: "预设名缺失。" };
-  if (name.length > ATLAS_PROMPT_PACK_NAME_MAX) {
-    return { ok: false, error: `预设名超过 ${ATLAS_PROMPT_PACK_NAME_MAX} 字上限。` };
-  }
   const segments = normalizePromptPackSegments(preset.segments);
   if (segments.length === 0) {
     return { ok: false, error: "没有有效分段（role 必须是 system/user/assistant，且正文不得为空）。" };
@@ -1471,12 +1460,12 @@ export function parseAtlasPromptPack(raw) {
 
 /** 导入重名消解：不动既有预设，追加「（导入）」序号。纯函数便于测试。 */
 export function uniquePromptPresetName(name, existingNames) {
-  const base = String(name ?? "").trim().slice(0, 64) || "导入的预设";
+  const base = String(name ?? "").trim() || "导入的预设";
   const taken = new Set(
     (Array.isArray(existingNames) ? existingNames : []).map((item) => String(item ?? "").trim()),
   );
   if (!taken.has(base)) return base;
-  const withSuffix = (suffix) => `${base.slice(0, 64 - suffix.length)}${suffix}`;
+  const withSuffix = (suffix) => `${base}${suffix}`;
   let candidate = withSuffix("（导入）");
   let index = 2;
   while (taken.has(candidate)) {
@@ -1490,23 +1479,20 @@ export function uniquePromptPresetName(name, existingNames) {
 export function parseAtlasPromptImport(raw) {
   const text = typeof raw === "string" ? raw : "";
   if (!text.trim()) return { ok: false, error: "文件为空。" };
-  if (new TextEncoder().encode(text).byteLength > ATLAS_PROMPT_PACK_BYTES_MAX) {
-    return { ok: false, error: "文件超过 512 KiB 上限。" };
-  }
   let source;
   try { source = JSON.parse(text); }
   catch { return { ok: false, error: "不是合法 JSON。" }; }
   if (source?.protocol !== undefined) {
     const native = parseAtlasPromptPack(text);
-    if (native.ok && (!Array.isArray(source.preset?.segments) || source.preset.segments.length > 16 || source.preset.segments.some((entry) =>
+    if (native.ok && (!Array.isArray(source.preset?.segments) || source.preset.segments.some((entry) =>
       !["system", "user", "assistant"].includes(String(entry?.role ?? "").trim().toLowerCase()) ||
-      typeof entry?.content !== "string" || !entry.content.trim() || entry.content.length > 8000))) {
-      return { ok: false, error: "Atlas 包含无效或超限条目，请修正后导入；每份最多 16 个条目，每条最多 8000 字。" };
+      typeof entry?.content !== "string" || !entry.content.trim()))) {
+      return { ok: false, error: "Atlas 包含无效条目：角色必须有效，正文不能为空。" };
     }
     return native.ok ? { ok: true, format: "Atlas", presets: [native.preset], warnings: [] } : native;
   }
   const candidates = Array.isArray(source) ? source : [source];
-  if (candidates.length === 0 || candidates.length > 30) return { ok: false, error: "请选择包含 1–30 个预设的 JSON。" };
+  if (candidates.length === 0) return { ok: false, error: "请选择包含预设的 JSON。" };
   const presets = [];
   for (const candidate of candidates) {
     if (!candidate || typeof candidate !== "object" || typeof candidate.name !== "string" || !candidate.name.trim()) {
@@ -1520,8 +1506,8 @@ export function parseAtlasPromptImport(raw) {
         : [];
     if (groups.length === 0) return { ok: false, error: `「${candidate.name}」没有 promptGroup 分段。` };
     for (const group of groups) {
-      if (!Array.isArray(group.promptGroup) || !group.promptGroup.length || group.promptGroup.length > 16) {
-        return { ok: false, error: "每份预设需要 1–16 个分段；请拆分过多的条目后导入。" };
+      if (!Array.isArray(group.promptGroup) || !group.promptGroup.length) {
+        return { ok: false, error: "每份预设需要至少一个分段。" };
       }
       const mapped = [];
       for (const entry of group.promptGroup) {
@@ -1529,14 +1515,13 @@ export function parseAtlasPromptImport(raw) {
         if (!["system", "user", "assistant"].includes(role) || typeof entry?.content !== "string" || !entry.content.trim()) {
           return { ok: false, error: `「${group.atlasImportName}」含无效分段：角色应为 system/user/assistant，正文不能为空。` };
         }
-        if (entry.content.length > 8000) return { ok: false, error: "单个条目超过 8000 字，请拆分后导入。" };
         mapped.push({ ...entry, mainSlot: entry.mainSlot ?? (entry.isMain ? "A" : entry.isMain2 ? "B" : "") });
       }
       const count = group.contextTurnCount;
       if (count != null && (typeof count !== "number" || !Number.isInteger(count) || count < 1 || count > 10)) {
         return { ok: false, error: "contextTurnCount 必须是 1–10 的整数。" };
       }
-      presets.push({ name: group.atlasImportName.trim().slice(0, 64), segments: normalizePromptPackSegments(mapped),
+      presets.push({ name: group.atlasImportName.trim(), segments: normalizePromptPackSegments(mapped),
         ...(count == null ? {} : { contextTurnCount: count }) });
       if (presets.length > 30) return { ok: false, error: "文件包含过多任务，请分别导入。" };
     }

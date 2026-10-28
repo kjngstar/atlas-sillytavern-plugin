@@ -127,7 +127,7 @@ export function buildTableDeltaCompatiblePrompt(oldPreset: AtlasPromptPreset): {
       body = body.replace(pattern, replacement);
     }
   }
-  const name = `${oldPreset.name}（增量兼容草稿）`.slice(0, 64);
+  const name = `${oldPreset.name}（增量兼容草稿）`;
   const segments: AtlasPromptSegment[] = [
     ...DEFAULT_PROMPT_SEGMENTS_TABLE_DELTA.map((segment) => ({
       role: segment.role as AtlasPromptSegmentRole,
@@ -140,13 +140,13 @@ export function buildTableDeltaCompatiblePrompt(oldPreset: AtlasPromptPreset): {
     segments.push({
       role: "user",
       name: "原预设摘录（旧协议关键词已在新草稿里改写）",
-      content: body.trim().slice(0, MAX_PROMPT_CHARS),
+      content: body.trim(),
     });
   }
   return {
     name,
-    systemPrompt: body.trim().slice(0, MAX_PROMPT_CHARS),
-    segments: segments.slice(0, MAX_PROMPT_SEGMENTS),
+    systemPrompt: body.trim(),
+    segments,
     replacedKeywords: Array.from(new Set(replacedKeywords)).slice(0, 16),
   };
 }
@@ -162,11 +162,6 @@ export const ATLAS_SETTINGS_SCHEMA_VERSION = 2;
 /** 内置默认提示词的虚拟 ID（只在 UI 层出现；持久层用 activePromptPresetId = null 表示）。 */
 export const BUILTIN_PROMPT_PRESET_ID = "builtin-default";
 
-const MAX_PRESETS_PER_LIBRARY = 20;
-const MAX_NAME_CHARS = 64;
-const MAX_ENDPOINT_CHARS = 2048;
-const MAX_MODEL_CHARS = 128;
-const MAX_API_KEY_CHARS = 4096;
 // 0 means no Atlas output override; positive values have no model-specific ceiling.
 const MIN_MAX_TOKENS = 0;
 const MAX_MAX_TOKENS = Number.MAX_SAFE_INTEGER;
@@ -176,7 +171,6 @@ const MIN_TOP_P = 0;
 const MAX_TOP_P = 1;
 const MIN_TIMEOUT_MS = 1_000;
 const MAX_TIMEOUT_MS = 1_200_000;
-const MAX_PROMPT_CHARS = 8000;
 const MIN_RPM = 1;
 const MAX_RPM = 600;
 
@@ -262,23 +256,21 @@ export interface AtlasPromptSegment {
   enabled?: boolean;
 }
 
-export const MAX_PROMPT_SEGMENTS = 16;
 
-/** 分段归一化：角色白名单小写归一、内容 trim、空段丢弃、超限截断；非法输入 → 空数组（回退单提示词模式）。
+/** 分段归一化：角色白名单小写归一、内容 trim、空段丢弃；保留全部有效分段和正文；非法输入 → 空数组（回退单提示词模式）。
  *  0.9.25：保留 shujuku 栏位字段 name / mainSlot / deletable（可选，形状不对即丢弃）。 */
 export function normalizePromptSegments(raw: unknown): AtlasPromptSegment[] {
   if (!Array.isArray(raw)) return [];
   const segments: AtlasPromptSegment[] = [];
-  for (const entry of raw.slice(0, MAX_PROMPT_SEGMENTS * 2)) {
+  for (const entry of raw) {
     if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
     const record = entry as Record<string, unknown>;
     const role = typeof record.role === "string" ? record.role.trim().toLowerCase() : "";
     if (!(PROMPT_SEGMENT_ROLES as readonly string[]).includes(role)) continue;
     const content = typeof record.content === "string" ? record.content.trim() : "";
     if (!content) continue;
-    if (segments.length >= MAX_PROMPT_SEGMENTS) break;
-    const segment: AtlasPromptSegment = { role: role as AtlasPromptSegmentRole, content: content.slice(0, MAX_PROMPT_CHARS) };
-    if (typeof record.name === "string" && record.name.trim()) segment.name = record.name.trim().slice(0, 64);
+    const segment: AtlasPromptSegment = { role: role as AtlasPromptSegmentRole, content };
+    if (typeof record.name === "string" && record.name.trim()) segment.name = record.name.trim();
     if (record.mainSlot === "A" || record.mainSlot === "B" || record.mainSlot === "") {
       segment.mainSlot = record.mainSlot;
     }
@@ -444,21 +436,11 @@ function fingerprintOfConnection(input: {
 
 /** 名称冲突顺延：`名字`、`名字 (2)`、`名字 (3)`…（不覆盖已有项）。 */
 function uniqueName(base: string, used: Set<string>): string {
-  const trimmed = base.trim().slice(0, MAX_NAME_CHARS) || "未命名";
-  if (!used.has(trimmed)) {
-    used.add(trimmed);
-    return trimmed;
-  }
-  for (let n = 2; n < 1000; n += 1) {
-    const candidate = `${trimmed} (${n})`.slice(0, MAX_NAME_CHARS);
-    if (!used.has(candidate)) {
-      used.add(candidate);
-      return candidate;
-    }
-  }
-  const fallback = `${trimmed} (${Date.now()})`.slice(0, MAX_NAME_CHARS);
-  used.add(fallback);
-  return fallback;
+  const trimmed = base.trim() || "未命名";
+  let candidate = trimmed;
+  for (let n = 2; used.has(candidate); n += 1) candidate = `${trimmed} (${n})`;
+  used.add(candidate);
+  return candidate;
 }
 
 function resolveId(kind: "api" | "prompt", index: number, fingerprint: string, deps: AtlasSettingsDeps, usedIds: Set<string>): string {
@@ -509,18 +491,18 @@ function parseConnectionPreset(raw: unknown): Omit<AtlasApiConnectionPreset, "id
   const record = raw as Record<string, unknown>;
   const id = normalizeId(record.id);
   if (!id) return null;
-  if (typeof record.name !== "string" || !record.name.trim() || record.name.length > MAX_NAME_CHARS) return null;
+  if (typeof record.name !== "string" || !record.name.trim()) return null;
   const connectionMode = normalizeConnectionMode(record.connectionMode);
   // main / profile 模式不走自定义端点：endpoint / model 允许为空（0.9.13 照抄 shujuku 连接方式）
   const endpointOk =
     connectionMode !== "custom" ||
-    (typeof record.endpoint === "string" && record.endpoint.length <= MAX_ENDPOINT_CHARS && isHttpUrl(record.endpoint));
+    (typeof record.endpoint === "string" && isHttpUrl(record.endpoint));
   if (!endpointOk) return null;
   const modelOk =
     connectionMode !== "custom" ||
-    (typeof record.model === "string" && !!record.model.trim() && record.model.length <= MAX_MODEL_CHARS);
+    (typeof record.model === "string" && !!record.model.trim());
   if (!modelOk) return null;
-  if (typeof record.apiKey !== "string" || record.apiKey.length > MAX_API_KEY_CHARS) return null;
+  if (typeof record.apiKey !== "string") return null;
   if (!isFiniteIntIn(record.maxTokens, MIN_MAX_TOKENS, MAX_MAX_TOKENS)) return null;
   if (!isFiniteIn(record.temperature, MIN_TEMPERATURE, MAX_TEMPERATURE)) return null;
   if (!isFiniteIntIn(record.timeoutMs, MIN_TIMEOUT_MS, MAX_TIMEOUT_MS)) return null;
@@ -537,13 +519,13 @@ function parseConnectionPreset(raw: unknown): Omit<AtlasApiConnectionPreset, "id
     topP: isFiniteIn(record.topP, MIN_TOP_P, MAX_TOP_P) ? record.topP : 0.95,
     timeoutMs: record.timeoutMs,
     ...(normalizeApiFormat(record.apiFormat) !== "openai" ? { apiFormat: normalizeApiFormat(record.apiFormat) } : {}),
-    ...(typeof record.profileId === "string" && record.profileId.trim() ? { profileId: record.profileId.trim().slice(0, 128) } : {}),
+    ...(typeof record.profileId === "string" && record.profileId.trim() ? { profileId: record.profileId.trim() } : {}),
     ...(record.toolCalling === true ? { toolCalling: true } : {}),
-    ...(typeof record.bodyParams === "string" && record.bodyParams.trim() ? { bodyParams: record.bodyParams.slice(0, 4000) } : {}),
-    ...(typeof record.excludeBodyParams === "string" && record.excludeBodyParams.trim() ? { excludeBodyParams: record.excludeBodyParams.slice(0, 2000) } : {}),
-    ...(typeof record.requestHeaders === "string" && record.requestHeaders.trim() ? { requestHeaders: record.requestHeaders.slice(0, 2000) } : {}),
+    ...(typeof record.bodyParams === "string" && record.bodyParams.trim() ? { bodyParams: record.bodyParams } : {}),
+    ...(typeof record.excludeBodyParams === "string" && record.excludeBodyParams.trim() ? { excludeBodyParams: record.excludeBodyParams } : {}),
+    ...(typeof record.requestHeaders === "string" && record.requestHeaders.trim() ? { requestHeaders: record.requestHeaders } : {}),
     ...(typeof record.promptPostProcessing === "string" ? { promptPostProcessing: normalizePromptPostProcessing(record.promptPostProcessing) } : {}),
-    ...(typeof record.systemPrompt === "string" && record.systemPrompt.trim() ? { systemPrompt: record.systemPrompt.slice(0, MAX_PROMPT_CHARS) } : {}),
+    ...(typeof record.systemPrompt === "string" && record.systemPrompt.trim() ? { systemPrompt: record.systemPrompt } : {}),
   };
 }
 
@@ -552,17 +534,17 @@ function parsePromptPreset(raw: unknown): { id: string; name: string; systemProm
   const record = raw as Record<string, unknown>;
   const id = normalizeId(record.id);
   if (!id || id === BUILTIN_PROMPT_PRESET_ID) return null;
-  if (typeof record.name !== "string" || !record.name.trim() || record.name.length > MAX_NAME_CHARS) return null;
+  if (typeof record.name !== "string" || !record.name.trim()) return null;
   // Older segment-only presets did not always persist a systemPrompt field.
   // Accept the missing field when there are valid segments, preserving the text.
   if (record.systemPrompt != null && typeof record.systemPrompt !== "string") return null;
   const prompt = typeof record.systemPrompt === "string" ? record.systemPrompt.trim() : "";
   const segments = normalizePromptSegments(record.segments);
-  if ((!prompt || prompt.length > MAX_PROMPT_CHARS) && segments.length === 0) return null;
+  if (!prompt && segments.length === 0) return null;
   return {
     id,
     name: record.name.trim(),
-    systemPrompt: prompt.slice(0, MAX_PROMPT_CHARS),
+    systemPrompt: prompt,
     ...(segments.length > 0 ? { segments } : {}),
     ...(normalizeContextTurnCount(record.contextTurnCount) !== null
       ? { contextTurnCount: normalizeContextTurnCount(record.contextTurnCount)! }
@@ -591,14 +573,9 @@ export function sanitizeSettingsV2(raw: unknown, deps: AtlasSettingsDeps = {}): 
   const seenIds = new Set<string>();
   const apiPresets: AtlasApiConnectionPreset[] = [];
   if (Array.isArray(record.apiPresets)) {
-    for (const entry of record.apiPresets.slice(0, MAX_PRESETS_PER_LIBRARY * 4)) {
+    for (const entry of record.apiPresets) {
       const parsed = parseConnectionPreset(entry);
       if (!parsed || seenIds.has(parsed.id)) {
-        diagnostics.skipped += 1;
-        diagnostics.apiSkipped += 1;
-        continue;
-      }
-      if (apiPresets.length >= MAX_PRESETS_PER_LIBRARY) {
         diagnostics.skipped += 1;
         diagnostics.apiSkipped += 1;
         continue;
@@ -611,14 +588,9 @@ export function sanitizeSettingsV2(raw: unknown, deps: AtlasSettingsDeps = {}): 
 
   const promptPresets: AtlasPromptPreset[] = [];
   if (Array.isArray(record.promptPresets)) {
-    for (const entry of record.promptPresets.slice(0, MAX_PRESETS_PER_LIBRARY * 4)) {
+    for (const entry of record.promptPresets) {
       const parsed = parsePromptPreset(entry);
       if (!parsed || seenIds.has(parsed.id)) {
-        diagnostics.skipped += 1;
-        diagnostics.promptSkipped += 1;
-        continue;
-      }
-      if (promptPresets.length >= MAX_PRESETS_PER_LIBRARY) {
         diagnostics.skipped += 1;
         diagnostics.promptSkipped += 1;
         continue;
@@ -679,10 +651,10 @@ interface LegacyPresetShape {
 function parseLegacyPreset(raw: unknown): LegacyPresetShape | null {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
   const record = raw as Record<string, unknown>;
-  if (typeof record.name !== "string" || !record.name.trim() || record.name.length > MAX_NAME_CHARS) return null;
-  if (typeof record.endpoint !== "string" || record.endpoint.length > MAX_ENDPOINT_CHARS || !isHttpUrl(record.endpoint)) return null;
-  if (typeof record.model !== "string" || !record.model.trim() || record.model.length > MAX_MODEL_CHARS) return null;
-  const apiKey = typeof record.apiKey === "string" && record.apiKey.length <= MAX_API_KEY_CHARS ? record.apiKey : null;
+  if (typeof record.name !== "string" || !record.name.trim()) return null;
+  if (typeof record.endpoint !== "string" || !isHttpUrl(record.endpoint)) return null;
+  if (typeof record.model !== "string" || !record.model.trim()) return null;
+  const apiKey = typeof record.apiKey === "string" ? record.apiKey : null;
   if (apiKey === null) return null;
   const maxTokens = isFiniteIntIn(record.maxTokens, MIN_MAX_TOKENS, MAX_MAX_TOKENS) ? record.maxTokens : 0;
   const temperature = isFiniteIn(record.temperature, MIN_TEMPERATURE, MAX_TEMPERATURE) ? record.temperature : 0.7;
@@ -750,7 +722,7 @@ export function migrateAtlasSettings(raw: unknown, deps: AtlasSettingsDeps = {})
     const isActiveSource = entry === record.worldTurn;
     if (isActiveSource) settings.activeApiPresetId = apiId;
     const promptText = legacy.systemPrompt.trim();
-    if (!promptText || promptText.length > MAX_PROMPT_CHARS) continue;
+    if (!promptText) continue;
     if (!promptByText.has(promptText)) {
       const promptId = resolveId("prompt", promptByText.size, promptText, deps, usedIds);
       promptByText.set(promptText, promptId);
@@ -815,31 +787,19 @@ export function applySettingsCommand(
     case "api.save": {
       const preset = command.preset;
       const connectionMode = normalizeConnectionMode(preset.connectionMode);
-      if (typeof preset.name !== "string" || !preset.name.trim() || preset.name.length > MAX_NAME_CHARS) {
-        return fail(settings, "INVALID_PAYLOAD", "连接名称必填且不超过 64 字。");
+      if (typeof preset.name !== "string" || !preset.name.trim()) {
+        return fail(settings, "INVALID_PAYLOAD", "连接名称必填。");
       }
       // main / profile 模式不走自定义端点：endpoint / model 仅 custom 必填（0.9.13 照抄 shujuku）
       if (connectionMode === "custom") {
-        if (typeof preset.endpoint !== "string" || preset.endpoint.length > MAX_ENDPOINT_CHARS || !isHttpUrl(preset.endpoint)) {
+        if (typeof preset.endpoint !== "string" || !isHttpUrl(preset.endpoint)) {
           return fail(settings, "INVALID_PAYLOAD", "端点必须是 http(s) 绝对地址。");
         }
-        if (typeof preset.model !== "string" || !preset.model.trim() || preset.model.length > MAX_MODEL_CHARS) {
-          return fail(settings, "INVALID_PAYLOAD", "模型名必填且不超过 128 字。");
+        if (typeof preset.model !== "string" || !preset.model.trim()) {
+          return fail(settings, "INVALID_PAYLOAD", "模型名必填。");
         }
       } else if (connectionMode === "profile" && !(typeof preset.profileId === "string" && !!preset.profileId.trim())) {
         return fail(settings, "INVALID_PAYLOAD", "酒馆连接预设模式需要选择连接预设。");
-      }
-      if (typeof preset.bodyParams === "string" && preset.bodyParams.length > 4000) {
-        return fail(settings, "INVALID_PAYLOAD", "附加请求体参数不超过 4000 字。");
-      }
-      if (typeof preset.excludeBodyParams === "string" && preset.excludeBodyParams.length > 2000) {
-        return fail(settings, "INVALID_PAYLOAD", "排除请求体字段不超过 2000 字。");
-      }
-      if (typeof preset.requestHeaders === "string" && preset.requestHeaders.length > 2000) {
-        return fail(settings, "INVALID_PAYLOAD", "附加请求标头不超过 2000 字。");
-      }
-      if (typeof preset.systemPrompt === "string" && preset.systemPrompt.length > MAX_PROMPT_CHARS) {
-        return fail(settings, "INVALID_PAYLOAD", `System Prompt 不超过 ${MAX_PROMPT_CHARS} 字。`);
       }
       if (!isFiniteIntIn(preset.maxTokens, MIN_MAX_TOKENS, MAX_MAX_TOKENS)) {
         return fail(settings, "INVALID_PAYLOAD", "输出上限需为非负安全整数；0 表示不指定，由服务商或酒馆连接决定。");
@@ -870,13 +830,10 @@ export function applySettingsCommand(
         apiKey = "";
       } else {
         const rawKey = command.apiKey ?? "";
-        if (typeof rawKey !== "string" || rawKey.length > MAX_API_KEY_CHARS) {
-          return fail(settings, "INVALID_PAYLOAD", "密钥必须是字符串且不超过 4096 字。");
+        if (typeof rawKey !== "string") {
+          return fail(settings, "INVALID_PAYLOAD", "密钥必须是字符串。");
         }
         apiKey = rawKey;
-      }
-      if (existingIndex < 0 && settings.apiPresets.length >= MAX_PRESETS_PER_LIBRARY) {
-        return fail(settings, "FIELD_LIMIT_EXCEEDED", `最多保存 ${MAX_PRESETS_PER_LIBRARY} 条 API 连接。`);
       }
       const usedApiNames = new Set(settings.apiPresets.filter((_, i) => i !== existingIndex).map((p) => p.name));
       // 新建 ID：规格 0.4 规则 1 —— 优先 randomUUID（resolveId 内含碰撞兜底）；
@@ -895,13 +852,13 @@ export function applySettingsCommand(
         topP: preset.topP,
         timeoutMs: preset.timeoutMs,
         ...(normalizeApiFormat(preset.apiFormat) !== "openai" ? { apiFormat: normalizeApiFormat(preset.apiFormat) } : {}),
-        ...(connectionMode === "profile" && typeof preset.profileId === "string" && preset.profileId.trim() ? { profileId: preset.profileId.trim().slice(0, 128) } : {}),
+        ...(connectionMode === "profile" && typeof preset.profileId === "string" && preset.profileId.trim() ? { profileId: preset.profileId.trim() } : {}),
         ...(preset.toolCalling === true ? { toolCalling: true } : {}),
-        ...(typeof preset.bodyParams === "string" && preset.bodyParams.trim() ? { bodyParams: preset.bodyParams.slice(0, 4000) } : {}),
-        ...(typeof preset.excludeBodyParams === "string" && preset.excludeBodyParams.trim() ? { excludeBodyParams: preset.excludeBodyParams.slice(0, 2000) } : {}),
-        ...(typeof preset.requestHeaders === "string" && preset.requestHeaders.trim() ? { requestHeaders: preset.requestHeaders.slice(0, 2000) } : {}),
+        ...(typeof preset.bodyParams === "string" && preset.bodyParams.trim() ? { bodyParams: preset.bodyParams } : {}),
+        ...(typeof preset.excludeBodyParams === "string" && preset.excludeBodyParams.trim() ? { excludeBodyParams: preset.excludeBodyParams } : {}),
+        ...(typeof preset.requestHeaders === "string" && preset.requestHeaders.trim() ? { requestHeaders: preset.requestHeaders } : {}),
         ...(typeof preset.promptPostProcessing === "string" ? { promptPostProcessing: normalizePromptPostProcessing(preset.promptPostProcessing) } : {}),
-        ...(typeof preset.systemPrompt === "string" && preset.systemPrompt.trim() ? { systemPrompt: preset.systemPrompt.trim().slice(0, MAX_PROMPT_CHARS) } : {}),
+        ...(typeof preset.systemPrompt === "string" && preset.systemPrompt.trim() ? { systemPrompt: preset.systemPrompt.trim() } : {}),
         updatedAt: now,
       };
       const apiPresets = existingIndex >= 0
@@ -938,8 +895,8 @@ export function applySettingsCommand(
       if (preset.id !== undefined && normalizeId(preset.id) === BUILTIN_PROMPT_PRESET_ID) {
         return fail(settings, "INVALID_PAYLOAD", "内置默认提示词不可覆盖，请另存为新预设。");
       }
-      if (typeof preset.name !== "string" || !preset.name.trim() || preset.name.length > MAX_NAME_CHARS) {
-        return fail(settings, "INVALID_PAYLOAD", "提示词名称必填且不超过 64 字。");
+      if (typeof preset.name !== "string" || !preset.name.trim()) {
+        return fail(settings, "INVALID_PAYLOAD", "提示词名称必填。");
       }
       const text = typeof preset.systemPrompt === "string" ? preset.systemPrompt.trim() : "";
       // 0.9.18 分段模式：segments 非空时正文可为空（分段取代单提示词）；两者都空才拒绝
@@ -948,15 +905,11 @@ export function applySettingsCommand(
       if (segments.length > 0 && !segments.some((segment) => segment.enabled !== false)) {
         return fail(settings, "INVALID_PAYLOAD", "请至少启用一个非空提示词条目，再保存预设。");
       }
-      if (text.length > MAX_PROMPT_CHARS) return fail(settings, "FIELD_LIMIT_EXCEEDED", `提示词不超过 ${MAX_PROMPT_CHARS} 字。`);
       const targetId = preset.id === undefined ? null : normalizeId(preset.id);
       if (preset.id !== undefined && targetId === null) return fail(settings, "INVALID_PAYLOAD", "预设 ID 形状非法。");
       const existingIndex = targetId ? settings.promptPresets.findIndex((p) => p.id === targetId) : -1;
       if (command.create === true && existingIndex >= 0) return fail(settings, "INVALID_PAYLOAD", "新建提示词标识已存在。");
       if (targetId && existingIndex < 0 && command.create !== true) return fail(settings, "INVALID_PAYLOAD", "要更新的提示词预设不存在（另存为请省略 id）。");
-      if (existingIndex < 0 && settings.promptPresets.length >= MAX_PRESETS_PER_LIBRARY) {
-        return fail(settings, "FIELD_LIMIT_EXCEEDED", `最多保存 ${MAX_PRESETS_PER_LIBRARY} 条提示词预设。`);
-      }
       const usedNames = new Set(settings.promptPresets.filter((_, i) => i !== existingIndex).map((p) => p.name));
       const entry: AtlasPromptPreset = {
         id: targetId ?? resolveId("prompt", settings.promptPresets.length, text, deps, new Set(settings.promptPresets.map((p) => p.id))),
@@ -987,10 +940,6 @@ export function applySettingsCommand(
       const source = settings.promptPresets.find((p) => p.id === id);
       if (!source) return fail(settings, "INVALID_PAYLOAD", "要迁移的提示词预设不存在。");
       const built = command.action === 'prompt.migrate-sql' ? buildSqlCompatiblePrompt(source) : buildTableDeltaCompatiblePrompt(source);
-      if (!built) return fail(settings, 'FIELD_LIMIT_EXCEEDED', '原预设已有 16 个条目，兼容草稿没有空间加入 SQL 策略；请先复制整理条目。原预设未改动。');
-      if (settings.promptPresets.length >= MAX_PRESETS_PER_LIBRARY) {
-        return fail(settings, "FIELD_LIMIT_EXCEEDED", `最多保存 ${MAX_PRESETS_PER_LIBRARY} 条提示词预设；请先删除一条再迁移。`);
-      }
       const usedNames = new Set(settings.promptPresets.map((p) => p.name));
       const entry: AtlasPromptPreset = {
         id: resolveId("prompt", settings.promptPresets.length, `${built.name}:${built.systemPrompt}`, deps, new Set(settings.promptPresets.map((p) => p.id))),
@@ -1072,7 +1021,7 @@ export function applySettingsCommand(
     }
     case "replace.save": {
       const preset = command.preset;
-      const name = typeof preset.name === "string" ? preset.name.trim().slice(0, MAX_NAME_CHARS) : "";
+      const name = typeof preset.name === "string" ? preset.name.trim() : "";
       const start = typeof preset.start === "string" ? preset.start.trim().slice(0, 256) : "";
       const end = typeof preset.end === "string" ? preset.end.trim().slice(0, 256) : "";
       if (!name || !start || !end) {
@@ -1142,7 +1091,6 @@ export function applyLegacySettingsPatch(
       maxTokens: p.maxTokens, temperature: p.temperature, topP: typeof p.topP === "number" ? p.topP : 0.95, timeoutMs: p.timeoutMs,
     }) === fingerprint);
     if (existing) return existing.id;
-    if (next.apiPresets.length >= MAX_PRESETS_PER_LIBRARY) return null;
     const id = resolveId("api", next.apiPresets.length, fingerprint, deps, usedIds);
     const names = new Set(next.apiPresets.map((p) => p.name));
     next = {
@@ -1165,10 +1113,9 @@ export function applyLegacySettingsPatch(
 
   const upsertPrompt = (legacy: LegacyPresetShape): string | null => {
     const text = legacy.systemPrompt.trim();
-    if (!text || text.length > MAX_PROMPT_CHARS) return null;
+    if (!text) return null;
     const existing = next.promptPresets.find((p) => p.systemPrompt === text);
     if (existing) return existing.id;
-    if (next.promptPresets.length >= MAX_PRESETS_PER_LIBRARY) return null;
     const id = resolveId("prompt", next.promptPresets.length, text, deps, usedPromptIds);
     const names = new Set(next.promptPresets.map((p) => p.name));
     next = {
@@ -1210,7 +1157,6 @@ export function applyLegacySettingsPatch(
       const legacy = parseLegacyPreset(record.worldTurn);
       if (!legacy) return fail(settings, "INVALID_PAYLOAD", "worldTurn 预设字段非法（name / endpoint / model / apiKey 或数值超限）");
       const apiId = upsertConnection(legacy);
-      if (!apiId) return fail(settings, "FIELD_LIMIT_EXCEEDED", `最多保存 ${MAX_PRESETS_PER_LIBRARY} 条 API 连接。`);
       const promptId = upsertPrompt(legacy);
       next = { ...next, activeApiPresetId: apiId, activePromptPresetId: promptId };
     }

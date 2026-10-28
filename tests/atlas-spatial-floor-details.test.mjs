@@ -361,19 +361,19 @@ test('floor：作用域过期立即失败，既不返回场景也不写出任何
   assert.ok(prepared.issues.some((i) => i.code === 'STALE_SCOPE'), JSON.stringify(prepared.issues));
 });
 
-test('floor：集合超预算时明确失败并保留原布局，不静默截断', () => {
-  const contents = Array.from({ length: Kit.LIMITS.contents + 1 }, (_, i) => ({ id: `F_${i}`, roomId: R_CLASS, type: 'chair', w: 1, h: 1 }));
-  const over = Kit.generateFloor(floorSpec({ contents }), context());
-  assert.equal(over.ok, false);
-  assert.ok(over.issues.some((i) => i.code.includes('COLLECTION_LIMIT')), JSON.stringify(over.issues));
-  assert.equal(over.kept, null, '首次生成没有旧场景可保留时必须是 null，不能伪造');
+test('floor：大型陈设集合完整保留，放不下的项目报告几何问题', () => {
+  const contents = Array.from({ length: 129 }, (_, i) => ({ id: `F_${i}`, roomId: R_CLASS, type: 'chair', w: 1, h: 1 }));
+  const large = Kit.generateFloor(floorSpec({ contents }), context());
+  assert.equal(large.ok, true, JSON.stringify(large.issues));
+  assert.equal(large.scene.constraints.contents.length, 129);
+  assert.ok(!large.issues.some(i => i.code.includes('COLLECTION_LIMIT')));
+  assert.ok(large.scene.layout.issues.length > 0, '有限房间不能伪造容纳全部家具');
 
   const good = Kit.generateFloor(cleanSpec(), context());
-  assert.equal(good.ok, true);
-  const withPrevious = Kit.generateFloor(floorSpec({ contents }), { ...context(), previousScene: good.scene });
-  assert.equal(withPrevious.ok, false);
-  assert.ok(withPrevious.kept, '失败必须保留已保存布局');
-  assert.deepEqual(withPrevious.kept.layout.rooms, good.scene.layout.rooms);
+  const updated = Kit.generateFloor(floorSpec({ contents }), { ...context(), previousScene: good.scene });
+  assert.equal(updated.ok, true, JSON.stringify(updated.issues));
+  assert.ok(updated.scene.constraints.contents.length >= 129);
+  assert.ok(good.scene.constraints.contents.every(old => updated.scene.constraints.contents.some(next => next.id === old.id)));
 });
 
 test('floor：保存后重开读回同一场景；同一请求重跑为 reused，不重排已保存几何', () => {

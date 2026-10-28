@@ -26,7 +26,6 @@ import { encodeWorldFactPayload, worldFactRowId } from './atlas-world-build-stat
 import { progressRowMutation } from './atlas-construction-progress.ts';
 import type { WorldFactPredicate, WorldFactV1 } from './atlas-world-fact-policy.ts';
 import { stableHexHash } from './atlas-hash.ts';
-import { SPACE_STATE_PATCH_LIMIT } from './atlas-ops-normalize.ts';
 
 /** 允许改状态的阶段：正文观察、后台已发生的结果、以及由原失败组继承的 repair。 */
 export const SPACE_STATE_PATCH_PHASES = ['observe', 'outcome', 'repair'] as const;
@@ -155,10 +154,6 @@ export function compileSpaceStatePatch(op: ParsedOperation, ctx: CompileContext)
   const updates = Array.isArray(data['updates']) ? (data['updates'] as unknown[]) : [];
   if (updates.length === 0) {
     result.issues.push(issue('SPACE_PATCH_EMPTY', '$.data.updates', 'space.state.patch 需要至少一条 update；没有变化就输出 noop', op));
-    return result;
-  }
-  if (updates.length > SPACE_STATE_PATCH_LIMIT) {
-    result.issues.push(issue('SPACE_PATCH_TOO_MANY', '$.data.updates', `一次最多 ${SPACE_STATE_PATCH_LIMIT} 个对象；${updates.length} 项超限，按批拆分`, op));
     return result;
   }
 

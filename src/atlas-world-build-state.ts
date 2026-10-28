@@ -17,7 +17,6 @@
  * - 单行 payload 有预算，超了直接报错——说明调用方把不该塞的 ID 塞进来了。
  */
 
-import { ATLAS_RUNTIME_LIMITS } from './atlas-runtime-limits.ts';
 import { stableHexHash } from './atlas-hash.ts';
 import type { AtomicGroup, RowMutation } from './atlas-ops-contract.ts';
 import {
@@ -61,10 +60,10 @@ import { decodeWorldFact, type WorldFactV1 } from './atlas-world-fact-policy.ts'
 /**
  * 单行 payload 预算。
  *
- * 计划 §5.1：job 不内嵌全部目标和全文世界书。这里取 8 KiB，与单条操作预算同量级；
+ * 计划 §5.1：job 不内嵌全部目标和全文世界书。这里只限制分页后的建设账本元数据为 8 KiB；不限制模型操作内容；
  * 超出说明有调用方在往 payload 里倒世界清单，应当改成 target/fact 分页。
  */
-export const WORLD_BUILD_PAYLOAD_BUDGET_BYTES = ATLAS_RUNTIME_LIMITS.operationUtf8Bytes;
+export const WORLD_BUILD_PAYLOAD_BUDGET_BYTES = 8 * 1024;
 
 /** payload 里的类型标识字段名。旧行没有它。 */
 export const PAYLOAD_KIND_FIELD = 'payloadKind';

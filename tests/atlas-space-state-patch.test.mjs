@@ -21,7 +21,7 @@ import { compileOperations } from '../src/atlas-ops-compile.ts';
 import { applyGroups } from '../src/atlas-db-commit.ts';
 import { createTableReadPort } from '../src/atlas-db-readport.ts';
 import { queryBound } from '../src/atlas-db-runtime.ts';
-import { normalizeOperation, normalizeSpaceStateUpdates, SPACE_STATE_PATCH_LIMIT, validateMinimum } from '../src/atlas-ops-normalize.ts';
+import { normalizeOperation, normalizeSpaceStateUpdates, validateMinimum } from '../src/atlas-ops-normalize.ts';
 import { readFurnishingStates, readActorSceneFacts } from '../src/atlas-scene-facts.ts';
 import { readObjectStateFacts } from '../src/atlas-space-state.ts';
 import { evaluateCondition } from '../src/atlas-sim-actions.ts';
@@ -99,7 +99,7 @@ function commit(seed, out, id = 'g_space_state') {
  * 1 规范化
  * ------------------------------------------------------------------ */
 
-test('§18.4 updates 必填、至少一项、容量有上限', () => {
+test('§18.4 updates 必填、至少一项，完整接受超过旧上限的状态变化', () => {
   const none = normalizeSpaceStateUpdates({});
   assert.equal(none.ok, false);
   assert.ok(none.issues.some((entry) => entry.code === 'SPACE_PATCH_UPDATES_REQUIRED'));
@@ -107,8 +107,9 @@ test('§18.4 updates 必填、至少一项、容量有上限', () => {
   const empty = normalizeSpaceStateUpdates({ updates: [] });
   assert.ok(empty.issues.some((entry) => entry.code === 'SPACE_PATCH_EMPTY'));
 
-  const tooMany = normalizeSpaceStateUpdates({ updates: Array.from({ length: SPACE_STATE_PATCH_LIMIT + 1 }, () => ({ objectRef: 'F1', openingState: 'open' })) });
-  assert.ok(tooMany.issues.some((entry) => entry.code === 'SPACE_PATCH_TOO_MANY'), '嵌套数组不能绕开单条容量');
+  const many = normalizeSpaceStateUpdates({ updates: Array.from({ length: 33 }, (_, i) => ({ objectRef: `F${i}`, openingState: 'open' })) });
+  assert.equal(many.ok, true);
+  assert.deepEqual(many.issues, []);
 
   const noChange = normalizeSpaceStateUpdates({ updates: [{ objectRef: 'F1' }] });
   assert.ok(noChange.issues.some((entry) => entry.code === 'SPACE_PATCH_NO_CHANGE'), '没有任何变化字段就不该发这条操作');
@@ -219,6 +220,40 @@ test('§18.4 没有冻结陈设账本的空间拒绝改状态：没有稳定 ID 
   const out = compile(seed, patchText([{ objectRef: 'D1', locationRef: LOC, openingState: 'open' }]));
   assert.ok(out.compiled.issues.some((entry) => entry.code === 'SPACE_PATCH_NO_CANONICAL'));
   seed.close();
+});
+
+test('§18.4 超过 32 个不同对象的状态经真实 SQL 提交后均可读回', async () => {
+  const seed = await fixture();
+  try {
+    const furnishing = Array.from({ length: 40 }, (_, i) => ({ localId: `space:${LOC}:furn:D${i}`,
+      type: 'door', name: `门${i}`, itemId: null, widthM: 1, heightM: 0.2, quality: 'confirmed' }));
+    const frame = { origin_x: 0, origin_y: 0, reference_width_cells: 20, reference_height_cells: 15,
+      atlasSpaceCanonical: { ...canonical, furnishing }, atlasScene: { version: 1 } };
+    seed.db.run('UPDATE maps SET frame_json=? WHERE branch_id=? AND id=?', [JSON.stringify(frame), seed.branchId, MAP]);
+    const updates = furnishing.map((entry, i) => ({ objectRef: `D${i}`, locationRef: LOC, openingState: 'closed' }));
+    const out = compile(seed, patchText(updates));
+    assert.deepEqual(out.compiled.issues.filter(entry => entry.severity === 'error'), []);
+    commit(seed, out, 'g_many_objects');
+    for (const entry of furnishing) {
+      assert.equal(readObjectStateFacts({ db: seed.db, branchId: seed.branchId }, entry.localId).openingState, 'closed');
+    }
+    const stored = queryBound(seed.db, 'SELECT frame_json FROM maps WHERE branch_id=? AND id=?', [seed.branchId, MAP])[0];
+    assert.deepEqual(JSON.parse(stored.frame_json), frame, '状态变化不能重写地图几何');
+  } finally { seed.close(); }
+});
+
+test('大别名与能力列表经真实 SQL 提交后完整保留', async () => {
+  const seed = await fixture();
+  try {
+    const aliases = Array.from({ length: 20 }, (_, i) => `别名${i}`);
+    const capabilities = Array.from({ length: 30 }, (_, i) => ({ key: `skill-${i}`, level: 1 }));
+    const out = compile(seed, JSON.stringify({ op: 'character.upsert', ref: IDS.C1, source: 'S1', data: { aliases, capabilities } }));
+    assert.deepEqual(out.compiled.issues.filter(entry => entry.severity === 'error'), []);
+    commit(seed, out, 'g_large_lists');
+    const stored = queryBound(seed.db, 'SELECT aliases_json,capabilities_json FROM characters WHERE branch_id=? AND id=?', [seed.branchId, IDS.C1])[0];
+    assert.deepEqual(JSON.parse(stored.aliases_json), aliases);
+    assert.deepEqual(JSON.parse(stored.capabilities_json), capabilities);
+  } finally { seed.close(); }
 });
 
 test('§18.4 不在账本里的对象拒绝：不凭空给不存在的门改状态', async () => {

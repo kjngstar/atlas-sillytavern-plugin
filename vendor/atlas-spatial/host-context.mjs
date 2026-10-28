@@ -1,4 +1,4 @@
-import {normalizeScope,finite,plain,diagnostic,failure,parseSpaceLocalId,FRAME_SPACE_CANONICAL_KEY,SPACE_CANONICAL_MAX_FURNISHING} from './contracts.mjs';
+import {normalizeScope,finite,plain,diagnostic,failure,parseSpaceLocalId,FRAME_SPACE_CANONICAL_KEY} from './contracts.mjs';
 import {readSceneFrame} from './storage.mjs';
 import {collectMapLocations} from './map-membership.mjs';
 
@@ -22,7 +22,7 @@ function readSpaceCanonical(raw,locationId){
   }
   const revision=Number.isInteger(raw.revision)&&raw.revision>=0?raw.revision:0;
   // 超限不下发裁剪结果：调用方必须看到 deferred 并自己决定（§19.1 不静默裁剪）。
-  return {version:1,locationId,revision,size,furnishing,deferred:furnishing.length>SPACE_CANONICAL_MAX_FURNISHING};
+  return {version:1,locationId,revision,size,furnishing,deferred:false};
 }
 
 /**

@@ -281,20 +281,19 @@ test('概览：feature 非法/挂错 zone 只跳该项，其余图元照常生�
   assertNoSecretLeak(pov.scene, SECRET_ZONE, SECRET_ZONE_NAME, SECRET_ROUTE, SECRET_FEATURE);
 });
 
-test('概览：作用域过期立即失败；集合超预算明确失败且保留旧场景', () => {
+test('概览：作用域过期仍拒绝，大型地物集合完整保留', () => {
   const stale = Kit.generateOverview(overviewSpec(), { ...context(), currentScope: { ...SCOPE, revision: 99 } });
   assert.equal(stale.ok, false);
   assert.equal(stale.scene, null);
-  assert.ok(stale.issues.some((i) => i.code === 'STALE_SCOPE'), JSON.stringify(stale.issues));
-
+  assert.ok(stale.issues.some(i => i.code === 'STALE_SCOPE'));
   const good = generate(overviewSpec(), context());
-  assert.equal(good.ok, true);
-  const features = Array.from({ length: Kit.LIMITS.features + 1 }, (_, i) => ({ id: `F_${i}`, type: 'forest_texture', zoneId: PUB_A }));
-  const over = Kit.generateOverview(overviewSpec({ features }), { ...context(), previousScene: good.scene });
-  assert.equal(over.ok, false);
-  assert.ok(over.issues.some((i) => i.code.includes('COLLECTION_LIMIT')), JSON.stringify(over.issues));
-  assert.ok(over.kept, '超预算失败必须保留已保存场景');
-  assert.deepEqual(over.kept.layout.shapes, good.scene.layout.shapes);
+  const features = Array.from({ length: 129 }, (_, i) => ({ id: `F_${i}`, type: 'forest_texture', zoneId: PUB_A }));
+  const large = Kit.generateOverview(overviewSpec({ features }), { ...context(), previousScene: good.scene });
+  assert.equal(large.ok, true, JSON.stringify(large.issues));
+  assert.equal(large.scene.constraints.features.length, good.scene.constraints.features.length + 129);
+  assert.ok(features.every(feature => large.scene.constraints.features.some(saved => saved.id === feature.id)));
+  assert.ok(good.scene.constraints.features.every(feature => large.scene.constraints.features.some(saved => saved.id === feature.id)));
+  assert.ok(!large.issues.some(i => i.code.includes('COLLECTION_LIMIT')));
 });
 
 test('旧 floor 场景的 POV 过滤：隐藏房间的家具/人物/物品一并消失，作者视图完整', () => {

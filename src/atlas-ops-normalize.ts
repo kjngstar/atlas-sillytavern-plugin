@@ -330,25 +330,6 @@ export function normalizeLayoutSpec(
         ],
       };
     }
-    // G11 场景体积预算：分区/地物/连接的条数上限来自 ATLAS_RUNTIME_LIMITS，不在这里写第二份数字。
-    const limit = key === 'zones' ? ATLAS_RUNTIME_LIMITS.overviewZoneLimit
-      : key === 'features' ? ATLAS_RUNTIME_LIMITS.overviewFeatureLimit
-        : key === 'links' ? ATLAS_RUNTIME_LIMITS.overviewLinkLimit
-          : null;
-    if (limit !== null && value.length > limit) {
-      return {
-        ok: false,
-        spec: null,
-        issues: [
-          issue(
-            ATLAS_ERROR_CODES.OPERATION_TOO_LARGE,
-            `$.data.spec.${key}`,
-            `map.layout.request: spec.${key} has ${value.length} entries, over the ${limit} limit; split the request`,
-            { severity: 'error', retryable: true, opId: op?.opId, line: op?.line },
-          ),
-        ],
-      };
-    }
     const seenIds = new Set<string>();
     for (let i = 0; i < value.length; i += 1) {
       const entry = value[i];
@@ -507,9 +488,6 @@ function overviewEntryIssue(
 
 /* ───────────────────── §5.7 / §18.4 space.state.patch ───────────────────── */
 
-/** 单条 `space.state.patch` 能改的对象数上限。集中一处定义，嵌套数组不能绕开。 */
-export const SPACE_STATE_PATCH_LIMIT = 32;
-
 const SPACE_PATCH_CHANGE_FIELDS = ['openingState', 'locked', 'material', 'present', 'destroyed', 'canOpen', 'blocksMovement', 'blocksSight'] as const;
 const SPACE_PATCH_ALLOWED_FIELDS: readonly string[] = ['objectRef', 'locationRef', 'mapRef', ...SPACE_PATCH_CHANGE_FIELDS];
 /** 几何不是状态：这些字段出现即拒，不静默丢掉。 */
@@ -548,10 +526,6 @@ export function normalizeSpaceStateUpdates(
   }
   if (raw.length === 0) {
     push('SPACE_PATCH_EMPTY', '$.data.updates', 'space.state.patch 的 updates 为空：没有状态变化就不要发这个操作（无变化用 noop）');
-    return { ok: false, issues };
-  }
-  if (raw.length > SPACE_STATE_PATCH_LIMIT) {
-    push('SPACE_PATCH_TOO_MANY', '$.data.updates', `一次最多 ${SPACE_STATE_PATCH_LIMIT} 个对象状态；${raw.length} 项超限，按批拆分而不是靠嵌套数组绕开容量`);
     return { ok: false, issues };
   }
 

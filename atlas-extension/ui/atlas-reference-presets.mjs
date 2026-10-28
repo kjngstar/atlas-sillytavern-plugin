@@ -33,8 +33,6 @@ export function referenceSettingsCommands(doc,settings={},action={}) {
     commands.push({action:'api.save',create:!old.id,preset,apiKeyMode:old.id&&key===old.apiKey?'keep':key?'replace':'clear',...(key?{apiKey:key}:{})});
   }
   function prompt(p){
-    if(p.segments.length>16)throw Error('插件最多支持 16 段提示词；未保存，原预设保留。');
-    if(p.segments.some(s=>s.content.length>8000))throw Error('每段提示词最多 8000 字；未保存，原预设保留。');
     const old=settings.promptPresets?.find(x=>x.id===p.id)??{};
     commands.push({action:'prompt.save',create:!old.id,preset:{...old,id:p.id,name:p.name,systemPrompt:'',segments:p.segments.map(({id,...s})=>s),contextTurnCount:old.contextTurnCount??3}});
   }

@@ -18,12 +18,7 @@ import type { Issue } from './atlas-ops-contract.ts';
 const LOCATION_DEPTH = ATLAS_RUNTIME_LIMITS.locationDepth;
 const CONTAINER_DEPTH = ATLAS_RUNTIME_LIMITS.containerDepth;
 const ACTION_PLAN_DEPTH = ATLAS_RUNTIME_LIMITS.actionPlanDepth;
-const CAPABILITY_LIMIT = ATLAS_FIELD_LIMITS.capabilityLimit;
-const MOBILITY_PROFILE_LIMIT = ATLAS_FIELD_LIMITS.mobilityProfileLimit;
-const ALIAS_LIMIT = ATLAS_FIELD_LIMITS.aliasLimit;
-const PARTICIPANTS_LIMIT = ATLAS_FIELD_LIMITS.participantsLimit;
 const GEOMETRY_VERTEX_LIMIT = ATLAS_FIELD_LIMITS.geometryVertexLimit;
-const ITEM_PROPERTY_LIMIT = ATLAS_FIELD_LIMITS.itemPropertyLimit;
 const MENTION_RECENT_LIMIT = ATLAS_FIELD_LIMITS.mentionRecentLimit;
 
 export type InvariantViolation = {
@@ -560,9 +555,6 @@ export function validateCandidate(db: SqlDatabase, options: ValidateOptions): Ca
     if ((status === 'occurred' || status === 'ongoing') && (ev.occurred_at_s === null || ev.occurred_at_s === undefined)) {
       violations.push(violation('INVARIANT_EVENT_OCCURRED_NEEDS_TIME', 'events', id, 'occurred_at_s', 'occurred/ongoing 事件必须有实际发生时刻'));
     }
-    if (Array.isArray(ev.participants_json) && (ev.participants_json as unknown[]).length > PARTICIPANTS_LIMIT) {
-      violations.push(violation('INVARIANT_EVENT_PARTICIPANTS_LIMIT', 'events', id, 'participants_json', `participants 最多 ${PARTICIPANTS_LIMIT} 个`));
-    }
   }
 
   // —— 7. 认知：三种持有者恰选一个 ——
@@ -700,18 +692,6 @@ export function validateCandidate(db: SqlDatabase, options: ValidateOptions): Ca
 }
 
 function checkListLimits(table: AtlasTableName, id: string, row: Record<string, unknown>, out: InvariantViolation[]): void {
-  const checks: Array<[string, number]> = [
-    ['aliases_json', ALIAS_LIMIT],
-    ['capabilities_json', CAPABILITY_LIMIT],
-    ['mobility_profiles_json', MOBILITY_PROFILE_LIMIT],
-    ['properties_json', ITEM_PROPERTY_LIMIT],
-  ];
-  for (const [column, limit] of checks) {
-    const value = row[column];
-    if (Array.isArray(value) && value.length > limit) {
-      out.push(violation('INVARIANT_LIST_LIMIT', table, id, column, `${column} 超过上限 ${limit}`));
-    }
-  }
   const geometry = row.area_geometry_json;
   if (geometry && typeof geometry === 'object' && Array.isArray((geometry as { coordinates?: unknown[] }).coordinates)) {
     if (((geometry as { coordinates: unknown[] }).coordinates).length > GEOMETRY_VERTEX_LIMIT) {
