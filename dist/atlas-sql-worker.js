@@ -5432,18 +5432,22 @@ END`;
       const ratio = SIZE_RATIO[SIZE_SET.has(z.size) ? z.size : "medium"];
       baseRadius.set(z.id, z.physicalSize ? Math.max(z.physicalSize.w, z.physicalSize.h) / 2 : S * ratio);
     }
+    const footprintRadius = new Map(zonesIn.map((z) => [z.id, z.lockedPolygon?.length >= 3 ? Math.max(...z.lockedPolygon.map((p) => distance2(p, z.locked ?? centroid(z.lockedPolygon)))) : z.physicalSize ? Math.hypot(z.physicalSize.w, z.physicalSize.h) / 2 : Math.max(...zonePolygon(z, 0, 0, baseRadius.get(z.id), seed).map((p) => Math.hypot(p.x, p.y)))]));
     const structureKeyOf = (z) => stable({ role: z.role ?? null, size: z.size ?? null, ...z.physicalSize ? { physicalSize: z.physicalSize } : {}, sector: z.sector ?? null, near: z.near ?? null, locked: z.locked ?? null, lockedPolygon: z.lockedPolygon ?? null, placementPolicy: 3 });
     const occupied = [], sites = /* @__PURE__ */ new Map(), reasons = /* @__PURE__ */ new Map();
     for (const z of zonesIn) {
       const old = prevShapes.get(z.id), pin = prevPins.get(z.id);
       const locked2 = finite(z.locked?.x) && finite(z.locked.y) ? z.locked : null;
       const saved = old?.structureKey === structureKeyOf(z) && old.polygon?.length >= 3 && finite(pin?.x) && finite(pin.y) ? pin : null;
-      const fixed = locked2 ?? saved;
+      const fixed = locked2 ?? (z.lockedPolygon?.length >= 3 ? centroid(z.lockedPolygon) : saved);
       if (fixed) {
         const point = pt2(fixed.x, fixed.y);
         sites.set(z.id, point);
         reasons.set(z.id, locked2 ? "locked" : "saved");
-        occupied.push({ id: z.id, point, radius: baseRadius.get(z.id) });
+        const polygon2 = z.lockedPolygon ?? (saved ? old.polygon : null);
+        const radius = polygon2?.length >= 3 ? Math.max(...polygon2.map((p) => distance2(p, point))) : footprintRadius.get(z.id);
+        footprintRadius.set(z.id, radius);
+        occupied.push({ id: z.id, point, radius });
       }
     }
     const obstacles = [];
@@ -5451,11 +5455,20 @@ END`;
     const minGap = S / 12;
     const pending = zonesIn.filter((z) => !sites.has(z.id));
     while (pending.length) {
-      const ready = pending.findIndex((z2) => !z2.near || sites.has(z2.near) || !baseRadius.has(z2.near));
-      const z = pending.splice(ready < 0 ? 0 : ready, 1)[0];
-      const r = baseRadius.get(z.id);
+      let ready = pending.findIndex((z2) => !z2.near || !pending.some((other) => other.id === z2.near));
+      if (ready < 0) {
+        let anchor = pending[0];
+        const visited = /* @__PURE__ */ new Set();
+        while (!visited.has(anchor.id)) {
+          visited.add(anchor.id);
+          anchor = pending.find((z2) => z2.id === anchor.near);
+        }
+        ready = pending.indexOf(anchor);
+      }
+      const z = pending.splice(ready, 1)[0];
+      const r = footprintRadius.get(z.id);
       const near = z.near ? sites.get(z.near) : null;
-      const nearRadius = near ? baseRadius.get(z.near) ?? r : 0;
+      const nearRadius = near ? footprintRadius.get(z.near) ?? r : 0;
       const spacing = near ? Math.max(r, nearRadius) : z.physicalSize ? r : minGap;
       const angle = SECTOR_ANGLE[z.sector];
       const offset = near ? r + nearRadius + spacing * 0.15 : 0;
