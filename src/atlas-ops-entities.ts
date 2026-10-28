@@ -16,9 +16,10 @@ import { createRow } from './atlas-db-defaults.ts';
 import { updateMentionCandidates } from './atlas-db-mentions.ts';
 import type { RefScope } from './atlas-ops-refs.ts';
 import { resolveRef } from './atlas-ops-refs.ts';
-import { ALIAS_LIMIT, CAPABILITY_LIMIT, MOBILITY_PROFILE_LIMIT, ITEM_PROPERTY_LIMIT } from './atlas-runtime-limits.ts';
 // 唯一来源：atlas-location-kinds.ts（含 floor）。本文件不再复制地点类型枚举。
 import { ATLAS_LOCATION_KINDS } from './atlas-location-kinds.ts';
+import { readSpaceCanonical } from './atlas-space-canonical.ts';
+import { resolveFurnishingRef } from './atlas-furnishing-promotion.ts';
 import { readMetricDimensions } from '../vendor/atlas-spatial/index.mjs';
 
 type Data = Record<string, unknown>;
@@ -135,12 +136,6 @@ function ensureAliases(value: unknown, op: ParsedOperation, path: string): { val
   if (value === null) return { value: [], issues: [] };
   if (!Array.isArray(value)) return { value: null, issues: [issue('FIELD_TYPE_INVALID', path, 'aliases 必须是字符串数组', op)] };
   const list = value.filter((v): v is string => typeof v === 'string' && v.trim().length > 0).map((v) => v.trim());
-  if (list.length > ALIAS_LIMIT) {
-    return {
-      value: list.slice(0, ALIAS_LIMIT),
-      issues: [issue('FIELD_LIMIT_EXCEEDED', path, `aliases 最多 ${ALIAS_LIMIT} 个，收到 ${list.length} 个`, op)],
-    };
-  }
   return { value: list, issues: [] };
 }
 
@@ -529,13 +524,11 @@ export function compileCharacterUpsert(op: ParsedOperation, ctx: CompileContext)
   if (Object.prototype.hasOwnProperty.call(data, 'mobility_profiles')) {
     const list = Array.isArray(data.mobility_profiles) ? data.mobility_profiles : null;
     if (!list) result.issues.push(issue('FIELD_TYPE_INVALID', '$.data.mobility_profiles', 'mobility_profiles 必须是数组', op));
-    else if (list.length > MOBILITY_PROFILE_LIMIT) result.issues.push(issue('FIELD_LIMIT_EXCEEDED', '$.data.mobility_profiles', `最多 ${MOBILITY_PROFILE_LIMIT} 种移动方式`, op));
     else changes.mobility_profiles_json = list;
   }
   if (Object.prototype.hasOwnProperty.call(data, 'capabilities')) {
     const list = Array.isArray(data.capabilities) ? data.capabilities : null;
     if (!list) result.issues.push(issue('FIELD_TYPE_INVALID', '$.data.capabilities', 'capabilities 必须是数组', op));
-    else if (list.length > CAPABILITY_LIMIT) result.issues.push(issue('FIELD_LIMIT_EXCEEDED', '$.data.capabilities', `最多 ${CAPABILITY_LIMIT} 项能力`, op));
     else changes.capabilities_json = list;
   }
 
@@ -584,7 +577,14 @@ export function compileCharacterUpsert(op: ParsedOperation, ctx: CompileContext)
 
 const ITEM_FIELDS = new Set([
   'name', 'aliases', 'kind', 'description', 'quantity', 'unit', 'condition_note', 'properties', 'status', 'placement',
+  /** §18.2：从冻结陈设目录里的某一条提升成真实物品（只作来源，不是通用字段）。 */
+  'fromFurnishingRef',
 ]);
+/**
+ * §18.2：普通家具的名字线索。只用来挡住「普通生成批量插 items」，
+ * 不是分类器：带剧情来源或 fromFurnishingRef 的新建一律放行。
+ */
+const FURNITURE_NAME_PATTERN = /桌|椅|凳|床|柜|书架|橱|沙发|茶几|长凳|抽屉|地毯|desk|chair|table|cabinet|shelf|stool|sofa|bed|drawer|rug/i;
 const ITEM_KINDS = ['object', 'resource', 'document', 'equipment', 'container', 'other'];
 const ITEM_STATUS = ['active', 'consumed', 'destroyed', 'lost', 'merged', 'archived'];
 
@@ -655,7 +655,6 @@ export function compileItemUpsert(op: ParsedOperation, ctx: CompileContext): Com
   if (Object.prototype.hasOwnProperty.call(data, 'properties')) {
     const list = Array.isArray(data.properties) ? data.properties : null;
     if (!list) result.issues.push(issue('FIELD_TYPE_INVALID', '$.data.properties', 'properties 必须是数组', op));
-    else if (list.length > ITEM_PROPERTY_LIMIT) result.issues.push(issue('FIELD_LIMIT_EXCEEDED', '$.data.properties', `properties 最多 ${ITEM_PROPERTY_LIMIT} 项`, op));
     else changes.properties_json = list;
   }
 
@@ -680,6 +679,103 @@ export function compileItemUpsert(op: ParsedOperation, ctx: CompileContext): Com
       }
     } else {
       result.issues.push(issue('FIELD_TYPE_INVALID', '$.data.placement', 'placement 必须是 {holder_ref|container_ref|location_ref}', op));
+    }
+  }
+
+  /**
+   * §18.2：家具不预先批量变物品。
+   *
+   * 普通桌椅床柜属于陈设账本（canonical furnishing + 稳定 localId），
+   * 只有「剧情真的动过它」才变成 items 行。所以：
+   * - 明确带剧情来源（`story:*`）→ 允许（搬走/拿走是真的发生了）；
+   * - 明确带 `fromFurnishingRef` → 允许（这是从陈设提升的显式路径）；
+   * - 其余凭名字像家具的新建 → 拒绝，并说明该走陈设账本。
+   */
+  const opSourceKeys = Array.isArray(op.value.source) ? op.value.source.map(String) : op.value.source ? [String(op.value.source)] : [];
+  /**
+   * 「有剧情来源」的判定要认两种写法：
+   * - 计划示例里的 `story:<段号>`；
+   * - 真实提交链路里的来源快照键（`spans`/`kind`），这里按 `kind==='story'` 认。
+   * 只认字符串前缀会把生产链路里的 `S1` 全部误判成「没有剧情来源」。
+   */
+  const sourceKinds = new Map(
+    (ctx.sources?.snapshot ?? []).filter((entry) => entry && typeof entry.key === 'string').map((entry) => [String(entry.key), String(entry.kind ?? '').toLowerCase()]),
+  );
+  const hasStorySource = opSourceKeys.some((key) => key.startsWith('story:') || sourceKinds.get(key) === 'story');
+  const furnishingRef = asString(data.fromFurnishingRef);
+  if (creating && !hasStorySource && furnishingRef === null && FURNITURE_NAME_PATTERN.test(name ?? '')) {
+    result.issues.push(issue(
+      'FURNITURE_AS_ITEM_REFUSED',
+      '$.data.name',
+      `「${name}」看起来是普通家具：普通生成不批量插 items，用陈设账本（canonical furnishing）表示；剧情真的搬动/拿走时再带 story 来源或 fromFurnishingRef 提升`,
+      op,
+    ));
+    return result;
+  }
+
+  /**
+   * §18.2 / §18.3.2：`fromFurnishingRef` 的解析与绑定。
+   *
+   * 目录取**当前地点的空间权威**（冻结帧），因此：
+   * - 引用不在目录里 → 报错，不凭名字造一张桌子；
+   * - 已经绑定过 itemId → 报错并指出该复用哪一行（重试/重复事件不会建出第二张）；
+   * - 未绑定 → 物品带上来源与尺寸，并把 itemId 绑回陈设（同一条 op，同一个原子组）。
+   */
+  if (furnishingRef !== null && furnishingRef !== '') {
+    const placement = isPlainObject(data.placement) ? data.placement : {};
+    const locationRef = typeof placement.location_ref === 'string' ? placement.location_ref : '';
+    const resolvedLocation = locationRef ? resolveRef(locationRef, 'location', ctx.scope, { opId: op.opId, field: 'placement.location_ref' }) : null;
+    const locationId = resolvedLocation?.entry?.id ?? null;
+    const locationRow = locationId ? ctx.tables.selectOne('locations', ctx.branchId, locationId) : null;
+    const mapId = locationRow?.map_id ? String(locationRow.map_id) : '';
+    const mapRow = mapId ? ctx.tables.selectOne('maps', ctx.branchId, mapId) : null;
+    if (!locationId || !mapRow) {
+      result.issues.push(issue(
+        'FURNISHING_REF_LOCATION_REQUIRED',
+        '$.data.placement.location_ref',
+        'fromFurnishingRef 需要 placement.location_ref 指定是哪个空间的陈设目录（同名家具太多，不能靠猜）',
+        op,
+      ));
+    } else {
+      const read = readSpaceCanonical(mapRow.frame_json, locationId);
+      const resolvedFurnishing = resolveFurnishingRef(read.canonical, furnishingRef);
+      result.issues.push(...resolvedFurnishing.issues.map((entry) => ({ ...entry, opId: op.opId, line: op.line })));
+      const entry = resolvedFurnishing.furnishing;
+      if (entry && resolvedFurnishing.localId) {
+        const boundItemId = entry.itemId ?? '';
+        if (boundItemId !== '' && boundItemId !== rowId) {
+          result.issues.push(issue(
+            'FURNISHING_ALREADY_PROMOTED',
+            '$.data.fromFurnishingRef',
+            `${resolvedFurnishing.localId} 已经提升为物品 ${boundItemId}：改用 item.transfer/引用该物品，不要建第二张`,
+            op,
+          ));
+        } else {
+          const properties = Array.isArray(changes.properties_json)
+            ? [...(changes.properties_json as unknown[])]
+            : Array.isArray(data.properties) ? [...(data.properties as unknown[])] : [];
+          properties.push({ key: 'fromFurnishing', value: resolvedFurnishing.localId });
+          properties.push({ key: 'sizeM', value: { widthM: entry.widthM, heightM: entry.heightM } });
+          changes.properties_json = properties;
+          if (!changes.location_id) changes.location_id = locationId;
+          const bound = {
+            ...(read.canonical as NonNullable<typeof read.canonical>),
+            revision: (read.canonical?.revision ?? 0) + 1,
+            furnishing: (read.canonical?.furnishing ?? []).map((row) => (row.localId === resolvedFurnishing.localId ? { ...row, itemId: rowId } : row)),
+          };
+          let baseFrame: Record<string, unknown> = {};
+          try {
+            const parsedFrame: unknown = JSON.parse(String(mapRow.frame_json));
+            if (isPlainObject(parsedFrame)) baseFrame = parsedFrame;
+          } catch {
+            baseFrame = {};
+          }
+          const nextFrame = { ...baseFrame, atlasSpaceCanonical: bound };
+          result.mutations.push(
+            mutation('maps', mapId, mapRow, { ...mapRow, frame_json: JSON.stringify(nextFrame), row_rev: Number(mapRow.row_rev ?? 1) + 1 }, op, basisFor(ctx, op)),
+          );
+        }
+      }
     }
   }
 
@@ -911,7 +1007,6 @@ export function compileFactionUpsert(op: ParsedOperation, ctx: CompileContext): 
   if (Object.prototype.hasOwnProperty.call(data, 'capabilities')) {
     const list = Array.isArray(data.capabilities) ? data.capabilities : null;
     if (!list) result.issues.push(issue('FIELD_TYPE_INVALID', '$.data.capabilities', 'capabilities 必须是数组', op));
-    else if (list.length > CAPABILITY_LIMIT) result.issues.push(issue('FIELD_LIMIT_EXCEEDED', '$.data.capabilities', `最多 ${CAPABILITY_LIMIT} 项能力`, op));
     else changes.capabilities_json = list;
   }
   ensureLocationRef(data, 'headquarters_ref', op, result.issues, changes, 'headquarters_location_id', ['location'], ctx.scope);

@@ -25,6 +25,7 @@ import { compileSqlSceneMaps } from '../src/atlas-sql-scene-maps.ts';
 import { buildSqlLayoutTask, deriveLayoutSites } from '../src/atlas-sql-layout-task.ts';
 import { queryMapView } from '../src/atlas-db-views.ts';
 import { completeLayoutClosure } from '../src/atlas-layout-closure.ts';
+import { applyPendingSpatialRequests } from '../src/atlas-spatial-candidate.ts';
 import { queryBound } from '../src/atlas-db-runtime.ts';
 import {
   SPATIAL_PROFILE_FRAME_KEY,
@@ -162,8 +163,71 @@ const scopeOf = (task) => {
   }
   return scopes;
 };
+test('房间内已有陈设账本的 other 子空间沿用室内布局，作者室外选择仍优先',async()=>{
+ const seed=await siteSeed();try{
+  const area='L_LOCAL_AREA',mapId='M_LOCAL_AREA';
+  insertRows(seed.db,'entity_keys',[{branch_id:BRANCH,id:area,kind:'location'}]);
+  insertRows(seed.db,'locations',[loc(area,{parent_location_id:ROOM,map_id:MAP_BLD})]);
+  const canonical={version:1,locationId:area,revision:1,size:{widthM:8,heightM:8,quality:'estimated',locked:false,basis:{kind:'first-estimate',referenceId:null,note:'synthetic'}},furnishing:[{localId:`space:${area}:furn:bed`,type:'bed',name:'匿名床',itemId:null,widthM:2,heightM:1.6,quality:'layout'}]};
+  insertRows(seed.db,'maps',[mapRow(mapId,{container_location_id:area,meters_per_cell:1,scale_quality:'estimated',frame_json:{cols:8,rows:8,atlasSpaceCanonical:canonical}})]);
+  const port=createTableReadPort(seed.db),derived=deriveLayoutSites(port,BRANCH),entry=entryOf(derived,mapId);
+  assert.equal(entry.kind,'floor');assert.equal(entry.standalone,true);assert.equal(entry.profile.profile.basis,'source-supported');
+  const task=buildSqlLayoutTask(seed.db,BRANCH,{anchor:{chatUid:IDS.chatA,branchId:BRANCH,baseRevision:0,baseStorageRevision:0},userText:'',assistantText:'',sourceSnapshot:[],layoutMaps:[mapId]},TURN);
+  const scoped=scopeOf(task).find(s=>s.map===task.catalogue.knownRefs.find(r=>r.id===mapId).alias);
+  assert.equal(scoped.kind,'floor');
+  assert.ok(scoped.spaceSize.furnishingInventory.some(f=>f.id===`space:${area}:furn:bed`));
+  const request={requestId:'local-area-repair',operationId:'local-area-repair-op',kind:'floor',status:'pending',createdTurnId:TURN,spec:{rooms:[{id:area,w:8,h:8,side:'north'}],contents:[{id:'bed',roomId:area,type:'bed',w:2,h:1.6}]}};
+  seed.db.run('UPDATE maps SET frame_json=? WHERE branch_id=? AND id=?',[JSON.stringify({...frameOf(seed,mapId),atlasLayoutRequest:request}),BRANCH,mapId]);
+  const applied=applyPendingSpatialRequests({db:seed.db,scope:SCOPE,turnId:TURN,autoPlan:true,ports:{applyGroups,isCurrent:()=>true,branchId:BRANCH,turnId:TURN}});
+  assert.ok(applied.processed.includes('local-area-repair'),JSON.stringify(applied.issues));
+  const saved=frameOf(seed,mapId);assert.equal(saved.atlasScene.layout.kind,'floor');
+  assert.ok(saved.atlasScene.layout.groups.some(f=>f.id==='bed'&&f.type==='bed'),JSON.stringify(saved.atlasScene.layout.groups));
+  assert.equal(saved.atlasSpaceCanonical.furnishing[0].localId,`space:${area}:furn:bed`);
+  writeProfile(seed,mapId,'outdoor','explicit-outdoor');
+  assert.equal(entryOf(deriveLayoutSites(createTableReadPort(seed.db),BRANCH),mapId).kind,'overview');
+  assert.equal(queryBound(seed.db,'SELECT kind FROM locations WHERE branch_id=? AND id=?',[BRANCH,area])[0].kind,'other');
+ }finally{seed.close();}
+});
+test('未标定概览的格幅面不被登记成同等数值的米制物理尺寸',async()=>{
+ const seed=await siteSeed();
+ try{
+  writeProfile(seed,MAP_SITE,'compound');
+  const site=entryOf(deriveLayoutSites(createTableReadPort(seed.db),BRANCH),MAP_SITE);
+  assert.equal(site.extent.units,'cells');assert.equal(site.spaceSize,null);
+  assert.equal(frameOf(seed,MAP_SITE).atlasSpaceCanonical,undefined);
+ }finally{seed.close();}
+});
 
-test('嵌套楼层收到父图尺寸时不提前保存成单间，后续真实房间请求可继续完成',async()=>{
+test('真实 SQL 厨房含储物间时，任务、占用者对账、空间账本和地面物品都保留厨房自身',async()=>{
+ const seed=await siteSeed();
+ try{
+  const store='L_PANTRY',mapId='M_KITCHEN';
+  insertRows(seed.db,'entity_keys',[{branch_id:BRANCH,id:store,kind:'location'}]);
+  insertRows(seed.db,'locations',[loc(store,{name:'储物间',kind:'room',parent_location_id:ROOM})]);
+  const request={requestId:'kitchen-request',operationId:'kitchen-op',kind:'floor',status:'pending',createdTurnId:TURN,
+   spec:{rooms:[{id:store,name:'储物间',w:8,h:8,side:'north'}],contents:[{id:'counter',roomId:ROOM,name:'操作台',type:'cabinet',w:3,h:1}]}};
+  insertRows(seed.db,'maps',[mapRow(mapId,{name:'厨房',container_location_id:ROOM,frame_json:{cols:12,rows:19,atlasLayoutRequest:request},meters_per_cell:1})]);
+  seed.db.run('UPDATE locations SET map_id=? WHERE id=?',[mapId,store]);
+  seed.db.run('UPDATE characters SET location_id=?,map_id=?,grid_x=NULL,grid_y=NULL,coord_precision=? WHERE branch_id=? AND id=?',[ROOM,mapId,'unknown',BRANCH,IDS.C1]);
+  seed.db.run('UPDATE items SET holder_character_id=NULL,location_id=?,map_id=?,grid_x=NULL,grid_y=NULL,coord_precision=? WHERE branch_id=? AND id=?',[ROOM,mapId,'unknown',BRANCH,IDS.I1]);
+  const task=buildSqlLayoutTask(seed.db,BRANCH,{anchor:{chatUid:IDS.chatA,branchId:BRANCH,baseRevision:0,baseStorageRevision:0},userText:'',assistantText:'',sourceSnapshot:[],layoutMaps:[mapId]},'host-space');
+  const scope=scopeOf(task).find(s=>s.container.ref===task.catalogue.knownRefs.find(r=>r.id===ROOM).alias);
+  assert.ok(scope.actors.some(a=>a.ref===task.catalogue.knownRefs.find(r=>r.id===IDS.C1).alias),'主空间人物必须进入实际请求');
+  const before=queryBound(seed.db,'SELECT id,location_id FROM characters WHERE id=?',[IDS.C1]);
+  const result=applyPendingSpatialRequests({db:seed.db,scope:SCOPE,turnId:TURN,autoPlan:true,ports:{applyGroups,isCurrent:()=>true,branchId:BRANCH,turnId:TURN}});
+  assert.deepEqual(result.processed,['kitchen-request'],JSON.stringify(result.issues));
+  const scene=frameOf(seed,mapId).atlasScene;
+  assert.equal(scene.layout.hostArea.id,ROOM);assert.equal(scene.layout.groups.filter(g=>g.roomId===ROOM).length,1);
+  assert.ok(scene.layout.actors.some(a=>a.id===IDS.C1&&a.roomId===ROOM));
+  assert.ok(scene.layout.items.some(i=>i.id===IDS.I1&&i.roomId===ROOM),'地面物品不能因主空间未建 region 而漏掉');
+  const child=scene.layout.rooms[0],point=scene.layout.items.find(i=>i.id===IDS.I1);
+  assert.ok(!(point.x>=child.x&&point.x<=child.x+child.w&&point.y>=child.y&&point.y<=child.y+child.h));
+  assert.deepEqual(queryBound(seed.db,'SELECT id,location_id FROM characters WHERE id=?',[IDS.C1]),before);
+  assert.equal(frameOf(seed,mapId).atlasSpaceCanonical.furnishing[0].localId,`space:${ROOM}:furn:counter`);
+ }finally{seed.close();}
+});
+
+test('建筑总览不把楼层平铺为房间，后续楼层内的真实房间请求可继续完成',async()=>{
   const seed=await siteSeed();
   try {
     const floor='L_INNER',kitchen='L_KITCHEN',floorMap='M_INNER',hallMap='M_INNER_HALL',kitchenMap='M_INNER_KITCHEN';
@@ -174,16 +238,16 @@ test('嵌套楼层收到父图尺寸时不提前保存成单间，后续真实�
     seed.db.run('UPDATE locations SET map_id=?,area_geometry_json=? WHERE id=?',[floorMap,JSON.stringify({kind:'dimensions',widthM:4,heightM:3,quality:'confirmed',source:'story'}),kitchen]);
     seed.db.run('UPDATE maps SET frame_json=?,meters_per_cell=1 WHERE id=?',[JSON.stringify({cols:25,rows:51}),MAP_BLD]);
     const rows=()=>Object.fromEntries(['maps','locations','characters','items','routes'].map(table=>[table,queryBound(seed.db,'SELECT * FROM '+table)]));
-    const commit=(mapId,spec)=>{
+    const commit=(mapId,spec,kind='floor')=>{
       const data=rows(),map=data.maps.find(m=>m.id===mapId);
-      const compiled=Kit.compileSceneGroup({request:{kind:'floor',spec},scope:SCOPE,currentScope:SCOPE,mapRow:map,...data,turnId:TURN,operationId:'nested:'+mapId,autoPlan:true});
+      const compiled=Kit.compileSceneGroup({request:{kind,spec},scope:SCOPE,currentScope:SCOPE,mapRow:map,...data,turnId:TURN,operationId:'nested:'+mapId,autoPlan:true});
       assert.equal(compiled.ok,true,JSON.stringify(compiled.issues));
       const closed=completeLayoutClosure({group:compiled.group,...data,scope:SCOPE,turnId:TURN,operationId:'nested:'+mapId});
       assert.equal(closed.ok,true,JSON.stringify(closed.issues));
       assert.equal(applyGroups(seed.db,[closed.group],applyCtx('nested:'+mapId)).groups[0].status,'applied');
       return closed;
     };
-    const first=commit(MAP_BLD,{rooms:[{id:floor,w:24,h:24,side:'north'}],contents:[],actors:[],items:[]});
+    const first=commit(MAP_BLD,{surface:'mixed',zones:[],links:[],features:[]},'overview');
     assert.ok(!first.completedMapIds.includes(floorMap),'父图不能提前宣称多房间楼层完成');
     assert.equal(frameOf(seed,floorMap).atlasScene,undefined);
     commit(floorMap,{rooms:[{id:ROOM,w:12,h:8,side:'south'},{id:kitchen,w:4,h:3,side:'north'}],contents:[{id:'hall_table',roomId:ROOM,type:'table',w:2,h:1}],actors:[],items:[]});

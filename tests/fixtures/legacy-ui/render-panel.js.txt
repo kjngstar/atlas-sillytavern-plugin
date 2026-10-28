@@ -5719,9 +5719,6 @@ function renderHistoricalPanel(core, root, api, store, mod, skinPort = null) {
       packInput.value = "";
       if (!file) return;
       if (promptDraftDirty && !confirmDiscard("提示词")) return;
-      if (file.size > ATLAS_PROMPT_PACK_BYTES_MAX) {
-        setStatus("提示词文件超过 512 KiB 上限。", "error"); renderCenter(); return;
-      }
       const draftAtRead = JSON.stringify(promptDraft);
       const reader = new FileReader();
       reader.onload = () => {

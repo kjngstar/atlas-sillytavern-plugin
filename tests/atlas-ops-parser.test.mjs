@@ -20,6 +20,18 @@ function parsedLines(result) {
   return result.operations.map((o) => o.value);
 }
 
+test('T-C10 malformed source rejects its operation while preserving an independent valid line', () => {
+  for (const source of [['W1', { key: 'fake' }, 123], 42, null]) {
+    const bad = { op: 'character.upsert', ref: 'C1', source, data: { thought: 'rejected' } };
+    const good = { op: 'character.upsert', ref: 'C2', source: [], data: { thought: 'accepted' } };
+    const parsed = parseOperations([JSON.stringify(bad), JSON.stringify(good)].join('\n'), { phase: 'observe' });
+    assert.deepEqual(parsedLines(parsed), [good]);
+    assert.ok(parsed.issues.some(issue => issue.code === 'SOURCE_UNKNOWN' && issue.severity === 'error' && issue.line === 1));
+    assert.equal(normalizeOperation(bad, 'observe').op, null);
+    assert.equal(parsed.incomplete, true);
+  }
+});
+
 test('T04-01 P01 原文 → 1 条操作，opId 稳定、line=1、full sha256、无 issue', () => {
   const response = caseById('P01').response;
   const first = parseOperations(response, { phase: 'observe' });
@@ -135,18 +147,17 @@ test('T04-09 代码围栏：extractPayload 与直接 parseOperations 都得到 1
   ]);
 });
 
-test('T04-10 65 条合法操作 → 保留 64 条 + TOO_MANY_OPERATIONS 报出两个数量', () => {
+test('T04-10 65 条合法操作完整保留，不额外截断', () => {
   const lines = Array.from(
     { length: 65 },
     (_v, i) => `{"op":"character.upsert","ref":"C${i + 1}","data":{"thought":"观察${i + 1}。"}}`,
   );
   const result = parseOperations(lines.join('\n'), { phase: 'observe' });
-  assert.equal(result.operations.length, 64);
+  assert.equal(result.operations.length, 65);
   const issues = result.issues.filter((i) => i.code === 'TOO_MANY_OPERATIONS');
-  assert.equal(issues.length, 1);
-  assert.match(issues[0].message, /contains 65 valid operations, over the 64 per-response limit/);
-  assert.match(issues[0].message, /remaining 1/);
-  assert.equal(result.incomplete, true);
+  assert.equal(issues.length, 0);
+  assert.equal(result.operations.at(-1).value.ref, 'C65');
+  assert.equal(result.incomplete, false);
 });
 
 test('T04-11 损坏的整个数组 → 0 条操作 + JSON_SYNTAX，且不抽取内部 data', () => {

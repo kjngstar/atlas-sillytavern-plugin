@@ -8,6 +8,7 @@
  * `ref-<16 位小写十六进制>`）与一组只接受该形态的 `*Ref` 详情键。指纹单向、与进程无关，
  * 同一输入永远同一指纹，跨会话比对同一聊天/分支/回合时不会泄漏原文。
  */
+import { MODEL_CALL_REASONS } from './atlas-work-batching.ts';
 import { ATLAS_RUNTIME_LIMITS } from "./atlas-runtime-limits.ts";
 export type AtlasDiagnosticLevel = "debug" | "info" | "warn" | "error";
 export type AtlasDiagnosticSource = "host" | "ui" | "engine" | "model" | "storage" | "lorebook" | "map";
@@ -74,8 +75,13 @@ const DETAIL_KEYS = new Set([
   "droppedCount", "limitCount", "keptCount", "truncatedCount", "scannedCount",
   "candidateCount", "selectedCount", "outputChars", "chatMatch",
   "generationSequence", "generationType", "dryRun", "automaticTrigger", "quietPromptPresent", "completionSignal", "gated",
+  "workClass", "callReason", "retryOfBatchRef",
   "requestRef", "batchRef", "pathRef", "modelRef", "model", "apiFormat", "method",
   "timeoutMs", "maxTokens", "promptChars", "requestChars", "messageCount", "headersMs", "bodyMs",
+  // P14 §20.3：响应长度的三个口径 + 「耗时覆盖了兼容重发」标记。
+  // rawResponseChars 与 reasoningTextChars 必须能进诊断，否则审计记录永远分不清
+  // 「可见正文」和「传输包装」，也永远没法诚实地说推理长度是未知。
+  "rawResponseChars", "reasoningTextChars", "durationIncludesCompatibilityRetry",
   "transportAttempt", "modelRequests", "retryKind", "failureStage", "cancelledBy", "errorName",
   "issueCount", "issueIndex", "baseRevision", "revision", "storageRevision", "changedRows", "groupCount",
   "rejectedGroups", "targetCount", "budgetUsed", "coreSaved", "sceneSaved", "saveConfirmed", "receiptStatus",
@@ -119,6 +125,13 @@ const REQUEST_NUMBER_KEYS = new Set([
   'transportAttempt', 'modelRequests', 'issueCount', 'issueIndex', 'baseRevision', 'revision',
   'storageRevision', 'changedRows', 'groupCount', 'rejectedGroups', 'targetCount', 'budgetUsed',
 ]);
+/**
+ * P14 §20.3：响应长度字段。允许显式 `null`（＝已探测但该字段不存在），
+ * 其余只接受 0..64Mi 的整数——负数与小数都是伪造的测量值。
+ */
+const RESPONSE_LENGTH_KEYS = new Set(['rawResponseChars', 'visibleTextChars', 'reasoningTextChars']);
+const CALL_HISTORY_CODES = new Set(['MODEL_REQUEST_STARTED','MODEL_REQUEST_COMPLETED','MODEL_REQUEST_FAILED','MODEL_REQUEST_DEFERRED',
+  'TURN_STARTED','COMMIT_SUCCEEDED','COMMIT_PARTIAL','COMMIT_FAILED','TURN_DUPLICATE']);
 let nextId = 0;
 
 // ---------------------------------------------------------------------------
@@ -442,6 +455,8 @@ export function sanitizeDiagnostic(raw: unknown, now: () => number = Date.now): 
         else if (key === "completionSignal" && ["received", "ended", "after-commands"].includes(token)) details[key] = token;
         else if (key === "method" && ["GET", "POST", "PUT", "DELETE", "PATCH"].includes(token)) details[key] = token;
         else if (key === "apiFormat" && ["openai", "openai_responses", "claude", "gemini"].includes(token)) details[key] = token;
+        else if (key === 'workClass' && ['observe','construction','evidence','maps','characters','outcomes'].includes(token)) details[key] = token;
+        else if (key === 'callReason' && (MODEL_CALL_REASONS as readonly string[]).includes(token)) details[key] = token;
         else if (key === "retryKind" && ["normal", "retry", "repair", "compatibility"].includes(token)) details[key] = token;
         else if (key === "failureStage" && ["preparation", "budget", "request", "headers", "body", "parse", "validation", "commit", "save"].includes(token)) details[key] = token;
         else if (key === "cancelledBy" && ["timeout", "transport", "host", "unknown"].includes(token)) details[key] = token;
@@ -488,6 +503,12 @@ export function sanitizeDiagnostic(raw: unknown, now: () => number = Date.now): 
         if (typeof detail === "number" && Number.isInteger(detail) && detail >= 0 && detail <= 100_000) {
           details[key] = detail;
         }
+      } else if (RESPONSE_LENGTH_KEYS.has(key)) {
+        // P14 §20.3：可见/推理长度可以是 null（＝已探测、无该字段），但绝不能是负数或小数。
+        if (detail === null) details[key] = null;
+        else if (typeof detail === 'number' && Number.isSafeInteger(detail) && detail >= 0 && detail <= 67_108_864) {
+          details[key] = detail;
+        }
       } else if (REQUEST_NUMBER_KEYS.has(key)) {
         if (typeof detail === 'number' && Number.isSafeInteger(detail) && detail >= 0) details[key] = detail;
       } else if (SAFE_COUNT_KEYS.has(key)) {
@@ -525,6 +546,10 @@ export function createAtlasDiagnosticsSink(options: {
   const capacity = Math.max(100, Math.min(2000, Math.trunc(options.capacity ?? 500)));
   const storageKey = options.storageKey ?? "atlas:safe-diagnostics:v1";
   const archiveKey = options.archiveKey ?? "atlas:safe-diagnostics-archive:v1";
+  const callHistoryKey = storageKey + ':model-calls:v1';
+  const callHistory: AtlasDiagnostic[] = [];
+  let callHistoryDropped = 0;
+  let callHistoryDirty = false;
   const archiveTtlMs = Math.max(60_000, Math.min(30 * 86_400_000, options.archiveTtlMs ?? 7 * 86_400_000));
   let archiveEnabled = options.archiveEnabled === true;
   let archiveUnavailable = false;
@@ -567,6 +592,10 @@ export function createAtlasDiagnosticsSink(options: {
     try {
       const saved = entries.filter((entry) => entry.level === "warn" || entry.level === "error").slice(-100);
       options.persist.setItem(storageKey, JSON.stringify(saved));
+      if (callHistoryDirty) {
+        options.persist.setItem(callHistoryKey, JSON.stringify({entries:callHistory,droppedCount:callHistoryDropped}));
+        callHistoryDirty = false;
+      }
     } catch {
       storageUnavailable = true;
       const unavailable = sanitizeDiagnostic({
@@ -594,6 +623,20 @@ export function createAtlasDiagnosticsSink(options: {
           const entry = sanitizeDiagnostic(raw, now);
           if (entry && (entry.level === "warn" || entry.level === "error")) entries.push(entry);
         }
+      }
+    }
+  } catch { storageUnavailable = true; }
+
+  try {
+    const raw = options.persist?.getItem(callHistoryKey);
+    if (raw) {
+      const saved = JSON.parse(raw);
+      if (saved && Array.isArray(saved.entries)) {
+        for (const item of saved.entries.slice(-ATLAS_RUNTIME_LIMITS.diagnosticCallHistoryLimit)) {
+          const entry = sanitizeDiagnostic(item, now);
+          if (entry && CALL_HISTORY_CODES.has(entry.code)) callHistory.push(entry);
+        }
+        callHistoryDropped = typeof saved.droppedCount==='number'&&Number.isSafeInteger(saved.droppedCount)&&saved.droppedCount>=0?saved.droppedCount:0;
       }
     }
   } catch { storageUnavailable = true; }
@@ -631,6 +674,11 @@ export function createAtlasDiagnosticsSink(options: {
       try {
         const entry = sanitizeDiagnostic({ ...options.metadata, ...raw }, now);
         if (!entry) return null;
+        if (CALL_HISTORY_CODES.has(entry.code)) {
+          callHistory.push(entry);
+          if(callHistory.length>ATLAS_RUNTIME_LIMITS.diagnosticCallHistoryLimit){callHistory.shift();callHistoryDropped++;}
+          callHistoryDirty = true;
+        }
         const last = entries[entries.length - 1];
         // Only polling noise may fold. Errors and actual model sends stay individually countable.
         if (last && ["API_CALL_COMPLETE", "ENGINE_HEALTH_OK", "STATE_REFRESH_COMPLETE"].includes(entry.code) &&
@@ -664,9 +712,17 @@ export function createAtlasDiagnosticsSink(options: {
     getSnapshot(): AtlasDiagnostic[] {
       return entries.map((entry) => ({ ...entry, ...(entry.details ? { details: { ...entry.details } } : {}) }));
     },
+    /** Export has its own session history; rendering still uses the small live ring. */
+    getExportSnapshot() {
+      const all=new Map([...callHistory,...entries].map(entry=>[entry.id,entry]));
+      return {events:[...all.values()].sort((a,b)=>Date.parse(a.at)-Date.parse(b.at)).map(entry=>({...entry,...(entry.details?{details:{...entry.details}}:{})})),
+        coverage:{retainedCallEvents:callHistory.length,droppedCallEvents:callHistoryDropped,sessionPersistenceAvailable:Boolean(options.persist)&&!storageUnavailable}};
+    },
     clear(): void {
       entries.length = 0;
+      callHistory.length = 0;callHistoryDropped=0;callHistoryDirty=false;
       try { options.persist?.removeItem(storageKey); } catch { storageUnavailable = true; }
+      try { options.persist?.removeItem(callHistoryKey); } catch { storageUnavailable = true; }
       try { options.archive?.removeItem(archiveKey); } catch { archiveUnavailable = true; }
       notify();
     },

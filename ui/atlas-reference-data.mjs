@@ -2,11 +2,13 @@
 import { visibleWorkbenchMaps } from './atlas-workbench-data.mjs';
 import { projectReferenceFlows } from './atlas-reference-flows.mjs';
 import { projectMapContext } from './atlas-map-context.mjs';
+import { projectSpaceNavigation } from './atlas-space-navigation.mjs';
 
-export const REFERENCE_LEVELS = [
-  ['world','L0','世界'],['region','L1','地区'],['city','L2','城市'],['district','L3','街区'],
-  ['building','L4','建筑'],['floor','L5','楼层'],['room','L6','房间'],['detail','L7','陈设'],
-].map(([key,code,name])=>({key,code,name}));
+/** Descriptive categories, independent of the actual parent/child map tree. */
+const MAP_CATEGORY_NAMES = {
+  world:'世界',region:'地区',city:'城市',district:'街区',building:'建筑',floor:'楼层',
+  room:'房间',detail:'陈设',other:'场所',vehicle:'载具',natural:'自然区域',
+};
 const COLORS = ['#43e0ff','#9b6bff','#ffc247','#39e0a0','#7fd4ff','#ff5f92'];
 
 /** M6-02：「未挂接」分组的稳定 ID。坏图不随便挂到某座城市下。 */
@@ -14,28 +16,14 @@ export const UNCLASSIFIED = '__unclassified__';
 /** 旧适配器用 'world' 表示「挂在世界根」；只在没有同名地图时才按哨兵解释。 */
 const ROOT_SENTINEL = 'world';
 
-/**
- * M6-02③：地点种类 → 导航层级。
- *
- * 只有「容器地点」能决定一张图在导航里是什么层级：车厢/载具画成楼层样式的内景（floor），
- * 但一栋建筑必须是 building —— 画法（有没有 floor 布局）不等于结构。
- * 没有容器或容器不可见（POV 下被裁掉）时回落到几何推断的结果，不猜。
- */
-const CONTAINER_NAV_KIND = {region:'region',city:'city',district:'district',building:'building',floor:'floor',room:'room',vehicle:'floor',natural:'region',
-  // P06/N01：other 是合法场所（庭院/官道/停靠区）。画法是 overview，但**不等于「世界」**；
-  // 结构层级用中性且合法的 region，绝不给尚未定义的 renderKind=place，也不默认成「建筑」。
-  other:'region'};
-/**
- * P06：中性场所标签。`kind` 必须仍取合法结构 key（导航处理器认这些），
- * 展示层用 categoryLabel 说人话，避免把「庭院」显示成「地区/建筑」。
- */
-const NEUTRAL_CATEGORY_LABELS = {other:'场所'};
+/** Real place types describe a map; renderKind separately chooses its drawing template. */
+const NEUTRAL_CATEGORY_LABELS = {other:'场所',vehicle:'载具',natural:'自然区域'};
 function navigationCategoryLabel(map) {
   return NEUTRAL_CATEGORY_LABELS[text(map?.containerLocationKind)] ?? null;
 }
 function navigationKind(map, geometricKind) {
   const containerKind = text(map?.containerLocationKind);
-  return (containerKind && CONTAINER_NAV_KIND[containerKind]) || geometricKind;
+  return containerKind || geometricKind;
 }
 const items = dto => Array.isArray(dto?.items) ? dto.items : [];
 const text = value => String(value ?? '');
@@ -57,8 +45,8 @@ const placementOf = value => {
 const LEGACY_FURN_CLASS = {bench:'table', chair:'table', stairs:'desk'};
 
 export function emptyReferenceData(meta = {}) {
-  return {meta:{worldName:'尚未建立世界',turn:0,revision:0,timeMinutes:0,viewMode:'pov',initialNodeId:'world',...meta},
-    LEVELS:REFERENCE_LEVELS,ROOT:{id:'world',name:meta.worldName||'尚未建立世界',kind:'world',code:'L0',children:[],geo:{},marks:[],host:true},
+  return {meta:{worldName:'尚未建立世界',turn:0,revision:0,timeMinutes:0,viewMode:'player',initialNodeId:'world',...meta},
+    ROOT:{id:'world',name:meta.worldName||'尚未建立世界',kind:'world',tag:'世界',children:[],geo:{},marks:[],host:true},
     LOCATIONS:[],CAST:[],ITEMS:[],MESSAGES:[],TASKS:[],EVENTS:[],RECEIPTS:[],LORE:[],DIAGNOSTICS:[],FLOWS:{},JOURNEYS:{},PROMPTS:[]};
 }
 
@@ -175,6 +163,7 @@ export function referenceGeometry(map, document, {viewMode='author',visibleLocat
   const rawPins = layout ? [
     ...pins, ...(layout.actors??[]).map(p=>({...p,isProtagonist:p.isProtagonist===true||protagonistIds.has(p.id),type:'person'})), ...(layout.items??[]).map(p=>({...p,type:'item'})),
     ...(layout.rooms??[]).map(r=>({...r,type:'location',silent:true,x:r.x+r.w/2,y:r.y+r.h/2})),
+    ...(layout.areas??[]).map(r=>({...r,type:'location',silent:true,x:r.x+r.w/2,y:r.y+r.h/2})),
     /**
      * P11/R03 §18.2 第 9 条：绑定的命名走廊与房间共用同一个地点 ID ——
      * 它是可点击的（点进去就是该地点已有的子图），但和房间一样 `silent`，不额外画一个 POI 图标。
@@ -197,16 +186,18 @@ export function referenceGeometry(map, document, {viewMode='author',visibleLocat
      */
     const sceneUnits=document?.units==='meters'?'meters':'cells';
     const metersPerCell=Number.isFinite(map.metersPerCell)&&map.metersPerCell>0?map.metersPerCell:null;
-    for(const p of (map.points??[]).filter(p=>p.mobility==='mobile')){
+    const represented=new Set(rawPins.map(p=>text(p.entityId??p.id)));
+    for(const p of (map.points??[]).filter(p=>p.mobility==='mobile'||p.kind==='character'||p.kind==='item')){
       // POV 下隐藏载具既不进画面，也不产生诊断（诊断同样可能泄露实体身份）。
-      if(p.hidden===true)continue;
+      if((viewMode==='pov'||p.mobility==='mobile')&&p.hidden===true||represented.has(text(p.entityId)))continue;
       const converted=toScenePoint(p,'cells',sceneUnits,metersPerCell);
       if(!converted){
         unitDiagnostics.push({code:'POINT_UNIT_UNCONVERTIBLE',entityId:text(p.entityId),mapId:p.mapId??null,
-          message:'载具坐标是格制，但当前场景是米制且没有有效的米/格尺度：保留目录身份，不把错误坐标塞进画面或范围。'});
+          message:'点位坐标是格制，但当前场景是米制且没有有效的米/格尺度：保留目录身份，不把错误坐标塞进画面或范围。'});
         continue;
       }
-      rawPins.push({...p,x:converted.x,y:converted.y,id:p.entityId,type:'location'});
+      rawPins.push({...p,x:converted.x,y:converted.y,id:p.entityId,type:p.kind==='character'?'person':p.kind==='item'?'item':'location'});
+      represented.add(text(p.entityId));
     }
   }
   const uniquePins=[...new Map(rawPins.filter(finite).map(p=>[`${p.type}:${p.entityId??p.id}`,p])).values()];
@@ -221,13 +212,15 @@ export function referenceGeometry(map, document, {viewMode='author',visibleLocat
     x,y,name:text(p.name),sub:quality,quality,proxy:proxy==='proxy',
     hero:p.isProtagonist===true,silent:p.silent===true,c:COLORS[i%COLORS.length],locationId:p.locationId??p.roomId??null};});
   const containerKind=map.containerLocationKind;
-  let kind=REFERENCE_LEVELS.some(l=>l.key===containerKind)?containerKind:REFERENCE_LEVELS.some(l=>l.key===map.kind)?map.kind:({site:'building',interior:'room'}[map.kind]??'world'),geo={};
+  const renderKinds=['world','region','city','district','building','floor','room','detail'];
+  let kind=renderKinds.includes(containerKind)?containerKind:renderKinds.includes(map.kind)?map.kind:({site:'building',interior:'room'}[map.kind]??'world'),geo={};
   if(layout?.kind==='city') {
     kind='city';
     const river=layout.river;
     geo={districts:(layout.districts??[]).filter(d=>d.polygon?.length>=3&&d.polygon.every(finite)).map((d,i)=>({id:d.id,name:d.name,c:COLORS[i%COLORS.length],pts:d.polygon.map(xy)})),
       river:river?Array.from({length:41},(_,i)=>{const y=(river.height??b.h)*i/40;return xy({x:river.cx+Math.sin((y/(river.height||b.h)*2-.35)*Math.PI)*river.amplitude,y});}):null,
       riverWidth:river?.width?river.width*scale:null,wallPoints:(layout.wall??[]).filter(finite).map(xy),
+      cityBuildings:(layout.buildings??[]).filter(p=>!p.decorative).map(r=>({...rect(r),id:r.id,name:r.name})),
       avenues:(layout.roads??[]).filter(r=>finite(r.from??r.a)&&finite(r.to??r.b)).map(r=>({from:xy(r.from??r.a),to:xy(r.to??r.b)})),pois:[]};
   } else if(layout?.kind==='overview') {
     // A SQL overview already contains validated geometry. Keep its paths and
@@ -296,6 +289,8 @@ export function referenceGeometry(map, document, {viewMode='author',visibleLocat
       })};
   } else if(layout?.kind==='floor') {
     kind='floor';const corridor=rect(layout.corridor);
+    const functionalAreas=layout.areas??[];
+    const hostArea=layout.hostArea??(functionalAreas.length?(layout.rooms??[]).find(r=>r.id===map.containerLocationId):null)??(map.containerLocationKind==='room'&&!(layout.rooms??[]).some(r=>r.id===map.containerLocationId)?{...b,id:map.containerLocationId,name:map.name}:null);
     /**
      * M6-03②：家具保留**真实 local id / type / roomId**。
      *
@@ -314,10 +309,11 @@ export function referenceGeometry(map, document, {viewMode='author',visibleLocat
       // 绘制/点击/导航共用同一个 ID。不可见的走廊在 POV 过滤时已被剥掉 entityId/name。
       entityId:layout.corridor?.entityId??null,name:text(layout.corridor?.name)||null,
       y:corridor.y+corridor.h/2},
-      rooms:(layout.rooms??[]).map((r,i)=>({...rect(r),id:r.id,name:r.name,kind:r.id===map.containerLocationId&&map.containerLocationKind==='vehicle'?'vehicle':'room',
+      hostArea:hostArea?{...rect(hostArea),id:hostArea.id,name:hostArea.name}:null,
+      rooms:[...functionalAreas.map(r=>({...rect(r),id:r.id,name:r.name,kind:'other',status:r.quality==='confirmed'?'功能分区':'功能分区 · 估计',tint:'57,224,160',live:false})),...(layout.rooms??[]).filter(r=>r.id!==hostArea?.id).map((r,i)=>({...rect(r),id:r.id,name:r.name,kind:r.id===map.containerLocationId&&map.containerLocationKind==='vehicle'?'vehicle':'room',
         role:r.role??'indoor',
         status:text(r.status)||null,
-        tint:r.role==='garden'?'57,224,160':r.role==='outdoor'?'255,194,71':['67,224,255','155,107,255','57,224,160','127,212,255'][i%4],live:activeRooms.has(r.id)})),
+        tint:r.role==='garden'?'57,224,160':r.role==='outdoor'?'255,194,71':['67,224,255','155,107,255','57,224,160','127,212,255'][i%4],live:activeRooms.has(r.id)}))],
       doors:(layout.doors??[]).map((d,i)=>{const [x,y]=xy(d);return {id:text(d.id)||`door:${text(d.roomId)||i}`,roomId:text(d.roomId)||null,x,y,w:d.width*scale,wall:d.wall??null,routeId:d.routeId??null};}),
       windows:(layout.windows??[]).map((w,i)=>{const [x,y]=xy(w);return {id:text(w.id)||`window:${i}`,roomId:text(w.roomId)||null,x,y,w:(Number.isFinite(w.width)?w.width:1.2)*scale};}),
       lamps:(layout.lamps??[]).map((l,i)=>{const [x,y]=xy(l);return {id:text(l.id)||`light:${i}`,roomId:text(l.roomId)||null,x,y,
@@ -356,7 +352,7 @@ export function referenceEntity(detail, catalog = {}) {
   return {id:text(row.id),name:text(row.name),description:text(row.description??catalog.summary),childMapIds:(detail.childMaps??[]).map(x=>x.mapId),children:detail.children??[]};
 }
 
-export function projectReferenceData({state={},mapView,sceneView,catalogView,taskView,flowView,changesView,worldFeedView,logsView,details=[],diagnostics=[],viewMode='pov',scopeKey='',projectOverview,protagonistId=null}) {
+export function projectReferenceData({state={},mapView,sceneView,catalogView,taskView,flowView,changesView,worldFeedView,logsView,details=[],diagnostics=[],viewMode='player',scopeKey='',projectOverview,protagonistId=null}) {
   const d=state.stateData??{};
   const out=emptyReferenceData({worldName:text(d.worldName??d.world?.name??state.binding?.worldId??'尚未建立世界'),revision:mapView?.revision??d.revision??0,
     timeMinutes:Number(d.currentTime??d.clockS??0)/60,viewMode,scopeKey,canUndo:state.receipts?.some(r=>r.receipt?.status==='committed'||r.ok===true)??false});
@@ -365,14 +361,11 @@ export function projectReferenceData({state={},mapView,sceneView,catalogView,tas
     const saved=scenes.get(m.mapId);
     const overview=!saved&&projectOverview?projectOverview({view:mapView,mapId:m.mapId,scope:{chatId:state.chatId,branchId:mapView.branchId,revision:mapView.revision,viewMode}})?.scene:null;
     const g=referenceGeometry(m,saved??overview,{viewMode,visibleLocationIds:items(catalogView).filter(c=>c.entityKind==='location').map(c=>c.entityId)});
-    // M6-02③：导航层级先用 SQL 的 containerKind（真实空间类别）。
-    // 不能因为「这张图有 floor 布局」就把一栋建筑当成楼层 —— 画法不等于结构。
+    // Category and drawing template do not impose a sequence on parentMapId.
     const navKind=navigationKind(m,g.kind);
-    const level=REFERENCE_LEVELS.find(l=>l.key===navKind)??REFERENCE_LEVELS.find(l=>l.key===g.kind)??REFERENCE_LEVELS[0];
-    // P06：other 容器用中性场所标签展示；结构 key 仍是合法层级。
     const categoryLabel=navigationCategoryLabel(m);
-    nodes.set(m.mapId,{id:m.mapId,mapId:m.mapId,name:m.name||m.mapId,code:level.code,tag:categoryLabel??level.name,categoryLabel,description:saved?'已保存的空间布局':'当前 SQL 地图概览；尚无已保存空间布局',
-      children:[],...g,renderKind:g.kind,kind:navKind,host:true,containerLocationId:m.containerLocationId??null,
+    nodes.set(m.mapId,{id:m.mapId,mapId:m.mapId,name:m.name||m.mapId,tag:categoryLabel??MAP_CATEGORY_NAMES[navKind]??'地图',categoryLabel,description:saved?'已保存的空间布局':'当前 SQL 地图概览；尚无已保存空间布局',
+      children:[],...g,renderKind:g.kind,kind:navKind,host:true,containerLocationId:m.containerLocationId??null,containerLocationKind:m.containerLocationKind??null,
       parentMapId:m.parentMapId??null,connectionQuality:m.connectionQuality??null,
       topologyIssueCodes:Array.isArray(m.topologyIssueCodes)?[...m.topologyIssueCodes]:[],
       hasLayout:!!saved,sceneStatus:saved?'ready':'missing'});
@@ -432,7 +425,7 @@ export function projectReferenceData({state={},mapView,sceneView,catalogView,tas
    * 只有「压根没有唯一根图」（0 张或 >1 张）才用合成容器兜底。
    */
   out.ROOT=roots.length===1?roots[0]:{...out.ROOT,name:out.meta.worldName,children:roots};
-  if(unclassified.length)out.ROOT.children.push({id:UNCLASSIFIED,name:'未挂接的图',kind:'region',code:'L2',tag:'未挂接',
+  if(unclassified.length)out.ROOT.children.push({id:UNCLASSIFIED,name:'未挂接的图',kind:'other',tag:'未挂接',
     description:'这些图找不到可信的父图（父环、缺父或结构损坏），先单独列出来，不随便挂到某座城市下。',
     children:unclassified,geo:{},marks:[],host:true,unclassified:true});
   const catalog=items(catalogView),detailIndex=new Map(details.map(x=>{const row=x.character??x.item??x.location;return [row?.id,x];}));
@@ -451,6 +444,7 @@ export function projectReferenceData({state={},mapView,sceneView,catalogView,tas
     for(const mark of n.marks){if(mark.type==='poi'){const location=locationMap.get(mark.id),target=nodes.get(location?.childMapIds[0]);mark.node=target&&target!==n?{id:target.id,known:target.known!==false}:null;mark.placeId=mark.id;if(mobileIds.has(mark.id)){mark.type='vehicle';mark.sub=location.anchorLocationId?'停靠载具':'载具位置';}}}
   }
   projectMapContext(nodes,out.LOCATIONS,{inTransit});
+  projectSpaceNavigation(nodes,out.LOCATIONS,{scenes});
   const mapAt=id=>locationMap.get(id)?.childMapIds[0]??locationMap.get(id)?.mapId??null;
   out.CAST=catalog.filter(c=>c.entityKind==='character').map((c,i)=>{const p=pointIndex.get(c.entityId);return {id:c.entityId,name:c.name,initial:Array.from(c.name??'人').at(-1)||'人',role:p?.isProtagonist?'主角':'人物',c:COLORS[i%COLORS.length],
     state:c.locationId?'present':'unknown',tag:'已记录',locationId:c.locationId,mapNodeId:p?.mapId??mapAt(c.locationId)??c.mapId,description:c.summary??'',doing:'尚无行动记录',mind:'尚无后台想法记录',carry:[],known:true,
@@ -491,6 +485,12 @@ export function projectReferenceData({state={},mapView,sceneView,catalogView,tas
   out.meta.initialNodeId=out.CAST.find(c=>c.id===out.meta.protagonistId)?.mapNodeId??out.ROOT.id;
   for(const node of nodes.values())for(const mark of node.marks)if(mark.type==='char'){const c=out.CAST.find(c=>c.id===mark.id);if(c){mark.c=c.c;mark.initial=c.initial;mark.hero=mark.id===out.meta.protagonistId;}}
   out.RECEIPTS=referenceReceipts(state,items(logsView));
+  /**
+   * P14 §20.1：建图状态直接取服务端 `buildStatus`（已由 SQL 只读派生）。
+   * 这里**不做二次汇总**：五桶、地图布局数与窗口账都是唯一来源的搬运，
+   * 缺就保持 null —— 界面据此显示「未知」而不是 0。
+   */
+  out.buildStatus=d?.buildStatus&&typeof d.buildStatus==='object'?d.buildStatus:null;
   out.DIAGNOSTICS=referenceDiagnostics([...items(logsView),...diagnostics,...(state.lastError?[typeof state.lastError==='string'?{message:state.lastError,code:'WORLD_ACTION_FAILED',level:'error',source:'ui'}:{...state.lastError,level:'error'}]:[])]);
   for(const node of nodes.values()){
     const projected=projectReferenceFlows(flowView,node);

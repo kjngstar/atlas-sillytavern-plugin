@@ -130,7 +130,9 @@ function renderedEntityIds(scene: Row | null, known: ReadonlySet<string>): { ent
     const selfId = selfArea ? TEXT(selfArea.locationId) : '';
     if (selfId) selfIds.add(selfId);
   } else if (kind === 'floor') {
+    if(PLAIN(layout.hostArea)&&TEXT(layout.hostArea.id))selfIds.add(TEXT(layout.hostArea.id));
     for (const room of Array.isArray(layout.rooms) ? (layout.rooms as Row[]) : []) addAny(room?.id);
+    for (const area of Array.isArray(layout.areas) ? (layout.areas as Row[]) : []) add(area.id);
     const corridor = PLAIN(layout.corridor) ? (layout.corridor as Row) : null;
     // 程序几何 id 恒为 'corridor'：它不是地点；只有绑定了真实 entityId 才算被表示。
     const corridorEntity = corridor ? TEXT(corridor.entityId) : '';

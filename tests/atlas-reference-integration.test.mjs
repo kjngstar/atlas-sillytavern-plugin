@@ -1,3 +1,5 @@
+import {atlasDiagnosticContext} from '../src/atlas-request-diagnostics.ts';
+import {sanitizeDiagnostic} from '../src/atlas-diagnostics.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
@@ -82,18 +84,40 @@ test('原版预设：新建明确声明 create，未勾选记住时不持久化 
 test('原版预设：记住 Key 使用真实设置接口',()=>{const d=referencePresetDocument({});d.connections[0]={...connection,rememberKey:true};const cmd=referenceSettingsCommands(d,{}, {kind:'save',type:'connection',id:connection.id})[0];assert.equal(cmd.apiKeyMode,'replace');assert.equal(cmd.apiKey,connection.apiKey);});
 test('原版预设：编辑基础字段保留已存高级连接参数',()=>{const old={id:connection.id,name:'old',apiKey:'',connectionMode:'profile',profileId:'profile',topP:0.3,timeoutMs:12345,bodyParams:'a: b',requestHeaders:'x: y',apiFormat:'claude'};const d=referencePresetDocument({apiPresets:[old]});d.connections[0].name='new';const cmd=referenceSettingsCommands(d,{apiPresets:[old]},{kind:'save',type:'connection',id:connection.id})[0];assert.equal(cmd.preset.profileId,'profile');assert.equal(cmd.preset.topP,0.3);assert.equal(cmd.preset.requestHeaders,'x: y');assert.equal(cmd.preset.apiFormat,'claude');});
 test('原版预设：提示词上下文、保护字段、顺序和停用状态保留',()=>{const old={id:'P',name:'test',systemPrompt:'',contextTurnCount:7,segments:[{name:'main',role:'system',content:'a',enabled:false,mainSlot:1,deletable:false},{name:'b',role:'user',content:'b',enabled:true}]};const s={promptPresets:[old]},d=referencePresetDocument(s);const cmd=referenceSettingsCommands(d,s,{kind:'save',type:'prompt',id:'P'})[0];assert.equal(cmd.preset.contextTurnCount,7);assert.equal(cmd.preset.segments[0].mainSlot,1);assert.equal(cmd.preset.segments[0].deletable,false);assert.equal(cmd.preset.segments[0].enabled,false);});
-test('原版预设：超过插件限制拒绝保存，不截断正文或段落',()=>{const d=referencePresetDocument({});d.promptPresets[0].segments[0].content='x'.repeat(8001);assert.throws(()=>referenceSettingsCommands(d,{}, {kind:'save',type:'prompt',id:d.promptPresets[0].id}),/8000/);d.promptPresets[0].segments=Array.from({length:17},()=>({content:'a'}));assert.throws(()=>referenceSettingsCommands(d,{}, {kind:'save',type:'prompt',id:d.promptPresets[0].id}),/16/);});
+test('原版预设：长正文和多分段完整转成保存命令',()=>{
+ const d=referencePresetDocument({});
+ d.promptPresets[0].segments=Array.from({length:70},(_,i)=>({role:'user',content:'x'.repeat(9000)+i}));
+ const commands=referenceSettingsCommands(d,{}, {kind:'save',type:'prompt',id:d.promptPresets[0].id});
+ const saved=commands.find(command=>command.action==='prompt.save').preset.segments;
+ assert.equal(saved.length,70);assert.equal(saved.at(-1).content,'x'.repeat(9000)+69);
+});
+
 test('原版预设：原子批次后项失败时，不留下前项修改',()=>{const s=createDefaultSettingsV2(),d=referencePresetDocument({});d.connections[0]=connection;const cmd=referenceSettingsCommands(d,{}, {kind:'save',type:'connection',id:connection.id})[0],r=applySettingsCommand(s,{action:'batch',commands:[cmd,{action:'api.activate',id:'missing'}]});assert.equal(r.ok,false);assert.equal(r.settings,s);assert.equal(s.apiPresets.length,0);});
 test('原版预设：新建 ID 碰撞被拒绝，普通更新不存在仍被拒绝',()=>{const s=createDefaultSettingsV2(),d=referencePresetDocument({});d.connections[0]=connection;const cmd=referenceSettingsCommands(d,{}, {kind:'save',type:'connection',id:connection.id})[0],r=applySettingsCommand(s,cmd);assert.equal(applySettingsCommand(r.settings,cmd).ok,false);assert.equal(applySettingsCommand(s,{...cmd,create:false}).ok,false);});
 test('原版预设：异步保存失败后保留草稿，导出不包含 Key',async()=>{const window={crypto:{randomUUID:()=> 'unique'},TextEncoder},ctx=vm.createContext({window,TextEncoder,URL});vm.runInContext(readFileSync(new URL('../ui/atlas-reference/js/presets.js',import.meta.url),'utf8'),ctx);const initial=referencePresetDocument({});const store=window.AtlasPresetStore.create([],{storage:null,initialDocument:initial,onPersist:async()=>{throw Error('network failed');}});store.draft('prompt').segments[0].content='edited';await assert.rejects(store.save('prompt'),/network failed/);assert.equal(store.draft('prompt').segments[0].content,'edited');assert.notEqual(store.document.promptPresets[0].segments[0].content,'edited');assert.ok(!JSON.stringify(store.exportValue()).includes('apiKey'));});
 function mount(options={}){
  const dom=new JSDOM('<div id="root"></div>',{url:'http://localhost/'}),root=dom.window.document.getElementById('root');let state={chatId:'A',binding:options.unbound?null:{branchId:'main',enabled:options.bindingEnabled??true},stateData:{revision:3},receipts:[],panelOpen:true},context={chatId:'A',chatMetadata:{atlas:{database:{data:'A',sha256:'a'}}},extensionSettings:{atlas_world_sim:{sqlMode:options.enabled??true}}},calls=[],closes=0,loads=0,prefs={},settings=settingsViewV2(createDefaultSettingsV2());
  const sql={projectMapView:()=>null,toLegacyTurnReceipt,LAYOUT_SIGNATURE_POLICY_VERSION:'layout-v3'};
- const api={request:async(method,path,body)=>{if(['/sql/chat/map/layout','/sql/chat/map/build'].includes(path)&&options.mapReply)return {status:200,body:{ok:true,data:await options.mapReply(path)}};if(path==='/sql/chat/map/layout'&&options.layoutFailure)return {status:500,body:{ok:false,error:{code:'TURN_FAILED',message:'布局格式错误',details:options.layoutFailure}}};if(path==='/sql/chat/ui-read'){calls.push(body);await options.delay?.(body);const data=body.kind==='map'?view([{...map,name:context.chatId}]):body.kind==='catalog'?view(cat):body.kind==='entity'?view([{kind:'character',character:{id:'C',name:context.chatId},position:{kind:'at_location'}}]):view([]);data.metadata={protagonistId:'C',snapshotSaved:!!context.chatMetadata.atlas?.database};return {status:200,body:{ok:true,data}};}if(method==='PUT'){const r=applySettingsCommand(settings,body);if(!r.ok)return {status:400,body:{ok:false,error:{message:r.message}}};settings={...settings,...r.settings};}return {status:200,body:{ok:true,data:settings}};},setRuntimeApiKeys:c=>calls.push({runtime:c.map(x=>({id:x.id,key:!!x.apiKey}))})};
+ const api={request:async(method,path,body)=>{if(path==='/sql/chat/ui-read'&&body.kind==='turn-analysis'&&options.turnAnalysis){calls.push(body);return {status:200,body:{ok:true,data:await options.turnAnalysis(body)}};}if(['/sql/chat/map/layout','/sql/chat/map/build'].includes(path)&&options.mapReply)return {status:200,body:{ok:true,data:await options.mapReply(path)}};if(path==='/sql/chat/map/layout'&&options.layoutFailure)return {status:500,body:{ok:false,error:{code:'TURN_FAILED',message:'布局格式错误',details:options.layoutFailure}}};if(path==='/sql/chat/ui-read'){calls.push(body);await options.delay?.(body);const data=body.kind==='map'?view([{...map,name:context.chatId}]):body.kind==='catalog'?view(cat):body.kind==='entity'?view([{kind:'character',character:{id:'C',name:context.chatId},position:{kind:'at_location'}}]):view([]);data.metadata={protagonistId:'C',snapshotSaved:!!context.chatMetadata.atlas?.database};return {status:200,body:{ok:true,data}};}if(method==='PUT'){const r=applySettingsCommand(settings,body);if(!r.ok)return {status:400,body:{ok:false,error:{message:r.message}}};settings={...settings,...r.settings};}return {status:200,body:{ok:true,data:settings}};},setRuntimeApiKeys:c=>calls.push({runtime:c.map(x=>({id:x.id,key:!!x.apiKey}))})};
  const core={recordExternalReceipt:(receipt,chatId,detail)=>{state.receipts=[...(state.receipts??[]),{...receipt,chatId,detail}];},getState:()=>state,setPage:()=>{},setPanelOpen:v=>{state.panelOpen=v;render();},setEnabled:async v=>{state.binding.enabled=v;calls.push({enabled:v});},manualAdvance:async()=>{calls.push({advance:true});if(options.advanceError)state.lastError=options.advanceError;},initializeWorld:async()=>false,retryLastCommit:async()=>{},refresh:async()=>{calls.push({refresh:true});}};
- const render=mountReferenceUi({root,core,api,getContext:()=>context,pluginVersion:options.pluginVersion,lorePort:options.lorePort,emit:entry=>calls.push({diagnostic:entry}),diagnostics:()=>calls.filter(c=>c.diagnostic).map(c=>c.diagnostic),settingsPort:{read:async()=>prefs,write:async(_,v)=>{prefs=v;}},loadSqlRuntime:async()=>{loads++;if(options.unavailable)throw Error('SQL_CORE_UNAVAILABLE');return sql;}}),bridge=root.firstChild.__atlasHost;
+ const render=mountReferenceUi({root,core,api,getContext:()=>context,pluginVersion:options.pluginVersion,diagnosticTools:{atlasDiagnosticContext,sanitizeDiagnostic},lorePort:options.lorePort,emit:entry=>calls.push({diagnostic:entry}),diagnostics:()=>calls.filter(c=>c.diagnostic).map(c=>c.diagnostic),settingsPort:{read:async()=>prefs,write:async(_,v)=>{prefs=v;}},loadSqlRuntime:async()=>{loads++;if(options.unavailable)throw Error('SQL_CORE_UNAVAILABLE');return sql;}}),bridge=root.firstChild.__atlasHost;
  return {root,core,render,bridge,calls,get loads(){return loads;},get closes(){return closes;},get prefs(){return prefs;},saved(){context.chatMetadata.atlas.database={data:'saved-A',sha256:'saved-a',storage_revision:4};state={...state,stateData:{revision:4}};render();},noSnapshot(){context.chatMetadata.atlas={};render();},switch(id){state={...state,chatId:id,lastError:null};context={...context,chatId:id,chatMetadata:{atlas:{database:{data:id,sha256:id}}}};render();},off(){context.extensionSettings.atlas_world_sim.sqlMode=false;render();}};
 }
+
+test('逐轮分析导出读完所有页，不依赖当前诊断列表或触发模型',async()=>{
+ const m=mount({turnAnalysis:async body=>({revision:3,items:[{id:body.cursor?'two':'one',turnRef:body.cursor?'ref-22222222':'ref-11111111',recordedModelTransports:0,requestAudit:{calls:[],transports:0,droppedCalls:0}}],metadata:{totalCount:2},...(!body.cursor?{nextCursor:'second'}:{})})});
+ try{
+  await m.bridge.boot();await m.bridge.setViewMode('author');const result=await m.bridge.exportTurnAnalysis();
+  assert.equal(result.file.schema,'atlas-turn-analysis/v1');assert.equal(result.file.coverage.storedTurnsExported,2);assert.equal(result.file.coverage.storedTurnPagesComplete,true);
+  assert.equal(m.calls.filter(call=>call.kind==='turn-analysis').length,2);assert.ok(!m.calls.some(call=>call.advance));assert.match(result.filename,/^atlas-turn-analysis-.*\.json$/);
+ }finally{await m.render.dispose();}
+});
+test('逐轮分析导出遇到聊天变化或循环游标，整份拒绝而不下载混合记录',async()=>{
+ let m; m=mount({turnAnalysis:async()=>{m.switch('B');return {revision:3,items:[],metadata:{totalCount:0}};}});
+ try{await m.bridge.boot();await m.bridge.setViewMode('author');await assert.rejects(m.bridge.exportTurnAnalysis(),/已变化/);}finally{await m.render.dispose();}
+ const loop=mount({turnAnalysis:async()=>({revision:3,items:[],metadata:{totalCount:5},nextCursor:'repeat'})});
+ try{await loop.bridge.boot();await loop.bridge.setViewMode('author');await assert.rejects(loop.bridge.exportTurnAnalysis(),/分页未前进/);}finally{await loop.render.dispose();}
+});
 
 test('the real host saves v3 map-widget preferences while still accepting v1 and v2',async()=>{
  const m=mount();
@@ -156,7 +180,8 @@ test('原版宿主：首次推演尚无快照时读取内存库，不报读取�
 test('原版回执：详细日志保留失败路径、分组和尝试；重复回执不标失败',()=>{const d=projection({state:{chatId:'A',retryableCommit:{chatId:'A'},receipts:[{chatId:'A',receiptId:'F',status:'failed',summary:'校验失败',retryable:true,errorCode:'TURN_FAILED',detail:{receipt:{groups:[{groupId:'G',status:'rejected',issues:[{code:'INVALID_FIELD',path:'$.data.kind',message:'种类错误'}]}]}}},{chatId:'A',receiptId:'D',status:'duplicate',summary:'重复回执'},{chatId:'B',receiptId:'secret',status:'failed',summary:'其他聊天'}]},logsView:view([{logId:'L',kind:'failed_turn',turnId:'F',status:'failed',receipt:{issues:[{path:'$.data.kind'}]},attempts:[{phase:'observe',status:'failed'}]}])});assert.equal(d.RECEIPTS.length,2);assert.equal(d.RECEIPTS[0].retryable,true);assert.equal(d.RECEIPTS[0].detail.receipt.groups[0].issues[0].path,'$.data.kind');assert.equal(d.RECEIPTS[0].logs[0].attempts[0].phase,'observe');assert.equal(d.RECEIPTS[1].ok,true);assert.equal(d.DIAGNOSTICS[0].receipt.issues[0].path,'$.data.kind');});
 test('原版宿主：同分支同修订切聊天，晚到查询不覆盖新聊天',async()=>{let release;const blocked=new Promise(r=>{release=r;});let once=true;const m=mount({delay:q=>{if(q.kind==='map'&&once){once=false;return blocked;}}});const first=m.bridge.boot();await new Promise(r=>setTimeout(r,10));m.switch('B');release();await first;const current=await m.bridge.boot();assert.equal(current.data.CAST[0].name,'B');assert.ok(current.data.meta.scopeKey.includes('B'));await m.render.dispose();});
 test('原版宿主：运行时不可用时显示具名错误，不混入旧 DTO',async()=>{const m=mount({unavailable:true});const result=await m.bridge.boot();assert.equal(result.data.CAST.length,0);assert.match(result.data.DIAGNOSTICS[0].message,/SQL_CORE_UNAVAILABLE/);await m.render.dispose();});
-test('原版宿主：详情只查当前人物，视角切换重新取数',async()=>{const m=mount();await m.bridge.boot();await m.bridge.inspect('character','C');assert.equal(m.calls.at(-1).entityId,'C');await m.bridge.setViewMode('pov');assert.ok(m.calls.some(q=>q.kind==='map'&&q.viewMode==='pov'));await m.render.dispose();});
+test('原版宿主：详情只查当前人物，视角切换重新取数',async()=>{const m=mount();await m.bridge.boot();await m.bridge.inspect('character','C');assert.equal(m.calls.at(-1).entityId,'C');await m.bridge.setViewMode('player');assert.ok(m.calls.some(q=>q.kind==='map'&&q.viewMode==='player'),'切到玩家视图要重新按 player 取数');
+ await m.bridge.setViewMode('author');assert.equal(m.calls.filter(c=>c.kind==='map').at(-1).viewMode,'author','切回世界后台按 author 取数');await m.render.dispose();});
 test('原版宿主：预设保存走真实原子接口，偏好保存不含 Key',async()=>{const m=mount();const initial=await m.bridge.boot(),doc=initial.presets;doc.connections[0]=connection;await m.bridge.persistPresets(doc,{kind:'save',type:'connection',id:connection.id});assert.ok(m.calls.some(q=>q.runtime));assert.ok(!JSON.stringify(m.prefs).includes(connection.apiKey));await m.render.dispose();});
 test('原版世界书：读取与启停对应真实宿主条目，保留其他字段',async()=>{const ctx={chatId:'A',chatMetadata:{world_info:'Book'}},book={entries:{1:{comment:'学校',content:'real content',key:['学校'],disable:false,order:123}}};let saved;const port=createReferenceLorePort(()=>ctx,async()=>({loadWorldInfo:async()=>structuredClone(book),saveWorldInfo:async(_,value)=>{saved=value;}}));const rows=await port.read();assert.equal(rows[0].content,'real content');await port.toggle(rows[0].id);assert.equal(saved.entries[1].disable,true);assert.equal(saved.entries[1].order,123);});
 test('原版世界书：晚到读结果不带进切换后的聊天',async()=>{let ctx={chatId:'A',chatMetadata:{world_info:'Book'}},release;const pending=new Promise(r=>{release=r;}),port=createReferenceLorePort(()=>ctx,async()=>({loadWorldInfo:async()=>{await pending;return {entries:{1:{content:'private A'}}};}}));const read=port.read();await new Promise(r=>setTimeout(r,0));ctx={chatId:'B',chatMetadata:{}};release();assert.deepEqual(await read,[]);});
@@ -166,14 +191,14 @@ test('原版行程：未标定的格路线不能假定一格一米画到米制�
 const patchLoreRow={id:'["NeutralBook","1"]',title:'Neutral geography',keys:['学校'],content:'Neutral book content',enabled:true};
 test('PATCH-LORE01 opening the lore page reads the host port and connects registered targets',async()=>{
  let reads=0;const m=mount({lorePort:{read:async()=>{reads++;return [structuredClone(patchLoreRow)];}}});
- try{await m.bridge.boot();await m.bridge.onPage('map');assert.equal(reads,0);await m.bridge.onPage('lore');
+ try{await m.bridge.boot();await m.bridge.setViewMode('author');await m.bridge.onPage('map');assert.equal(reads,0);await m.bridge.onPage('lore');
   const data=(await m.bridge.boot()).data;assert.equal(reads,1);assert.equal(data.LORE[0].content,patchLoreRow.content);assert.equal(data.LORE[0].target,'L');
  }finally{await m.render.dispose();}
 });
 test('PATCH-LORE02 the UI toggle calls the host port and rereads actual saved state',async()=>{
  let enabled=true;const toggles=[];const m=mount({lorePort:{read:async()=>[{...patchLoreRow,enabled}],toggle:async id=>{toggles.push(id);enabled=!enabled;}}});
- try{await m.bridge.boot();await m.bridge.toggleLore(patchLoreRow.id);assert.deepEqual(toggles,[patchLoreRow.id]);assert.equal((await m.bridge.boot()).data.LORE[0].enabled,false);
-  await m.bridge.setViewMode('pov');await assert.rejects(m.bridge.toggleLore(patchLoreRow.id),/世界后台/);assert.equal(toggles.length,1);
+ try{await m.bridge.boot();await m.bridge.setViewMode('author');await m.bridge.toggleLore(patchLoreRow.id);assert.deepEqual(toggles,[patchLoreRow.id]);assert.equal((await m.bridge.boot()).data.LORE[0].enabled,false);
+  await m.bridge.setViewMode('player');await assert.rejects(m.bridge.toggleLore(patchLoreRow.id),/世界后台/);assert.equal(toggles.length,1);
  }finally{await m.render.dispose();}
 });
 test('PATCH-LORE03 a late host read cannot move lore from one chat into another',async()=>{
@@ -183,8 +208,8 @@ test('PATCH-LORE03 a late host read cannot move lore from one chat into another'
 });
 test('PATCH-LORE04 lore read errors are visible diagnostics; POV does not read private lore',async()=>{
  let reads=0;const m=mount({lorePort:{read:async()=>{reads++;throw Error('Neutral host read failure');}}});
- try{await m.bridge.boot();await m.bridge.onPage('lore');const data=(await m.bridge.boot()).data;
+ try{await m.bridge.boot();await m.bridge.setViewMode('author');await m.bridge.onPage('lore');const data=(await m.bridge.boot()).data;
   assert.ok(data.DIAGNOSTICS.some(d=>d.code==='REFERENCE_LORE_READ_FAILED'));assert.ok(m.calls.some(c=>c.diagnostic?.code==='REFERENCE_LORE_READ_FAILED'));
-  await m.bridge.setViewMode('pov');await m.bridge.onPage('lore');assert.equal(reads,1);assert.deepEqual((await m.bridge.boot()).data.LORE,[]);
+  await m.bridge.setViewMode('player');await m.bridge.onPage('lore');assert.equal(reads,1,'玩家视图不读私密世界书正文');assert.deepEqual((await m.bridge.boot()).data.LORE,[]);
  }finally{await m.render.dispose();}
 });

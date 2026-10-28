@@ -68,7 +68,7 @@ test('P0-04c 浏览器路径:超长输入仍返回 TOO_LARGE Issue', async () =>
     delete globalThis.Buffer;
     const url = ${JSON.stringify(pathToFileURL(distPath).href)};
     const mod = await import(url);
-    const huge = '{"op":"noop","data":{"x":"' + 'A'.repeat(80000) + '"}}';
+    const huge = '{"op":"noop","data":{"x":"' + 'A'.repeat(300000) + '"}}';
     const result = mod.parseOperations(huge, { phase: 'observe' });
     if (result.issues.length === 0) {
       console.error('expected at least one issue, got: ' + JSON.stringify(result));

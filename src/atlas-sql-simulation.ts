@@ -127,6 +127,8 @@ export async function settleSqlTurn(input: Input) {
     const request = buildStagePrompt({phase,...fields,batchId:`sim_${input.turnId}_${batches}`,entityRefs:collectEntityRefs(tables,input.branchId,knownRefs)});
     request.anchor=input.anchor;
     request.workClass=phase==='decision'?'characters':'outcomes';
+    if(input.attemptKey?.startsWith('resume_'))request.diagnosticCause='background_resume';
+    if(actorTargets.length)request.diagnosticTargets=actorTargets.map(actor=>actor.entityId);
     request.messages[1].content += '\n现有对象短引用：'+collectEntityRefs(tables,input.branchId,knownRefs).join('、');
     // Structured fields, already serialized by callers, also use the same aliases.
     for (const [id,alias] of byId) request.messages[1].content=request.messages[1].content.split(JSON.stringify(id)).join(JSON.stringify(alias));

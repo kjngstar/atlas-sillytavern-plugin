@@ -14,6 +14,8 @@ export type BrowserSqlHostOptions = {
   context: () => BrowserSqlHostRecord | null;
   loadRuntime: () => Promise<AtlasSqlRuntime>;
   modelPort?: AtlasModelPort | null;
+  readWorldBuildSources?: () => Promise<readonly import('./atlas-ops-contract.ts').SourceSnapshotEntry[]>;
+  onSaved?: () => void;
 };
 
 function error(code: string, message: string): Error & { code: string } {
@@ -94,6 +96,7 @@ export function createBrowserSqlHost(options: BrowserSqlHostOptions): AtlasSqlSe
         const atlas = record.chatMetadata.atlas as Record<string, unknown> | undefined;
         const openOptions={
           chatUid, branchId, chatMetadata: record.chatMetadata, modelPort: options.modelPort ?? null,
+          readWorldBuildSources: options.readWorldBuildSources,
           ...(!envelopeOf(record.chatMetadata)&&atlas?.world&&typeof atlas.world==='object'?{
             worldUid:typeof (atlas.world as Record<string,unknown>).id==='string'?(atlas.world as {id:string}).id:undefined,
             branchName:typeof (atlas.world as Record<string,unknown>).name==='string'?(atlas.world as {name:string}).name:undefined,
@@ -152,6 +155,7 @@ export function createBrowserSqlHost(options: BrowserSqlHostOptions): AtlasSqlSe
       if (current?.session === session) {
         current.storedSnapshot = snapshot(session.chatMetadata);
         delete current.savingSnapshot;
+        options.onSaved?.();
       }
     },
     async close() {

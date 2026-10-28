@@ -13,6 +13,8 @@
  * 7. HTTP 失败**不退还**额度（否则失败即触发请求风暴）。
  */
 
+import { createModelCallAudit, type ModelCallAudit, type ModelCallMetadata } from './atlas-model-call-audit.ts';
+import type { AtlasDiagnosticInput } from './atlas-diagnostics.ts';
 import type { AtlasModelPort } from './atlas-db-contract.ts';
 import { ATLAS_RUNTIME_LIMITS } from './atlas-runtime-limits.ts';
 import { workPlanLimits, type ModelWorkClass, type WorkBatchingSettings } from './atlas-work-batching.ts';
@@ -34,6 +36,8 @@ export type GenerationBudgetPort = {
   /** Diagnostic identity of this operation; never serialized or sent to the model. */
   readonly diagnosticContext?: DiagnosticContext;
   readonly limit: number;
+  audit?(): ModelCallAudit;
+  recordDiagnostic?(event: AtlasDiagnosticInput): void;
   /** 已占用的真实传输发送数（含失败）。 */
   used(): number;
   remaining(): number;
@@ -42,7 +46,7 @@ export type GenerationBudgetPort = {
   attempts(): readonly BudgetAttempt[];
   deferred(): readonly BudgetDeferred[];
   /** 逻辑批次：同一 batchId 只认一次；重复返回 MODEL_BATCH_DUPLICATE，不占额度。 */
-  claimBatch(stage: string, batchId: string, work?: {kind?: ModelWorkClass; retry?: boolean}): BudgetClaim;
+  claimBatch(stage: string, batchId: string, work?: ModelCallMetadata): BudgetClaim;
   workUsage(): WorkPlanUsage | null;
   /** 真实发送：每次都占额度，失败不退还。 */
   claimTransport(stage: string, batchId: string): BudgetClaim;
@@ -68,6 +72,7 @@ export type CreateGenerationBudgetInput = {
   limit?: number;
   workBatching?: WorkBatchingSettings;
   workUsage?: WorkPlanUsage;
+  requestAudit?: ModelCallAudit;
 };
 
 function cloneAttempts(attempts: readonly BudgetAttempt[] | undefined): BudgetAttempt[] {
@@ -80,7 +85,8 @@ export function createGenerationBudget(input: CreateGenerationBudgetInput = {}):
   // Keep scheduler/JSON availability finite without imposing a practical count cap.
   const plan=input.workBatching?workPlanLimits(input.workBatching):null;
   const usage:WorkPlanUsage={normal:{...input.workUsage?.normal},extra:input.workUsage?.extra??0,transports:input.workUsage?.transports??0};
-  const work=new Map<string,{kind:ModelWorkClass;retry:boolean;sent:number}>();
+  const work=new Map<string,ModelCallMetadata & {kind:ModelWorkClass;retry:boolean;sent:number}>();
+  const audit = createModelCallAudit(input.requestAudit ?? (input.workUsage?.transports ? { version:1, transports:input.workUsage.transports, byWorkClass:{}, calls:[], droppedCalls:input.workUsage.transports } : null));
   const available=limit||Number.MAX_SAFE_INTEGER;
   const attemptList = cloneAttempts(input.attempts);
   const deferredList: BudgetDeferred[] = [];
@@ -99,6 +105,8 @@ export function createGenerationBudget(input: CreateGenerationBudgetInput = {}):
   return {
     ...(input.diagnosticAnchor ? { diagnosticContext: atlasDiagnosticContext(input.diagnosticAnchor) } : {}),
     limit,
+    audit: () => audit.snapshot(),
+    recordDiagnostic: event => { try { audit.observe(event); } catch { /* diagnostic observers cannot affect a turn */ } },
     used: () => transports,
     remaining: () => Math.min(planRemaining(),Math.max(0, available - transports)),
     workUsage:()=>plan?{normal:{...usage.normal},extra:usage.extra,transports}:null,
@@ -114,7 +122,7 @@ export function createGenerationBudget(input: CreateGenerationBudgetInput = {}):
         return { ok: false, code: 'MODEL_BATCH_DUPLICATE', reason: `批次 ${batchId} 已在本回合发出过，不重复发送` };
       }
       const kind=metadata.kind??(stage==='decision'?'characters':stage==='outcome'?'outcomes':stage==='geography'?'construction':'observe');
-      work.set(batchId,{kind,retry:metadata.retry===true,sent:0});
+      work.set(batchId,{...metadata,kind,retry:metadata.retry===true,sent:0});
       attemptList.push({ stage, batchId, status: 'requested' });
       return { ok: true };
     },
@@ -139,6 +147,7 @@ export function createGenerationBudget(input: CreateGenerationBudgetInput = {}):
         entry.sent++;work.set(batchId,entry);
       }
       transports += 1;
+      audit.sent(stage, batchId, work.get(batchId));
       const existing = attemptOf(batchId);
       if (existing) {
         if (existing.status !== 'failed') existing.status = 'requested';
@@ -149,6 +158,7 @@ export function createGenerationBudget(input: CreateGenerationBudgetInput = {}):
     },
 
     finishBatch: (batchId, status) => {
+      audit.finish(batchId, status);
       const existing = attemptOf(batchId);
       if (existing) existing.status = status;
       else attemptList.push({ stage: 'unknown', batchId, status });
@@ -156,6 +166,7 @@ export function createGenerationBudget(input: CreateGenerationBudgetInput = {}):
 
     recordTransport: (stage, batchId) => {
       transports += 1;
+      audit.sent(stage, batchId, work.get(batchId));
       if (!attemptOf(batchId)) attemptList.push({ stage, batchId, status: 'completed' });
     },
 
@@ -217,7 +228,7 @@ export function budgetedModelPort(port: AtlasModelPort, budget: GenerationBudget
     /** 阶段名优先取请求自带的 phase（observe/geography/decision/outcome/repair），否则用端口默认。 */
     async request(request) {
       const phase = stage === 'background' ? 'background' : request.phase || stage;
-      const logical = budget.claimBatch(phase, request.batchId,{kind:request.workClass??(request.batchTargets?.kind==='maps'?'maps':request.batchTargets?.kind==='characters'?'characters':request.promptMode==='atlas-spatial-extract'?'evidence':undefined),retry:Boolean(request.retryOf)||request.phase==='repair'});
+      const logical = budget.claimBatch(phase, request.batchId,{kind:request.workClass??(request.batchTargets?.kind==='maps'?'maps':request.batchTargets?.kind==='characters'?'characters':request.promptMode==='atlas-spatial-extract'?'evidence':undefined),retry:Boolean(request.retryOf)||request.phase==='repair',cause:request.diagnosticCause??(request.phase==='repair'?'validation_repair':request.retryOf?'retry_unspecified':'scheduled'),retryOf:request.retryOf??request.repairOfBatchId,targetCount:request.batchTargets?.count,targetIds:request.diagnosticTargets});
       if (!logical.ok) throw budgetError(logical);
       const claim = budget.claimTransport(phase, request.batchId);
       if (!claim.ok) throw budgetError(claim);

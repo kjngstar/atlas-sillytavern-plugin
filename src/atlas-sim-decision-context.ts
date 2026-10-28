@@ -14,8 +14,11 @@
 
 import { queryBound } from './atlas-db-runtime.ts';
 import { decodeRow } from './atlas-db-codec.ts';
+import { resolveEffectivePosition } from './atlas-sim-position.ts';
+import { readActorSceneFacts, summarizeSceneFacts } from './atlas-scene-facts.ts';
 import type { SqlDatabase } from './atlas-db-runtime.ts';
 import type { Opportunity } from './atlas-sim-opportunities.ts';
+import type { DecisionSceneV1 } from './atlas-scene-facts.ts';
 
 export type DecisionActorSlice = {
   entityId: string;
@@ -25,6 +28,14 @@ export type DecisionActorSlice = {
   opportunities: Opportunity[];
   /** Only the contents this actor knows or can presently encounter; truth labels stay author-only. */
   information: Array<Record<string, unknown>>;
+  /**
+   * §17.2：该 actor **自己**的现场空间事实（地点链 / 入口开关 / 关键障碍占地 / 空间约束）。
+   *
+   * 来自与正文注入同一个读取口（`atlas-scene-facts.ts`），因此不会出现
+   * 「正文说门锁着、决策以为门开着」的两套事实。位置未知时是 null，不拿目录名字填空。
+   * 只读自己的位置：别人的位置、玩家地图缓存、author DTO 都不进这里。
+   */
+  scene: DecisionSceneV1 | null;
 };
 
 export type DecisionContext = { actorSlices: DecisionActorSlice[]; refs: string[] };
@@ -38,6 +49,25 @@ function decodeRows(table: string, rows: Array<Record<string, unknown>>): Array<
     if (decoded.ok) out.push(decoded.row as Record<string, unknown>);
   }
   return out;
+}
+
+/**
+ * §17.2：这个 actor 自己能看到的现场空间。
+ *
+ * 位置只从 `resolveEffectivePosition` 来：在途就是「在途」，未知就是 null。
+ * 地点行的 `location_id` 只在**有效坐标**（at_grid）时作为房间归属使用 ——
+ * 因为网格坐标本身不带房间，而 at_location 已经直接给了地点。
+ */
+function actorScene(world: DecisionWorld, entityId: string): DecisionSceneV1 | null {
+  const position = resolveEffectivePosition({ db: world.db, branchId: world.branchId }, entityId);
+  const character = queryBound(world.db, 'SELECT location_id FROM characters WHERE branch_id=? AND id=? LIMIT 1', [world.branchId, entityId])[0];
+  const locationId = position.kind === 'at_location'
+    ? position.locationId
+    : position.kind === 'at_grid' && character?.location_id
+      ? String(character.location_id)
+      : null;
+  const facts = readActorSceneFacts(world, { actorId: entityId, locationId, position });
+  return summarizeSceneFacts(facts.context);
 }
 
 /**
@@ -104,7 +134,12 @@ export function buildDecisionContext(
       ...opportunities.map(o => o.informationId).filter((id): id is string => typeof id === 'string')]);
     const information = [...informationIds].flatMap(id => queryBound(world.db,
       'SELECT id,title,content,kind FROM information WHERE branch_id=? AND id=?', [world.branchId,id]));
-    actorSlices.push({ entityId, knowledge, activeActions, journeys, opportunities, information });
+
+    // §17.2：自己的现场空间。位置未知就是 null —— 不许退回「他大概在城里」再编一间屋子。
+    const scene = actorScene(world, entityId);
+    if (scene?.location) refs.add(`location:${scene.location.locationId}`);
+
+    actorSlices.push({ entityId, knowledge, activeActions, journeys, opportunities, information, scene });
   }
 
   actorSlices.sort((a, b) => (a.entityId < b.entityId ? -1 : a.entityId > b.entityId ? 1 : 0));

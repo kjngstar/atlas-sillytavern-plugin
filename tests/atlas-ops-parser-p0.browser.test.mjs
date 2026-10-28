@@ -64,7 +64,7 @@ test('P0-01b 无 Buffer 环境:带中文的坏 JSON → 返回 JSON_SYNTAX Issue
 test('P0-01c 无 Buffer 环境:超过大小限制的行 → 返回 TOO_LARGE 类 Issue', () => {
   withNoBuffer(() => {
     // 故意造一个超大 payload(单条/响应都会触发上限)
-    const huge = '{"op":"noop","data":{"x":"' + 'A'.repeat(80000) + '"}}';
+    const huge = '{"op":"noop","data":{"x":"' + 'A'.repeat(300000) + '"}}';
     const result = parseOperations(huge, { phase: 'observe' });
     assert.ok(result.issues.length > 0, '应当至少有一条 issue');
     const code = result.issues[0].code;

@@ -24,6 +24,8 @@ import { SPATIAL_SCENE_KEY } from './atlas-spatial-frame.ts';
 import type { TableReadPort } from './atlas-ops-compile-types.ts';
 import type { ModelBatchRequest, Issue, ModelOperation, RequiredRef } from './atlas-ops-contract.ts';
 import { buildStagePrompt } from './atlas-ops-prompts.ts';
+import { constructionBudget } from './atlas-construction-budget.ts';
+import { buildSourceCatalogue } from './atlas-source-catalogue.ts';
 import { stable } from '../vendor/atlas-spatial/index.mjs';
 import type { CompletionPolicy, GenerationTask, PlanIssue, TaskCatalogue, WorldCompletionMode, WorldFillState } from './atlas-world-contract.ts';
 
@@ -37,6 +39,8 @@ export const WORLD_CONSTRUCTION_OPS: readonly string[] = ['location.upsert', 'ro
 export const WORLD_CONSTRUCTION_POLICY_VERSION = 1;
 
 export type SqlWorldCompletionInput = {
+  /** A global source scan can discover the first real entity without a fabricated focus. */
+  sourceScan?: boolean;
   mode: WorldCompletionMode;
   focusLocationIds: readonly string[];
   policy?: Partial<CompletionPolicy>;
@@ -92,20 +96,20 @@ function branchRootMapId(tables: TableReadPort, branchId: string): string {
   return branch ? asId(branch.root_map_id) : '';
 }
 
-/** 统一 limits 提供默认值；请求不得擅自抬高（02 §5）。 */
+/** Use planning defaults only when the caller has not supplied its own work budget. */
 export function normalizeCompletionPolicy(policy?: Partial<CompletionPolicy>): CompletionPolicy {
-  const clamp = (value: unknown, ceiling: number, floor = 0): number => {
-    const raw = typeof value === 'number' && Number.isFinite(value) ? Math.floor(value) : ceiling;
-    return Math.min(ceiling, Math.max(floor, raw));
+  const workAmount = (value: unknown, fallback: number): number => {
+    const raw = typeof value === 'number' && Number.isFinite(value) ? Math.floor(value) : fallback;
+    return Math.max(0, raw);
   };
   const workload=policy?.budgetMode==='workload';
   return {
     version: 1,
     density: 'balanced',
     ...(workload?{budgetMode:'workload' as const}:{}),
-    maxNewLocations: clamp(policy?.maxNewLocations, workload?ATLAS_RUNTIME_LIMITS.operationsPerResponse:ATLAS_RUNTIME_LIMITS.newLocationsPerBatch),
-    maxNewRoutes: clamp(policy?.maxNewRoutes, workload?ATLAS_RUNTIME_LIMITS.operationsPerResponse:ATLAS_RUNTIME_LIMITS.newRoutesPerBatch),
-    maxAdditionalDepth: clamp(policy?.maxAdditionalDepth, workload?ATLAS_RUNTIME_LIMITS.locationDepth:ATLAS_RUNTIME_LIMITS.additionalParentDepthPerBatch),
+    maxNewLocations: workAmount(policy?.maxNewLocations, workload?ATLAS_RUNTIME_LIMITS.constructionOperationsPerBatch:ATLAS_RUNTIME_LIMITS.newLocationsPerBatch),
+    maxNewRoutes: workAmount(policy?.maxNewRoutes, workload?ATLAS_RUNTIME_LIMITS.constructionOperationsPerBatch:ATLAS_RUNTIME_LIMITS.newRoutesPerBatch),
+    maxAdditionalDepth: workAmount(policy?.maxAdditionalDepth, workload?ATLAS_RUNTIME_LIMITS.locationDepth:ATLAS_RUNTIME_LIMITS.additionalParentDepthPerBatch),
   };
 }
 
@@ -354,22 +358,47 @@ function buildConstructionRequest(
     '不要从名称后缀（「…区」「…楼」「…路」）反推父子关系；只按已给父链与真实资料判断。',
     '未获已注册事实支持的新地点必须写 existence_quality=inferred，不要自称 confirmed。',
     '禁止输出 event / character / item / time 相关操作：本阶段只做空间结构。',
+    // P02 §8 第 1 条：共同总额必须写在模型看得见的地方，不能只靠报错教育它。
+    '按本批 maxNewLocations / maxNewRoutes 和依赖范围建设；更新、尺度估计等有效操作没有额外的固定条数限制。未完成的建设目标保留到后续窗口。',
     '没有需要修改的数据时输出 {"op":"noop"}。',
   ].join('\n');
 
+  const totalBudget = constructionBudget({
+    maxNewLocations: policy.maxNewLocations,
+    maxNewRoutes: policy.maxNewRoutes,
+  });
   const budgetLine = [
     `mode=${input.mode}`,
     `focus=${focusIds.join('、') || '（无）'}`,
     `maxNewLocations=${policy.maxNewLocations}`,
     `maxNewRoutes=${policy.maxNewRoutes}`,
     `maxAdditionalDepth=${policy.maxAdditionalDepth}`,
+    // 共同总额放在行尾：`focus=…、maxNewLocations=…` 的前缀形状是既有下游解析依赖，不要插到中间。
+    `totalOperations=${totalBudget.totalOperations ?? 'unlimited'}`,
   ].join('、');
+
+  /**
+   * 来源别名（P02 §8 第 5–6 条）。
+   *
+   * 目录由 sourceKey 集合确定性生成（按 key 字典序分配 SRC1…），编译侧用同一批快照
+   * 重建会得到完全相同的别名 —— 所以提示词里可以安全地只显示 SRC1，而不必把目录对象
+   * 一路透传到编译器。kind 只参与目录 hash，不参与别名分配。
+   */
+  const sourceCatalogue = buildSourceCatalogue(
+    sources.chunks
+      .map((chunk) => chunk.sourceKey)
+      .filter((key) => typeof key === 'string' && key.length > 0)
+      .filter((key, index, all) => all.indexOf(key) === index)
+      .map((key) => ({ key, contentHash: '', kind: '' })),
+  );
+  const aliasOfSource = new Map(sourceCatalogue.entries.map((entry) => [entry.key, entry.alias]));
 
   const sourceLines = sources.chunks.length === 0
     ? ['（无可用来源）']
     : sources.chunks.map((chunk) => {
+        const alias = aliasOfSource.get(chunk.sourceKey) ?? '';
         const boundary = chunk.total > 1 ? `（第 ${chunk.index + 1}/${chunk.total} 块，原文偏移 ${chunk.start}-${chunk.end}）` : '';
-        return `【${chunk.sourceKey}｜${chunk.contentHash}】${boundary}\n${chunk.text}`;
+        return `【${alias || 'SRC?'}｜${chunk.sourceKey}｜${chunk.contentHash}】${boundary}\n${chunk.text}`;
       });
 
   const catalogueRows = new Map(Object.values(catalogue.rows).flat().map(row => [String(row.id), row]));
@@ -388,6 +417,7 @@ function buildConstructionRequest(
   const user = [
     `【当前范围与预算】${budgetLine}`,
     `【世界观相关来源】`, ...sourceLines,
+    '（来源块方括号内依次是别名｜完整 key｜内容哈希。操作顶层 source 字段可写别名 SRC1 或完整 key；不要写块编号或哈希。）',
     `【本次实体目录】${refLines.join('、') || '（空）'}（已存在对象用目录 ref；新对象用 new:。按名称、类别、父关系核对后复用已有对象，不重复新增走廊等已有空间；局部内部空间必须明确 parent_ref）`,
     `【已存在结构】`, ...memberLines, ...lockLines,
     `【缺项】`, ...missingLines,
@@ -447,11 +477,11 @@ export function buildSqlWorldCompletionTask(
     }
     requested = uniqueSorted(requested);
   }
-  if (requested.length === 0) return null;
+  if (requested.length === 0 && !input.sourceScan) return null;
 
   const policy = normalizeCompletionPolicy(input.policy);
   const plan = planCandidates(tables, branchId, { ...input, focusLocationIds: requested }, policy);
-  if (plan.focusIds.length === 0) return null;
+  if (plan.focusIds.length === 0 && !input.sourceScan) return null;
 
   const sources = input.sourceSelection ?? selectWorldConstructionSources({
     snapshot: input.sourceSnapshot ?? [],
@@ -461,6 +491,7 @@ export function buildSqlWorldCompletionTask(
     maxChars: input.sourceMaxChars ?? WORLD_SOURCE_MAX_CHARS,
     cache: input.worldSourceCache,
   });
+  if (input.sourceScan && !sources.chunks.length) return null;
 
   // 完成状态所属图（P07/R04）：由地点**唯一的 active 容器图**持有。
   // 地点在外部图上的 marker 归属只作目录上下文，绝不参与完成状态的读或写——
@@ -718,5 +749,6 @@ export function normalizeConstructionOps(input: NormalizeConstructionInput): Nor
     issues.push({ code: 'WORLD_CONSTRUCTION_DEFERRED', path: `$.operations.${op.op}.${str(op.ref)}`, message: `${str(op.ref) || op.op} 超出本批地点/路线/深度预算或依赖待处理地点，留待下一批建设。`, severity: 'warning', retryable: true });
     return false;
   });
+
   return { operations: bounded, issues, downgraded, protectedDrops };
 }

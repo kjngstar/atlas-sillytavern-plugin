@@ -41,6 +41,7 @@ import { runNextSync, enqueueProjectionSync } from './atlas-db-outbox.ts';
 import { ATLAS_RUNTIME_LIMITS } from './atlas-runtime-limits.ts';
 import { ATLAS_SCHEMA_VERSION } from './atlas-db-schema.ts';
 import { handleSqlChatRequest } from './atlas-sql-chat.ts';
+import { handleWorldBuildRequest } from './atlas-sql-world-build.ts';
 import { runSqlModelRetry } from './atlas-sql-retry.ts';
 import type { AtlasEnvelope, AtlasModelPort } from './atlas-db-contract.ts';
 import type { SqlDatabase } from './atlas-db-runtime.ts';
@@ -100,6 +101,7 @@ export type SqlSessionOptions = {
   chatMetadata: Record<string, unknown>;
   saveSession: () => Promise<unknown>;
   modelPort?: AtlasModelPort | null;
+  readWorldBuildSources?: () => Promise<readonly import('./atlas-ops-contract.ts').SourceSnapshotEntry[]>;
   writeSession?: (
     context: () => unknown,
     session: unknown,
@@ -135,6 +137,7 @@ export type SqlSession = {
   chatMetadata: Record<string, unknown>;
   saveSession: (() => Promise<unknown>) | null;
   modelPort: AtlasModelPort | null;
+  readWorldBuildSources?: () => Promise<readonly import('./atlas-ops-contract.ts').SourceSnapshotEntry[]>;
   now: () => number;
   confirmSave: boolean;
   isCurrentHost?: () => boolean;
@@ -522,6 +525,7 @@ export async function openSqlSession(options: SqlSessionOptions): Promise<OpenSq
     chatMetadata: options.chatMetadata,
     saveSession,
     modelPort: options.modelPort ?? null,
+    readWorldBuildSources: options.readWorldBuildSources,
     now,
     confirmSave: options.confirmSave ?? true,
     isCurrentHost: options.isCurrentHost,
@@ -675,7 +679,7 @@ export async function runSqlTurn(session: SqlSession, input: TurnInput): Promise
     const result = await flight;
     return result.coreSaved ? { ...result, duplicate: true } : result;
   }
-  const task = (async () => {
+  const task = (async (): Promise<SqlTurnResult> => {
     const rows = queryBound(session.repo.db,
       `SELECT receipt_json FROM turns WHERE branch_id=? AND host_message_uid=? AND host_variant_key=? AND input_hash=? AND status IN ('committed','partial') ORDER BY committed_revision DESC LIMIT 1`,
       [session.branchId, input.anchor.hostMessageUid, input.anchor.variantKey, input.anchor.inputHash]);
@@ -683,10 +687,20 @@ export async function runSqlTurn(session: SqlSession, input: TurnInput): Promise
       const receipt = JSON.parse(rows[0].receipt_json) as TurnReceipt;
       return { receipt, saved: true, coreSaved: true, commit: null, issues: [], duplicate: true };
     }
-      const commit = await session.repo.prepareTurn({ ...input, isCurrent: () => {
+      const prepare = input.worldBuild ? session.repo.prepareWorldBuildBatch : session.repo.prepareTurn;
+      const commit = await prepare({ ...input, isCurrent: () => {
         if (session.closed || session.isCurrentHost && !session.isCurrentHost()) throw new AtlasDbError('SESSION_STALE', '模型等待期间宿主快照已变化，候选不发布', {});
         return !input.isCurrent || input.isCurrent();
       } });
+    if (input.beforePublish) {
+      let valid: boolean;
+      try { valid=await input.beforePublish(); } catch(error) { await session.repo.discardPrepared(commit.token); throw error; }
+      if(!valid){
+        await session.repo.discardPrepared(commit.token);
+        return { receipt: commit.receipt, saved: false, coreSaved: false, commit: null,
+          issues: [{code:'LORE_RUN_TICKET_INVALIDATED',path:'$.sources',message:'来源或读取许可已变化，未保存候选已作废',severity:'error',retryable:true}] };
+      }
+    }
     return await commitPreparedTurn(session, commit, input.isCurrent);
   })();
   flights.set(key, task);
@@ -695,7 +709,7 @@ export async function runSqlTurn(session: SqlSession, input: TurnInput): Promise
 }
 
 /** Retry changes live only in an isolated candidate until the host confirms its save. */
-export async function runSqlRetry(session: SqlSession, input: Omit<FailedGroupRetryInput, 'db'> & { isCurrent?: () => boolean;sceneMaps?:boolean;replacementOperations?:ParsedOperation[];workUsage?:import("./atlas-sql-generation-budget.ts").WorkPlanUsage|null;workBatching?:import("./atlas-work-batching.ts").WorkBatchingSettings }): Promise<FailedGroupRetryResult & { coreSaved: boolean }> {
+export async function runSqlRetry(session: SqlSession, input: Omit<FailedGroupRetryInput, 'db'> & { isCurrent?: () => boolean;sceneMaps?:boolean;replacementOperations?:ParsedOperation[];workUsage?:import("./atlas-sql-generation-budget.ts").WorkPlanUsage|null;workBatching?:import("./atlas-work-batching.ts").WorkBatchingSettings;requestAudit?:import("./atlas-model-call-audit.ts").ModelCallAudit }): Promise<FailedGroupRetryResult & { coreSaved: boolean }> {
   if (input.chatUid !== session.chatUid || input.branchId !== session.branchId) throw new AtlasDbError('CHAT_CHANGED', '补交不属于当前 SQL 会话', {});
   return withChatCommitLock(session.chatUid, async () => {
     if (session.isCurrentHost && !session.isCurrentHost()) throw new AtlasDbError('SESSION_STALE', '补交前宿主快照已变化', {});
@@ -738,6 +752,7 @@ export async function runSqlRetry(session: SqlSession, input: Omit<FailedGroupRe
         receipt.worldChanged = receipt.worldChanged || result.groups.some(g => g.changedRows > 0 && g.purpose !== 'bookkeeping');
         const branchStatus=queryBound(candidate.db,'SELECT simulation_status FROM branches WHERE id=?',[session.branchId])[0]?.simulation_status;
         receipt.status = branchStatus==='catching_up'||branchStatus==='blocked'||receipt.groups.some(g => g.status === 'rejected' || g.status === 'blocked') ? 'partial' : 'committed';
+        if(input.requestAudit)receipt.requestAudit=input.requestAudit;
         if(input.workUsage&&input.workBatching)receipt.requestPlan={normalLimits:workPlanLimits(input.workBatching),extraLimit:input.workBatching.extraRequests,usage:input.workUsage};
         runBound(candidate.db, 'UPDATE turns SET receipt_json=?, status=? WHERE id=?',
           [JSON.stringify(receipt), receipt.status, input.turnId]);
@@ -1011,6 +1026,7 @@ export async function closeSqlSession(session: SqlSession): Promise<void> {
  * Node 模式注入自己那份；**server 核心本身不静态引用任何 sql.js 模块**。
  */
 export type AtlasSqlRuntime = {
+  handleWorldBuildRequest: typeof handleWorldBuildRequest;
   handleSqlChatRequest: typeof handleSqlChatRequest;
   runSqlModelRetry: typeof runSqlModelRetry;
   openSqlSession: typeof openSqlSession;
@@ -1038,6 +1054,7 @@ export async function loadAtlasSqlRuntime(): Promise<AtlasSqlRuntime> {
     import('./atlas-db-knowledge-view.ts'),
   ]);
   return {
+    handleWorldBuildRequest,
     handleSqlChatRequest,
     runSqlModelRetry,
     openSqlSession,

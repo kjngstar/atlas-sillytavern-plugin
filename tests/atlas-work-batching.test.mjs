@@ -45,6 +45,8 @@ test('12 maps use one shared evidence request and one planning request',async()=
   const db=f.repo.getCandidate(result.token).db;for(const id of f.ids)assert.ok(scene(db,id));
   const usage=JSON.parse(queryBound(db,'SELECT decisions_json FROM turns WHERE id=?',[result.receipt.turnId])[0].decisions_json).work_usage;
   assert.deepEqual(usage,{normal:{evidence:1,maps:1},extra:0,transports:2});
+  assert.equal(result.receipt.requestAudit.transports,f.calls.length);assert.deepEqual(result.receipt.requestAudit.byWorkClass,{evidence:1,maps:1});
+  const stored=JSON.parse(queryBound(db,'SELECT receipt_json FROM turns WHERE id=?',[result.receipt.turnId])[0].receipt_json);assert.deepEqual(stored.requestAudit,result.receipt.requestAudit);
  }finally{await f.repo.close();}
 });
 test('three user-selected batches process 12 maps as 4 / 4 / 4 with no repeated evidence',async()=>{
@@ -136,7 +138,7 @@ test('continuation retains used batch quotas until the user adds a batch, withou
  let fail=true;const f=await actorSession(20,{respond:req=>{if(req.phase==='decision'&&fail)throw Error('model temporarily unavailable');}});try{
   const first=await f.turn();assert.equal(first.receipt.status,'partial');assert.equal(f.calls.length,2);fail=false;
   const blocked=await runSqlModelRetry(f.session,{turnId:first.receipt.turnId});assert.equal(blocked.receipt.status,'partial');assert.equal(f.calls.length,2);
-  f.config.characterBatches=2;const resumed=await runSqlModelRetry(f.session,{turnId:first.receipt.turnId});assert.equal(resumed.receipt.status,'committed');assert.equal(f.calls.length,3);assert.equal(f.calls.filter(r=>r.phase==='observe').length,1);
+  f.config.characterBatches=2;const resumed=await runSqlModelRetry(f.session,{turnId:first.receipt.turnId});assert.equal(resumed.receipt.status,'committed');assert.equal(f.calls.length,3);assert.equal(f.calls.filter(r=>r.phase==='observe').length,1);assert.equal(resumed.receipt.requestAudit.transports,f.calls.length);assert.equal(resumed.receipt.requestAudit.calls.at(-1).reason,'background_resume');
   const usage=JSON.parse(queryBound(f.session.repo.db,'SELECT decisions_json FROM turns WHERE id=?',[first.receipt.turnId])[0].decisions_json).work_usage;assert.equal(usage.normal.characters,2);assert.equal(usage.transports,3);
  }finally{await f.session.repo.close();}
 });

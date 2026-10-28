@@ -325,9 +325,13 @@ export function createAtlasSqlRouteGroup(deps: AtlasSqlRouteGroupDeps) {
         });
       }
 
+      if (route === '/sql/world-build/start' || route === '/sql/world-build/batch' || route === '/sql/world-build/control') {
+        const session = await sessionFor(chatUid, branchId, runtime);
+        return okResult(await runtime.handleWorldBuildRequest(session, route.slice('/sql/world-build/'.length), record, () => deps.sessionProvider?.saved(session)));
+      }
       if (route.startsWith('/sql/chat/')) {
         const session = await sessionFor(chatUid, branchId, runtime);
-        const data = await runtime.handleSqlChatRequest(session, route.slice('/sql/chat/'.length), record);
+        const data = await runtime.handleSqlChatRequest(session, route.slice('/sql/chat/'.length), record, () => deps.sessionProvider?.saved(session));
         if (data.coreSaved === true) deps.sessionProvider?.saved(session);
         return okResult(data);
       }

@@ -7,8 +7,8 @@
 
 export const ATLAS_RUNTIME_LIMITS = {
   responseUtf8Bytes: 256 * 1024,
-  operationsPerResponse: 64,
-  operationUtf8Bytes: 8 * 1024,
+  /** Planned construction work per window; never a parser or response acceptance limit. */
+  constructionOperationsPerBatch: 64,
   /** map.layout.request 的 spec 预算（与空间生成器 inputBytes 一致）。 */
   layoutSpecUtf8Bytes: 64 * 1024,
   responseJsonDepth: 16,
@@ -27,6 +27,10 @@ export const ATLAS_RUNTIME_LIMITS = {
   containerDepth: 4,
   actionPlanDepth: 2,
   detailedAttemptsPerTurn: 20,
+  /** Compact transport records per turn; totals survive when older detail is evicted. */
+  modelCallAuditLimit: 256,
+  /** Safe model/turn events retained across refresh in this browser session. */
+  diagnosticCallHistoryLimit: 1000,
   diagnosticPageSize: 100,
   /** M4：只读目录视图单页上限（完整导出走游标，不允许一次全量）。 */
   catalogViewMaxLimit: 200,
@@ -43,12 +47,6 @@ export const ATLAS_RUNTIME_LIMITS = {
   /** 单个批次最多把本次目标再向下展开的父边数。 */
   additionalParentDepthPerBatch: 2,
   batchOutputReserveTokens: 384,
-  /** 单张概览图的分区上限（G11 场景体积预算）。 */
-  overviewZoneLimit: 64,
-  /** 单张概览图的地物上限。 */
-  overviewFeatureLimit: 128,
-  /** 单张概览图的连接（路线/水系）上限。 */
-  overviewLinkLimit: 128,
   /** 保存场景（maps.frame_json.atlasScene）的 UTF-8 字节上限，与 vendor 生成器一致。 */
   sceneSaveUtf8Bytes: 512 * 1024,
   /** 定向引用目录单次解析的最大条目数（超过则要求更窄的目标范围）。 */
@@ -68,11 +66,6 @@ export const ATLAS_RUNTIME_LIMITS = {
  * 与 ATLAS_RUNTIME_LIMITS 同属「集中到本文件，其他文件只能 import」的约定。
  */
 export const ATLAS_FIELD_LIMITS = {
-  aliasLimit: 8,
-  capabilityLimit: 16,
-  mobilityProfileLimit: 8,
-  itemPropertyLimit: 16,
-  participantsLimit: 16,
   geometryVertexLimit: 256,
   mentionRecentLimit: 8,
   journeySegmentLimit: 32,
@@ -97,14 +90,6 @@ export const ACTION_PAYLOAD_REF_LIMIT = 8;
 export const ACTION_DEPENDS_LIMIT = 8;
 /** §4.4：JourneySegment 默认至多 32 段。 */
 export const JOURNEY_SEGMENT_LIMIT = 32;
-/** §3.3：人物能力列表默认至多 16 项。 */
-export const CAPABILITY_LIMIT = 16;
-/** §2.4：每实体默认至多 8 种当前移动方式。 */
-export const MOBILITY_PROFILE_LIMIT = 8;
-/** §3.2：aliases 最多 8 个。 */
-export const ALIAS_LIMIT = 8;
-/** §5.1：participants_json 至多 16 个。 */
-export const PARTICIPANTS_LIMIT = 16;
 /** §2.4 / §11.3：每 Geometry 对象默认上限 256 顶点。 */
 export const GEOMETRY_VERTEX_LIMIT = 256;
 /** §6.5：recent_turn_ids_json 最近至多 8 次提及。 */
@@ -115,5 +100,3 @@ export const MENTION_LOREBOOK_LIMIT = 8;
 export const MENTION_CONTEXT_SUMMARY_CHARS = 200;
 /** §8.3：why 最多 200 字。 */
 export const WHY_MAX_CHARS = 200;
-/** §3.4：properties_json 至多 16 项。 */
-export const ITEM_PROPERTY_LIMIT = 16;

@@ -7,7 +7,7 @@ const scope={chatId:'topology',branchId:'b',revision:1,viewMode:'author'};
 const location=(id,parent='floor',map='floor-map')=>({id,branch_id:'b',status:'active',kind:'room',name:id,parent_location_id:parent,map_id:map});
 const map=(id,container,w,h)=>({id,branch_id:'b',status:'active',container_location_id:container,name:id,row_rev:1,frame_json:{cols:w,rows:h},meters_per_cell:1,scale_quality:'estimated'});
 const floor=map('floor-map','floor',24,24),kitchen=map('kitchen-map','kitchen',4,3);
-const locations=[location('floor',null,null),location('hall'),location('kitchen')];
+const locations=[{...location('floor',null,null),kind:'floor'},location('hall'),location('kitchen')];
 const routes=[{id:'hall-kitchen',branch_id:'b',status:'open',kind:'door',from_location_id:'hall',to_location_id:'kitchen',bidirectional:1}];
 const spec={rooms:[{id:'hall',side:'north',w:12,h:8},{id:'kitchen',side:'south',w:4,h:3}],contents:[]};
 function context(row=floor,extra={}){
@@ -112,10 +112,9 @@ test('不能满足直接连接时拒绝生成并保留原图，不用走廊冒�
  assert.equal(out.ok,false);assert.ok(out.issues.some(i=>i.code==='ROOM_CONNECTION_NO_SPACE'));assert.deepEqual(out.kept,previous);
  const portal=context(floor,{routes:[{...routes[0],kind:'portal'}]});assert.deepEqual(portal.roomConnections,[],'传送门不能强制共墙');
 });
-test('建筑层的楼层轮廓不再登记下级房间家具的另一套身份',()=>{
+test('建筑总览拒绝把整层作为平面房间，不能借楼层轮廓登记下级房间的另一套家具',()=>{
  const top=map('inn-map','inn',40,60),floorLocation={...location('floor','inn','inn-map'),kind:'floor'};
  const out=Kit.compileSceneGroup({scope,currentScope:scope,mapRow:top,maps:[top,floor,kitchen],locations:[location('inn',null,null),floorLocation,...locations.filter(l=>l.id!=='floor')],characters:[],items:[],routes:[],turnId:'t',operationId:'outline',autoPlan:true,request:{kind:'floor',spec:{rooms:[{id:'floor',side:'north',w:25,h:24}],contents:[{id:'guessed-counter',roomId:'floor',type:'desk',w:3,h:1}]}}});
- assert.equal(out.ok,true,JSON.stringify(out.issues));assert.equal(out.scene.layout.groups.length,0);
- assert.ok(out.issues.some(i=>i.code==='FURNISHING_DETAIL_DELEGATED'));
- const child=out.group.mutations.find(m=>m.rowId===floor.id);assert.deepEqual(child.after.frame_json.atlasSpaceCanonical.furnishing,[]);
+ assert.equal(out.ok,false);assert.ok(out.issues.some(i=>i.code==='VERTICAL_SPACE_NAVIGATION_ONLY'));
+ assert.equal(out.group??null,null,'非法平铺请求不能生成父图或子图的写入组');
 });

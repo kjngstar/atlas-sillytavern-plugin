@@ -133,7 +133,7 @@ test('PATCH-REF04 crowded map prompt never emits actor objects whose reference w
     assert.ok(task);
     assert.ok(task.catalogue.remainingIds.length>0,'the fixture must exercise an actual budget limit');
     for(const actor of scopes(task)[0].actors){assert.ok(actor.ref,'missing actor reference');assert.ok(actor.roomId);}
-    assert.ok(scopes(task)[0].actors.length<=LIMITS.actors,'the model must not be asked to exceed its own actors collection limit');
+    assert.ok(scopes(task)[0].actors.length > 128, '人物目录未被旧的标点数量上限裁剪');
     assert.equal(task.request.promptInput.injectionText,task.request.messages[1].content);
   }finally{seed.close();}
 });
@@ -217,7 +217,7 @@ test('PATCH-SAFETY01 a hidden proxy remains absent from the protagonist scene',a
   }finally{seed.close();}
 });
 
-test('PATCH-CROWD01 SQL occupant reconciliation keeps a crowded floor within the actor budget and keeps the protagonist',async()=>{
+test('PATCH-CROWD01 SQL occupant reconciliation retains the full crowded roster and the protagonist',async()=>{
   const seed=await makeSeedWith(SQL);
   try{
     const ids=Array.from({length:150},(_,n)=>`A_CROWD_${String(n).padStart(4,'0')}`);
@@ -227,9 +227,9 @@ test('PATCH-CROWD01 SQL occupant reconciliation keeps a crowded floor within the
     const tables=createTableReadPort(seed.db),characters=pageAllRows(tables,'characters',branchId);
     const result=reconcileOccupantsSpec({scene:null,requestSpec:{rooms:[{id:IDS.L3,w:20,h:15,side:'north'}],contents:[]},
       characters,locations:pageAllRows(tables,'locations',branchId),items:[]});
-    assert.equal(result.spec.actors.length,LIMITS.actors);
+    assert.equal(result.spec.actors.length,151);
     assert.ok(result.spec.actors.some(a=>a.id===IDS.C1));
-    assert.ok(result.issues.some(i=>i.code==='ACTOR_MARKER_BUDGET_DEFERRED'));
+    assert.ok(!result.issues.some(i=>i.code==='ACTOR_MARKER_BUDGET_DEFERRED'));
     assert.equal(pageAllRows(tables,'characters',branchId).length,characters.length,'no SQL entity is removed by a render budget');
   }finally{seed.close();}
 });

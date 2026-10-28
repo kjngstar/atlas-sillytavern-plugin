@@ -34,7 +34,6 @@ import {
 } from '../src/atlas-spatial-frame.ts';
 import {
   SPACE_CANONICAL_FRAME_KEY,
-  SPACE_CANONICAL_MAX_FURNISHING,
   isSpaceLocalId,
   locationSpaceSize,
   parseSpaceLocalId,
@@ -851,15 +850,14 @@ test('SPACE07：fork 复制 canonical 且分支独立；POV 不下发尺寸依�
 
 // ───────────────────────── 账本边界与布局任务接线 ─────────────────────────
 
-test('空间权威有界：超上限明确 deferred 且保留原记录，坏记录不被采用', async () => {
+test('空间权威保留大型陈设账本，坏记录不被采用', async () => {
   const furnishing = (count) => Array.from({ length: count }, (_, i) => ({
     localId: spaceLocalId(ROOM, `f-${i}`), type: 'chair', name: `椅${i}`,
     itemId: null, widthM: 0.5, heightM: 0.5, quality: 'layout',
   }));
-  const canonical = { version: 1, locationId: ROOM, revision: 2, size: null, furnishing: furnishing(SPACE_CANONICAL_MAX_FURNISHING + 1) };
+  const canonical = { version: 1, locationId: ROOM, revision: 2, size: null, furnishing: furnishing(129) };
 
-  // 1) 真实写入路径（候选 → buildSceneMutation）遇到超限旧账本：**明确 deferred 且原记录逐字节保留**，
-  //    绝不静默裁剪成 128 条、也不放宽 LIMITS.sceneBytes 去装新家具。
+  // 1) 真实写入路径保留全部旧陈设，并合并本次场景中的新陈设。
   const seed = await roomSeed();
   const db = seed.db;
   db.run('BEGIN');
@@ -867,21 +865,20 @@ test('空间权威有界：超上限明确 deferred 且保留原记录，坏记�
     writeFrame(db, MAP_ROOM, { ...readFrame(db, MAP_ROOM), [SPACE_CANONICAL_FRAME_KEY]: canonical });
     const beforeWrite = readFrame(db, MAP_ROOM)[SPACE_CANONICAL_FRAME_KEY];
     const out = applyPendingSpatialRequests({ db, scope: SCOPE, turnId: TURN, ports: makePorts() });
-    assert.ok(out.issues.some((i) => i.code === 'SPACE_FURNISHING_DEFERRED'), JSON.stringify(out.issues));
+    assert.ok(!out.issues.some((i) => i.code === 'SPACE_FURNISHING_DEFERRED'), JSON.stringify(out.issues));
     const afterWrite = readFrame(db, MAP_ROOM)[SPACE_CANONICAL_FRAME_KEY];
-    assert.equal(afterWrite.furnishing.length, SPACE_CANONICAL_MAX_FURNISHING + 1, '原记录不被裁剪');
-    assert.deepEqual(afterWrite, beforeWrite, '超限时原记录逐字节保留');
-    assert.equal(SPACE_CANONICAL_MAX_FURNISHING, Kit.SPACE_CANONICAL_MAX_FURNISHING, '宿主上限与 kit 上限是同一个数');
+    assert.equal(afterWrite.furnishing.length, 130, '原有 129 条与本次新增陈设共同保留');
+    assert.ok(beforeWrite.furnishing.every(entry => afterWrite.furnishing.some(next => next.localId === entry.localId)), '更新不能丢失旧陈设');
   } finally {
     db.run('ROLLBACK');
     seed.close();
   }
 
-  // 2) 读取超限 → 记录仍在、明确 deferred（不静默裁剪成 128 条）。
+  // 2) 大型账本完整读回，不因原来的 128 条上限 deferred。
   const read = readSpaceCanonical({ cols: 100, rows: 80, [SPACE_CANONICAL_FRAME_KEY]: canonical }, ROOM);
   assert.equal(read.ok, true);
-  assert.equal(read.deferred, true);
-  assert.equal(read.canonical.furnishing.length, SPACE_CANONICAL_MAX_FURNISHING + 1);
+  assert.equal(read.deferred, false);
+  assert.equal(read.canonical.furnishing.length, 129);
 
   // 3) 身份不符 / 结构损坏 → 不采用。
   const mismatch = readSpaceCanonical({ [SPACE_CANONICAL_FRAME_KEY]: canonical }, HALL);

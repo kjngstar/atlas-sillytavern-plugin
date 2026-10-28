@@ -14,6 +14,8 @@ import { querySqlCharacterTimeline } from './atlas-sql-timeline.ts';
 import { handleSqlMapAction } from './atlas-sql-map-actions.ts';
 import { toLegacyTurnReceipt } from './atlas-db-state-adapter.ts';
 import { runSqlTurn, runSqlRollback } from './atlas-sql-session.ts';
+import { rememberWorldBuildSources, startWorldBuildAfterTurn, suspendWorldBuildForForeground, hasActiveWorldBuild, hasWorldBuildOwnership } from './atlas-sql-world-build.ts';
+import { currentBuildJob } from './atlas-world-build-execution.ts';
 import { planRollback } from './atlas-db-rollback.ts';
 import { summarizeRollbackPlan, type RollbackPreviewTurn } from './atlas-rollback-preview.ts';
 import { buildHistoryRepairPreview, resolveMergedId } from './atlas-history-repair.ts';
@@ -173,7 +175,7 @@ function chatSources(request: AtlasTurnCommitRequest, playerName: string): TurnI
 }
 
 /** Called by the explicit /sql/chat/* routes; no old session document is returned. */
-export async function handleSqlChatRequest(session: SqlSession, action: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
+export async function handleSqlChatRequest(session: SqlSession, action: string, body: Record<string, unknown>, onSaved?: () => void): Promise<Record<string, unknown>> {
   if(action==='ui-read'){
     const kind=text(body.kind);
     if(!(VIEW_KINDS as readonly string[]).includes(kind))throw new AtlasDbError('INVALID_PAYLOAD','未知的只读视图',{});
@@ -181,7 +183,10 @@ export async function handleSqlChatRequest(session: SqlSession, action: string, 
     const isFeed=kind==='world-feed';
     const feedFilter=isFeed?parseFeedFilter(body.feedFilter):undefined;
     const maxLimit=isFeed?ATLAS_RUNTIME_LIMITS.feedPageMax:200;
-    const query:ViewQuery={kind:kind as ViewQuery['kind'],branchId:session.branchId,viewMode:body.viewMode==='author'?'author':'pov',
+    const query:ViewQuery={kind:kind as ViewQuery['kind'],branchId:session.branchId,
+      // P08 §14：显式 `player` 是完整已记录世界（去掉内部字段）；缺省仍是 `pov`，
+      // 因为模型输入与角色决策走的是同一条只读口，默认不能悄悄放宽成全量。
+      viewMode:body.viewMode==='author'?'author':body.viewMode==='player'?'player':'pov',
       revision:typeof body.revision==='number'?body.revision:undefined,entityId:text(body.entityId)||undefined,mapId:text(body.mapId)||undefined,
       selectedEntityId:text(body.selectedEntityId)||undefined,
       entityKind:(CATALOG_ENTITY_KINDS as readonly string[]).includes(text(body.entityKind))?body.entityKind as ViewQuery['entityKind']:undefined,
@@ -229,7 +234,9 @@ export async function handleSqlChatRequest(session: SqlSession, action: string, 
       } catch { return []; }
     });
     return {...querySqlSceneState({db:session.repo.db,branchId:session.branchId,revision:session.repo.internal.currentRevision(),
-      povId:protagonist(session),viewMode:'author',assets:((session.chatMetadata.atlas as {database?:AtlasEnvelope}|undefined)?.database?.assets??[])}, {chatUid:session.chatUid,worldUid:session.worldUid,worldName:session.branchName}),binding:logicalBinding,retryContext,receipts};
+      // P08 §14：这里缺省保持 author（工作台靠它做编辑），玩家界面必须显式要 `player`。
+      povId:protagonist(session),viewMode:body.viewMode==='player'?'player':body.viewMode==='pov'?'pov':'author',
+      assets:((session.chatMetadata.atlas as {database?:AtlasEnvelope}|undefined)?.database?.assets??[])}, {chatUid:session.chatUid,worldUid:session.worldUid,worldName:session.branchName,worldBuildRunning:hasActiveWorldBuild(session),worldBuildBusy:hasWorldBuildOwnership(session)}),binding:logicalBinding,retryContext,receipts};
   }
   assertEnabled(session);
   // M3/W08：UI 显式重试布局 —— 只给这张地图的 failed 请求开新 ticket/opID，
@@ -285,6 +292,7 @@ export async function handleSqlChatRequest(session: SqlSession, action: string, 
     return { receipt, nativeReceipt: result.receipt, coreSaved: result.coreSaved, issues: result.issues };
   }
   if (action === 'prepare') {
+    suspendWorldBuildForForeground(session);
     const parsed = parseAtlasTurnPrepareRequest(body);
     if (!parsed.ok || parsed.value.chatId !== session.chatUid) throw new AtlasDbError('INVALID_PAYLOAD', 'SQL prepare 请求形状或聊天身份不符', {});
     const request = parsed.value;
@@ -309,6 +317,9 @@ export async function handleSqlChatRequest(session: SqlSession, action: string, 
       throw new AtlasDbError('SQL_PREPARE_EXPIRED', '本轮 SQL prepare 已失效，请重新生成；不会回落到三表写入', {});
     }
     const sources = chatSources(request, text(body.playerName));
+    rememberWorldBuildSources(session, sources);
+    const buildJob = currentBuildJob(session.repo.db, session.branchId);
+    const initializing = buildJob && ['pending', 'running', 'paused'].includes(buildJob.status);
     const variantKey = text(body.variantKey) || request.swipeId || 'original';
     const input: TurnInput = { anchor: { ...(prepared?.anchor ?? { chatUid: session.chatUid, branchId: session.branchId,
         parentTurnId: session.repo.internal.currentHeadTurnId(), baseRevision: session.repo.internal.currentRevision(), baseStorageRevision: session.repo.storageRevision }),
@@ -319,10 +330,14 @@ export async function handleSqlChatRequest(session: SqlSession, action: string, 
       hostMessageIndex: request.assistantMessageId,
       sceneMaps:true,
       povName: text(body.playerName),
-      layoutMaps:'active',
-      worldCompletion: localWorldCompletion(session, manual),
+      layoutMaps: initializing ? undefined : 'active',
+      worldCompletion: initializing ? undefined : localWorldCompletion(session, manual),
       isCurrent: typeof body.isCurrent === 'function' ? body.isCurrent as () => boolean : undefined };
     const result = await runSqlTurn(session, input);
+    if (result.coreSaved && !result.duplicate) {
+      try { await startWorldBuildAfterTurn(session, sources, onSaved); }
+      catch (error) { result.issues.push({ code: 'WORLD_BUILD_START_FAILED', path: '$.worldBuild', message: error instanceof Error ? error.message : '建设启动失败', severity: 'warning', retryable: true }); }
+    }
     const receipt = toLegacyTurnReceipt(result.receipt, { coreSaved: result.coreSaved });
     receipt.status = result.coreSaved ? result.duplicate ? 'duplicate' : 'committed' : 'failed';
     if (!result.coreSaved) {

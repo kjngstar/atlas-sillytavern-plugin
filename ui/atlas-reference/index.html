@@ -74,6 +74,7 @@
     </div>
 
     <div class="crumbs" id="crumbs" data-ui-slot="breadcrumb"></div>
+    <select id="floorSwitcher" class="profile-switcher floor-switcher" aria-label="切换建筑楼层" hidden></select>
 
     <div class="tb-right"><select id="profileSwitcher" class="profile-switcher" data-ui-slot="profileSwitcher" aria-label="界面显示范围"><option value="full">完整界面</option><option value="mapFocus">地图专注</option><option value="mapOnly">纯地图</option></select>
       <div class="stat-pill" id="syncPill">
@@ -117,16 +118,15 @@
     <!-- ── 左面板 ── -->
     <aside class="panel panel-left" id="panelLeft" data-ui-slot="locationTree">
       <div class="p-head">
-        <div class="p-title"><svg class="p-ico"><use href="#i-layers"></use></svg><span>层级图层</span></div>
+        <div class="p-title"><svg class="p-ico"><use href="#i-layers"></use></svg><span>地图目录</span></div>
         <div class="p-head-act">
           <button class="mini-btn" id="btnLocate" data-tip="定位主角" aria-label="查看主角位置"><svg><use href="#i-target"></use></svg></button>
-          <button class="mini-btn" id="leftCollapse" data-tip="折叠" aria-label="折叠地图层级"><svg><use href="#i-chev"></use></svg></button>
+          <button class="mini-btn" id="leftCollapse" data-tip="折叠" aria-label="折叠地图目录"><svg><use href="#i-chev"></use></svg></button>
         </div>
       </div>
 
-      <div class="depth-ladder" id="depthLadder"></div>
-
       <div class="p-scroll">
+        <div class="p-sec" id="spaceNavigation"></div>
         <div class="p-sec">
           <div class="sec-h"><span>地图树</span><em id="treeCount">—</em></div>
           <div class="tree" id="layerTree"></div>
@@ -254,7 +254,7 @@
 </div>
 
 <!-- ═══════════ 命令面板 ═══════════ -->
-<button id="reopenLeft" class="panel-toggle reopen-left" aria-label="展开地图层级">‹</button><button id="reopenRight" class="panel-toggle reopen-right" aria-label="展开详情">›</button><button id="windowRestore" class="window-restore" hidden="">重新打开 ATLAS</button><div id="demoModal" class="demo-modal" hidden=""><section class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="modalTitle"><header><h3 id="modalTitle"></h3><button id="modalClose" aria-label="关闭对话框">×</button></header><div id="modalBody"></div></section></div><div class="palette-wrap" id="paletteWrap">
+<button id="reopenLeft" class="panel-toggle reopen-left" aria-label="展开地图目录">‹</button><button id="reopenRight" class="panel-toggle reopen-right" aria-label="展开详情">›</button><button id="windowRestore" class="window-restore" hidden="">重新打开 ATLAS</button><div id="demoModal" class="demo-modal" hidden=""><section class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="modalTitle"><header><h3 id="modalTitle"></h3><button id="modalClose" aria-label="关闭对话框">×</button></header><div id="modalBody"></div></section></div><div class="palette-wrap" id="paletteWrap">
   <div class="palette-backdrop"></div>
   <div class="palette" role="dialog" aria-modal="true" aria-label="搜索地图对象">
     <div class="pal-head">

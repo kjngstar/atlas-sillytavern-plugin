@@ -24,6 +24,7 @@ import { decodeRow } from './atlas-db-codec.ts';
 import { tableColumnNames } from './atlas-db-schema.ts';
 import { ATLAS_RUNTIME_LIMITS } from './atlas-runtime-limits.ts';
 import { resolveEffectivePosition } from './atlas-sim-position.ts';
+import { readObjectStateFacts, patchedPassability } from './atlas-space-state.ts';
 import type { SqlDatabase } from './atlas-db-runtime.ts';
 import type { Issue } from './atlas-ops-contract.ts';
 
@@ -257,6 +258,45 @@ export function evaluateCondition(
         const rows = queryBound(world.db, sql, params);
         if (rows.length === 0) return leafResult(false, `EVENT_MATCH_NONE:${eventKind}`, null);
         return leafResult(true, null, eventAtS(decodeOrNull('events', rows[0])));
+      }
+      /**
+       * §18.4：门上锁了，旅行与消息就不能无条件穿过。
+       *
+       * 状态唯一来源是世界事实层（与正文、决策切片同一份）；从没记录过状态时
+       * 报 SPACE_STATE_UNKNOWN 而不是放行 —— 不知道不等于能走。
+       */
+      case 'space_state': {
+        const rawObject = str(body.object_ref);
+        if (!rawObject) return leafResult(false, 'CONDITION_FIELD_MISSING:space_state.object_ref', null);
+        const locationId = str(body.location_ref);
+        const objectId = rawObject.startsWith('space:')
+          ? rawObject
+          : locationId
+            ? `space:${locationId}:furn:${rawObject.replace(/^furn:/, '')}`
+            : '';
+        if (!objectId) return leafResult(false, 'CONDITION_FIELD_MISSING:space_state.location_ref', null);
+
+        const state = readObjectStateFacts(world, objectId);
+        if (!state) return leafResult(false, `SPACE_STATE_UNKNOWN:${objectId}`, null);
+
+        const expectedOpening = body.openingState === undefined
+          ? null
+          : Array.isArray(body.openingState) ? body.openingState.map(String) : [String(body.openingState)];
+        if (expectedOpening && !expectedOpening.includes(state.openingState)) {
+          return leafResult(false, `SPACE_OPENING_STATE:${objectId}=${state.openingState}`, null);
+        }
+        if (body.locked !== undefined && state.locked !== body.locked) {
+          return leafResult(false, `SPACE_LOCKED:${objectId}=${String(state.locked)}`, null);
+        }
+        if (body.present !== undefined && state.present !== body.present) {
+          return leafResult(false, `SPACE_PRESENT:${objectId}=${String(state.present)}`, null);
+        }
+        if (expectedOpening || body.locked !== undefined || body.present !== undefined) {
+          return leafResult(true, null, null);
+        }
+        // 只给了对象、没给期望值：按「现在能不能过去」判。
+        const pass = patchedPassability(state);
+        return leafResult(pass.blocksMovement !== true, `SPACE_BLOCKED:${objectId}`, null);
       }
       default:
         return leafResult(false, `CONDITION_UNSUPPORTED:${kind}`, null);

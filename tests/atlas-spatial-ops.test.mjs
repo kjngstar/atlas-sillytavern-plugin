@@ -64,10 +64,10 @@ test('明确删除的陈设 ID 穿过编译边界，防止几何层重新并回�
  seed.db.close();
 });
 
-test('P07-01 编译器注册：map.layout.request 在编译表里且 15 个操作都在', () => {
+test('P07-01 编译器注册：map.layout.request 在编译表里且 16 个操作都在', () => {
   const table = compilerTable();
   assert.ok(table.includes('map.layout.request'), 'COMPILERS 必须注册 map.layout.request');
-  assert.equal(table.length, 15, '14 个原有操作 + map.layout.request = 15');
+  assert.equal(table.length, 16, '15 个原有操作 + space.state.patch = 16');
   assert.ok(allowedOpsForPhase('geography').includes('map.layout.request'), 'geography 阶段必须放行');
 });
 

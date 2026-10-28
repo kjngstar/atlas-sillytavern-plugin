@@ -54,6 +54,30 @@ function context(input = {}) {
 const generate = (spec, ctx, previousScene = null) =>
   Kit.generateOverview(spec, { ...ctx, previousScene, currentScope: SCOPE });
 
+test('邻近建筑保留完整矩形轮廓，不能出现四角重叠', () => {
+  const ctx=context({locations:['A-house','Z-shop'].map(id=>location(id)),mapRow:mapRow({id:'proximity-map',frame_json:{cols:10000,rows:10000},meters_per_cell:1})});
+  ctx.childSpaces=Object.fromEntries(['A-house','Z-shop'].map(id=>[id,{widthM:12,heightM:8}]));
+  const result=generate({surface:'urban',zones:[{id:'A-house',sector:'east'},{id:'Z-shop',near:'A-house'}]},ctx);
+  assert.equal(result.ok,true,JSON.stringify(result.issues));
+  assert.equal(result.scene.layout.shapes.length,2);
+  const boxes=result.scene.layout.shapes.map(s=>({x0:Math.min(...s.polygon.map(p=>p.x)),x1:Math.max(...s.polygon.map(p=>p.x)),y0:Math.min(...s.polygon.map(p=>p.y)),y1:Math.max(...s.polygon.map(p=>p.y))}));
+  const [a,b]=boxes;
+  for(const box of boxes){assert.equal(box.x1-box.x0,12);assert.equal(box.y1-box.y0,8);}
+  assert.ok(Math.min(a.x1,b.x1)<=Math.max(a.x0,b.x0)||Math.min(a.y1,b.y1)<=Math.max(a.y0,b.y0),'真实建筑矩形不得重叠');
+});
+
+test('循环 near 从环内地点起排，排序更早的外部依赖仍保持局部间距', () => {
+  const ids=['A','B','Z'],ctx=context({locations:ids.map(id=>location(id)),mapRow:mapRow({id:'cycle-proximity',frame_json:{cols:10000,rows:10000},meters_per_cell:1})});
+  ctx.childSpaces=Object.fromEntries(ids.map(id=>[id,{widthM:12,heightM:8}]));
+  const spec={surface:'urban',zones:[{id:'A',near:'B',sector:'west'},{id:'B',near:'Z',sector:'east'},{id:'Z',near:'B',sector:'west'}]};
+  const result=generate(spec,ctx);
+  assert.equal(result.ok,true,JSON.stringify(result.issues));
+  assert.equal(result.scene.layout.pins.length,3);
+  const pin=id=>result.scene.layout.pins.find(p=>p.id===id);
+  for(const [a,b]of [['A','B'],['B','Z']])assert.ok(Math.hypot(pin(a).x-pin(b).x,pin(a).y-pin(b).y)<40,`${a} near ${b} 应留在同一簇`);
+  assert.deepEqual(generate({...spec,zones:[...spec.zones].reverse()},ctx).scene.layout,result.scene.layout);
+});
+
 function assertAllFiniteInside(scene) {
   const b = scene.layout.bounds;
   const inside = (p) => Number.isFinite(p.x) && Number.isFinite(p.y)
@@ -360,30 +384,30 @@ test('G06：road_texture 与未知 route link → 不新增路线、纹理标 de
 
 // ───────────────────────────── G11 · 场景体积预算 ─────────────────────────────
 
-test('G11：zones/features/links 超限明确报错，旧场景不被清空', () => {
+test('G11：大型集合完整保留，输入字节与路径复杂度预算仍生效', () => {
   const locations = [location('Z1')];
   const routes = [route('R1', 'Z1', 'Z1')];
   const ctx = context({ locations, routes, mapRow: mapRow({ frame_json: { cols: 100, rows: 80 } }) });
   const previous = generate({ surface: 'mixed', zones: [{ id: 'Z1', role: 'city', size: 'medium', sector: 'north' }], links: [], features: [] }, ctx);
   assert.equal(previous.ok, true, JSON.stringify(previous.issues));
 
-  const tooManyZones = generate({ zones: Array.from({ length: Kit.LIMITS.zones + 1 }, (_, i) => ({ id: `Z${i}`, role: 'city', size: 'small', sector: 'north' })) },
-    ctx, previous.scene);
-  assert.equal(tooManyZones.ok, false);
-  assert.ok(tooManyZones.issues.some((i) => String(i.code).includes('COLLECTION_LIMIT:zones')), JSON.stringify(tooManyZones.issues));
-  assert.deepEqual(tooManyZones.kept.layout, previous.scene.layout, '超限不得清空合法旧场景');
+  const manyLocations = Array.from({ length: 65 }, (_, i) => location(`Z${i}`));
+  const largeContext = context({ locations: manyLocations, routes, mapRow: mapRow({ frame_json: { cols: 100, rows: 80 } }) });
+  const zones = Array.from({ length: 65 }, (_, i) => ({ id: `Z${i}`, role: 'city', size: 'small', sector: 'north' }));
+  const manyZones = generate({ zones }, largeContext);
+  assert.equal(manyZones.ok, true, JSON.stringify(manyZones.issues));
+  assert.equal(manyZones.scene.constraints.zones.length, 65);
 
-  const tooManyFeatures = generate({ features: Array.from({ length: Kit.LIMITS.features + 1 }, (_, i) => ({ id: `F${i}`, type: 'forest_texture' })) },
-    ctx, previous.scene);
-  assert.equal(tooManyFeatures.ok, false);
-  assert.ok(tooManyFeatures.issues.some((i) => String(i.code).includes('COLLECTION_LIMIT:features')), JSON.stringify(tooManyFeatures.issues));
-  assert.deepEqual(tooManyFeatures.kept.layout, previous.scene.layout);
+  const features = Array.from({ length: 129 }, (_, i) => ({ id: `F${i}`, type: 'forest_texture', zoneId: 'Z1' }));
+  const manyFeatures = generate({ features }, ctx, previous.scene);
+  assert.equal(manyFeatures.ok, true, JSON.stringify(manyFeatures.issues));
+  assert.equal(manyFeatures.scene.constraints.features.length, 129);
 
-  const tooManyLinks = generate({ links: Array.from({ length: Kit.LIMITS.links + 1 }, (_, i) => ({ id: `R${i}` })) },
-    ctx, previous.scene);
-  assert.equal(tooManyLinks.ok, false);
-  assert.ok(tooManyLinks.issues.some((i) => String(i.code).includes('COLLECTION_LIMIT:links')), JSON.stringify(tooManyLinks.issues));
-  assert.deepEqual(tooManyLinks.kept.layout, previous.scene.layout);
+  const manyRoutes = Array.from({ length: 129 }, (_, i) => route(`R${i}`, 'Z1', 'Z2'));
+  const routeContext = context({ locations: [location('Z1'), location('Z2')], routes: manyRoutes });
+  const manyLinks = generate({ zones: [{ id: 'Z1', role: 'city' }, { id: 'Z2', role: 'city' }], links: manyRoutes.map(row => ({ id: row.id })) }, routeContext);
+  assert.equal(manyLinks.ok, true, JSON.stringify(manyLinks.issues));
+  assert.equal(manyLinks.scene.constraints.links.length, 129);
 
   // 2049 点折线：确认路线被原样复用，超预算必须在场景校验阶段明确报错，且保留旧场景。
   const longPath = Array.from({ length: Kit.LIMITS.pathPoints + 1 }, (_, i) => ({ x: 1 + (i % 90), y: 1 + ((i * 7) % 70) }));
@@ -405,9 +429,6 @@ test('G11：zones/features/links 超限明确报错，旧场景不被清空', ()
   assert.ok(oversized.issues.some((i) => i.code === 'INPUT_TOO_LARGE'), JSON.stringify(oversized.issues));
 
   // 统一上限常量必须在两处一致（contracts 与运行时限制同源）。
-  assert.equal(Kit.LIMITS.zones, 64);
-  assert.equal(Kit.LIMITS.features, 128);
-  assert.equal(Kit.LIMITS.links, 128);
   assert.equal(Kit.LIMITS.watercourseSegments, 24);
 });
 

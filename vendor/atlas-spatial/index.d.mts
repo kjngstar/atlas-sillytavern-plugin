@@ -50,7 +50,8 @@ export type FloorSpec={
 export type FloorCorridor={id:string;entityId?:string;name?:string;x:number;y:number;w:number;h:number;quality?:SceneQuality};
 /** 门拓扑：真实房间直连时指向另一房间，否则指向通道。 */
 export type FloorEdge={from:string;to:string;via:string;toEntityId?:string;routeId?:string};
-export type FloorLayout={kind:'floor';id:string;name:string;bounds:Bounds;corridor:FloorCorridor;rooms:Array<{id:string;name:string;side:'north'|'south';role?:'indoor'|'outdoor'|'garden';x:number;y:number;w:number;h:number}>;doors:Array<{id:string;roomId:string;x:number;y:number;width:number;wall?:'north'|'south'|'east'|'west';routeId?:string;toRoomId?:string;sourceContentIds?:string[]}>;edges:FloorEdge[];issues?:Array<{id:string;code:string}>};
+export type FloorArea=Bounds&{version:1;id:string;name:string;roomId:string;quality:'estimated'|'confirmed'};
+export type FloorLayout={kind:'floor';id:string;name:string;bounds:Bounds;corridor:FloorCorridor;areas?:FloorArea[];rooms:Array<{id:string;name:string;side:'north'|'south';role?:'indoor'|'outdoor'|'garden';x:number;y:number;w:number;h:number}>;doors:Array<{id:string;roomId:string;x:number;y:number;width:number;wall?:'north'|'south'|'east'|'west';routeId?:string;toRoomId?:string;sourceContentIds?:string[]}>;edges:FloorEdge[];issues?:Array<{id:string;code:string}>};
 
 /** 上下文锁：室内矩形（米）、确认点、任意确认多边形、确认路线几何；空间由 map.metersPerCell 决定。 */
 export type LayoutLocks={
@@ -72,7 +73,7 @@ export type GenerateResult={ok:boolean;status:string;scene:SceneDocument|null;is
 export type RowMutation={table:string;rowId:string;before:Record<string,any>|null;after:Record<string,any>|null;sourceOpIds:string[];basis:Record<string,unknown>};
 export type ScopeTicket={key:string|null;epoch:number};
 export type Renderer={state:Record<string,any>;setScene(doc:SceneDocument|null,options?:{preserveCamera?:boolean}):boolean;setCamera(camera:{s:number;x:number;y:number}):boolean;setOverlays(rows:unknown[]):boolean;setBackgroundImage(image:CanvasImageSource|null,bounds:Bounds,opacity?:number):boolean;draw(timestamp?:number):void;schedule():void;zoomBy(mult:number,anchor?:Point):void;fit():void;resize():void;selectById(id:string):any;focus(id:string):boolean;entities():any[];hit(point:Point):any;setPaused(paused:boolean):void;destroy():void};
-export declare const KIT_VERSION:string,SCENE_KIND:string,SCENE_VERSION:number,FRAME_SCENE_KEY:string,FRAME_SPACE_CANONICAL_KEY:string,SPACE_CANONICAL_MAX_FURNISHING:number;
+export declare const KIT_VERSION:string,SCENE_KIND:string,SCENE_VERSION:number,FRAME_SCENE_KEY:string,FRAME_SPACE_CANONICAL_KEY:string;
 /** §19.4：布局陈设的稳定空间 localId（`space:<地点ID>:furn:<局部ID>`）及其反解；格式只此一处。 */
 export declare function spaceLocalId(locationId:string,contentId:string):string|null;
 export declare function readMetricDimensions(area:unknown):{widthM:number;heightM:number}|null;

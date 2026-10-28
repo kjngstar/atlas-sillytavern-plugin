@@ -8,7 +8,7 @@ Atlas 是一个 SillyTavern 世界引擎扩展。它从世界书与聊天剧情�
 
 [安装](#安装) · [快速上手](#快速上手) · [界面与皮肤](#界面与皮肤) · [常见问题](#常见问题) · [开发与文档](#开发与文档)
 
-当前预发布版本：[v0.9.96-rc.4](https://github.com/kjngstar/atlas-sillytavern-plugin/tree/v0.9.96-rc.4)，包含皮肤系统、地图工具收纳与地图生成流程更新。扩展内版本号仍显示为 `0.9.96`。
+当前版本：[v0.9.99](https://github.com/kjngstar/atlas-sillytavern-plugin/releases/tag/v0.9.99)。包含世界建设任务、分层地图与失败重试；本次合入还修复父子地图导航、邻近地点布局和稀疏地图取景。已发布版本的更新与验证范围见 [0.9.99 更新说明](docs/atlas-0.9.99-更新说明.md)。
 
 ## 能做什么
 

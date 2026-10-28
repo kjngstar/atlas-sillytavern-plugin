@@ -29,6 +29,18 @@ function request(sources = []) {
   req.sourceSnapshot = sources;
   return req;
 }
+test('T-J14 a frozen operation port retains its connection and policy until the next window', async () => {
+  const f = fixture();
+  const frozen = await f.port.freezeWindow();
+  f.settings.apiPresets[0].model = 'next-window-model';
+  f.settings.apiPresets[0].temperature = 0.9;
+  await frozen.request(request());
+  await frozen.withBudget((await import('../src/atlas-sql-generation-budget.ts')).createGenerationBudget({limit:1})).request(request());
+  const next = await f.port.freezeWindow();
+  await next.request(request());
+  assert.deepEqual(f.calls.map(call=>call.body.model), ['fixture-model','fixture-model','next-window-model']);
+  assert.deepEqual(f.calls.map(call=>call.body.temperature), [0.4,0.4,0.9]);
+});
 test('空间布局任务尊重原连接输出上限，不被阶段默认预算压低',async()=>{
  const f=fixture(),req=request();req.batchId='layout_fixture';req.phase='geography';
  f.settings.apiPresets[0].maxTokens=51200;
@@ -88,7 +100,8 @@ test('Q03: full prompt entry capacity cannot silently truncate a compatibility d
   const old = { id: 'full', name: '完整预设', systemPrompt: '', updatedAt: 1, segments: Array.from({length:16}, (_,i) => ({role:'user',content:`条目 ${i}`})) };
   f.settings.promptPresets = [old]; const before = JSON.stringify(f.settings);
   const built = applySettingsCommand(f.settings, {action:'prompt.migrate-sql',id:old.id});
-  assert.equal(built.ok, false); assert.equal(built.code, 'FIELD_LIMIT_EXCEEDED');
+  assert.equal(built.ok, true);
+  assert.deepEqual(built.settings.promptPresets[1].segments.slice(-16), old.segments);
   assert.equal(JSON.stringify(f.settings), before);
 });
 

@@ -2,7 +2,7 @@ import {buildLayoutContext} from './host-context.mjs';
 import {generateFloor,generateCity,generateOverview} from './generation.mjs';
 import {buildSceneMutation,sceneLocationGeometry,canonicalForScene} from './storage.mjs';
 import {projectChildFurnishing} from './space-projection.mjs';
-import {clone,finite,plain,diagnostic,failure,stable,parseSpaceLocalId,FRAME_SPACE_CANONICAL_KEY,SPACE_CANONICAL_MAX_FURNISHING,bytes,LIMITS,readMetricDimensions} from './contracts.mjs';
+import {clone,finite,plain,diagnostic,failure,stable,parseSpaceLocalId,FRAME_SPACE_CANONICAL_KEY,bytes,LIMITS,readMetricDimensions} from './contracts.mjs';
 const GENERATORS={floor:generateFloor,city:generateCity,overview:generateOverview};
 /** Compile one layout request to the existing AtomicGroup shape. No database writes. */
 export function compileSceneGroup({request,scope,currentScope,mapRow,locations,characters,items,routes=[],maps=[],turnId,operationId,spaceSize=null,childSpaces={},autoPlan=false,planningProjection=false}={}){
@@ -21,12 +21,13 @@ export function compileSceneGroup({request,scope,currentScope,mapRow,locations,c
   // 待裁决的旧事实 —— 生成器不能拿旧账本去画新图（那会画出另一个物理尺寸，等于发布半边变化）。
   if(spaceSize&&plain(spaceSize.resolution))ctx.spaceSize={widthM:spaceSize.resolution.widthM,heightM:spaceSize.resolution.heightM,source:spaceSize.resolution.source,quality:spaceSize.resolution.quality,locked:spaceSize.canonical?.size?.locked};
   if(request.kind==='floor'){
-    ctx.childCanonical=Object.fromEntries(maps.filter(m=>m.branch_id===scope.branchId&&m.status==='active'&&locations.some(l=>l.id===m.container_location_id&&l.map_id===mapRow.id)).flatMap(m=>{const frame=typeof m.frame_json==='string'?JSON.parse(m.frame_json):m.frame_json,record=frame?.[FRAME_SPACE_CANONICAL_KEY];return record?.version===1&&record.locationId===m.container_location_id&&record.furnishing?.length<=SPACE_CANONICAL_MAX_FURNISHING?[[record.locationId,record]]:autoPlan?[[String(m.container_location_id),{furnishing:[]}]]:[];}));
+    ctx.childCanonical=Object.fromEntries(maps.filter(m=>m.branch_id===scope.branchId&&m.status==='active'&&locations.some(l=>l.id===m.container_location_id&&l.map_id===mapRow.id)).flatMap(m=>{const frame=typeof m.frame_json==='string'?JSON.parse(m.frame_json):m.frame_json,record=frame?.[FRAME_SPACE_CANONICAL_KEY];return record?.version===1&&record.locationId===m.container_location_id&&Array.isArray(record.furnishing)?[[record.locationId,record]]:autoPlan?[[String(m.container_location_id),{furnishing:[]}]]:[];}));
     ctx.itemsById=Object.fromEntries((items??[]).filter(i=>i.branch_id===scope.branchId&&i.status==='active'&&!i.holder_character_id&&!i.container_item_id).map(i=>[i.id,i]));
     if(autoPlan){
       const delegated=new Set();
       spec.contents=(spec.contents??[]).filter(row=>{
         const owner=locations.find(l=>l.branch_id===scope.branchId&&l.id===row.roomId);
+        if(owner?.kind==='room'&&owner.id===mapRow.container_location_id)return true;
         const nested=locations.some(l=>l.branch_id===scope.branchId&&l.status==='active'&&l.parent_location_id===row.roomId&&(owner?.kind!=='room'||l.kind!=='other'));
         const known=(ctx.childCanonical[row.roomId]?.furnishing??[]).some(f=>(parseSpaceLocalId(f.localId)?.contentId??f.localId)===(parseSpaceLocalId(row.id)?.contentId??row.id))||(ctx.previousScene?.constraints?.contents??[]).some(f=>f.id===row.id&&f.roomId===row.roomId);
         const supported=(spec.items??[]).some(i=>i.on===row.id&&ctx.itemsById[i.id]?.location_id===row.roomId);
@@ -93,7 +94,6 @@ export function compileSceneGroup({request,scope,currentScope,mapRow,locations,c
     if((!plain(previous)||previous.version!==1||previous.locationId!==room.id)&&!autoPlan)continue;
     const projection={...result.scene,layout:{...result.scene.layout,bounds:{x:0,y:0,w:room.w,h:room.h}}};
     const next=canonicalForScene(projection,previous,room.id,null,result.deletedContents);
-    if(next.furnishing.length>SPACE_CANONICAL_MAX_FURNISHING||next.droppedPrev>0)return failure('SPACE_FURNISHING_DEFERRED','$.childSpaces','子空间陈设超出预算，保留父子原记录');
     if(stable(next)===stable(previous??null))continue;
     frame[FRAME_SPACE_CANONICAL_KEY]=next;delete frame.atlasLayoutContext;
     if(bytes(frame)>LIMITS.sceneBytes+65536)return failure('FRAME_TOO_LARGE','$.childSpaces','子空间账本超出框架预算，保留父子原记录');

@@ -14,7 +14,10 @@ import { emptyCompileResult } from './atlas-ops-compile-types.ts';
 import { createRow } from './atlas-db-defaults.ts';
 import { resolveRef } from './atlas-ops-refs.ts';
 import { fieldIgnoredWarning, asString, applyPatch, compileItemTransfer } from './atlas-ops-entities.ts';
-import { PARTICIPANTS_LIMIT } from './atlas-runtime-limits.ts';
+import { planFurnishingMove, planFurnishingPromotion } from './atlas-furnishing-promotion.ts';
+import type { FurnishingPromotionTarget } from './atlas-furnishing-promotion.ts';
+import { resolveFurnishingRef } from './atlas-furnishing-promotion.ts';
+import { readSpaceCanonical } from './atlas-space-canonical.ts';
 
 const EVENT_KINDS = ['ceremony', 'conflict', 'arrival', 'passage', 'discovery', 'trade', 'communication', 'incident', 'other'];
 const EVENT_PHASES = ['scheduled', 'observed', 'simulated'];
@@ -22,7 +25,7 @@ const SECRECY = ['public', 'restricted', 'secret'];
 const CHARACTER_STATUS = ['alive', 'incapacitated', 'dead', 'unknown'];
 const LOCATION_STATUS = ['active', 'destroyed', 'merged', 'archived'];
 const ACTION_RESULT = ['completed', 'failed', 'cancelled'];
-const EFFECT_TYPES = ['character_status', 'item_transfer', 'location_status', 'action_result'];
+const EFFECT_TYPES = ['character_status', 'item_transfer', 'location_status', 'action_result', 'furnishing_move'];
 
 function issue(code: string, path: string, message: string, op: ParsedOperation, extra: Partial<Issue> = {}): Issue {
   return { code, path, message, severity: 'error', retryable: true, opId: op.opId, line: op.line, ...extra };
@@ -122,15 +125,12 @@ export function compileEventPropose(op: ParsedOperation, ctx: CompileContext): C
 
   const participants: Array<{ entity_id: string; role: string }> = [];
   if (Array.isArray(data.participants)) {
-    for (const raw of data.participants.slice(0, PARTICIPANTS_LIMIT)) {
+    for (const raw of data.participants) {
       if (!isPlainObject(raw)) continue;
       const refValue = raw.entity_ref ?? raw.ref ?? raw.entity_id;
       const id = resolveOne(refValue, ['character', 'faction', 'item', 'location'], 'participants');
       if (!id) continue;
       participants.push({ entity_id: id, role: typeof raw.role === 'string' ? raw.role : 'participant' });
-    }
-    if (data.participants.length > PARTICIPANTS_LIMIT) {
-      result.issues.push(issue('FIELD_LIMIT_EXCEEDED', '$.data.participants', `participants 最多 ${PARTICIPANTS_LIMIT} 个`, op));
     }
   }
 
@@ -192,6 +192,10 @@ export function compileEventPropose(op: ParsedOperation, ctx: CompileContext): C
 
   // —— effects：与事件同一原子组 ——
   const effects = data.effects;
+  if (phase === 'scheduled' && Array.isArray(effects) && effects.length) {
+    result.issues.push(issue('SCHEDULED_EFFECTS_NOT_EFFECTIVE', '$.data.effects', '预定事件尚未发生，不能立即落实其效果', op));
+    return result;
+  }
   if (effects !== undefined) {
     if (!Array.isArray(effects)) {
       result.issues.push(issue('FIELD_TYPE_INVALID', '$.data.effects', 'effects 必须是数组', op));
@@ -208,7 +212,39 @@ export function compileEventPropose(op: ParsedOperation, ctx: CompileContext): C
         result.issues.push(issue('EFFECT_TYPE_UNSUPPORTED', `$.data.effects[${i}].type`, `不允许的事件效果类型：${type}`, op));
         continue;
       }
-      if (type === 'character_status') {
+      if (type === 'furnishing_move') {
+        const actorId = resolveOne(data.actor_ref ?? data.subject_ref, ['character'], 'actor_ref');
+        const originId = resolveOne(eff.location_ref, ['location'], `effects[${i}].location_ref`);
+        const actor = actorId ? ctx.tables.selectOne('characters', ctx.branchId, actorId) : null;
+        const origin = originId ? ctx.tables.selectOne('locations', ctx.branchId, originId) : null;
+        const mapId = typeof origin?.map_id === 'string' ? origin.map_id : '';
+        const map = mapId ? ctx.tables.selectOne('maps', ctx.branchId, mapId) : null;
+        const to = isPlainObject(eff.to) ? eff.to : {};
+        const destination = typeof to.location_ref === 'string' ? resolveOne(to.location_ref, ['location'], `effects[${i}].to.location_ref`) : null;
+        const holder = typeof to.holder_ref === 'string' ? resolveOne(to.holder_ref, ['character'], `effects[${i}].to.holder_ref`) : null;
+        const target: FurnishingPromotionTarget | null = destination && !holder ? { kind: 'move', locationId: destination }
+          : holder && !destination ? { kind: 'hold', characterId: holder } : null;
+        const event = { id: eventId, status, actorId, furnishingLocalId: asString(eff.furnishing_ref), accepted: status === 'occurred' };
+        const checked = planFurnishingMove({ phase: 'outcome-effect', event, target,
+          actorExists: id => actor?.id === id && actor.location_id === originId,
+          targetLegal: target => target.kind === 'move' ? target.locationId === originId : target.kind === 'hold'
+            && ctx.tables.selectOne('characters', ctx.branchId, target.characterId)?.location_id === originId });
+        result.issues.push(...checked.issues.map(entry=>({...entry,opId:op.opId,line:op.line,path:`$.data.effects[${i}]${entry.path.slice(1)}`})));
+        if (!checked.allowed || !target) continue;
+        const bound = resolveFurnishingRef(map ? readSpaceCanonical(map.frame_json, originId ?? '').canonical : null, event.furnishingLocalId).furnishing?.itemId;
+        const boundRow = bound ? ctx.tables.selectOne('items', ctx.branchId, bound) : null;
+        const existingItems = new Map<string, Record<string, unknown>>(bound && boundRow ? [[bound, boundRow]] : []);
+        const promotion = planFurnishingPromotion({ phase: 'outcome-effect', branchId: ctx.branchId, turnId, makeId: ctx.makeId, map: map ? { id: mapId, row: map } : null,
+          locationId: originId ?? '', furnishingRef: event.furnishingLocalId, target, event, itemFields: {}, existingItems });
+        result.issues.push(...promotion.issues.map(entry=>({...entry,opId:op.opId,line:op.line})));
+        if (!promotion.group || !promotion.itemId) continue;
+        if (!existingItems.has(promotion.itemId)) {
+          result.mutations.push(mutation('entity_keys', promotion.itemId, null, { branch_id: ctx.branchId, id: promotion.itemId, kind: 'item' }, op, basisWith(ctx, op, [{kind:'event',id:eventId}])));
+          result.entityKeyWrites = [...(result.entityKeyWrites ?? []), { id: promotion.itemId, kind: 'item' }];
+        }
+        result.mutations.push(...promotion.group.mutations.map(entry=>({...entry,sourceOpIds:[op.opId],basis:{...entry.basis,...basisWith(ctx,op,[{kind:'event',id:eventId}])}})));
+        result.readSet.push(...promotion.group.readSet);
+      } else if (type === 'character_status') {
         const targetId = resolveOne(eff.target_ref, ['character'], `effects[${i}].target_ref`);
         if (!targetId) continue;
         const value = String(eff.value ?? '');

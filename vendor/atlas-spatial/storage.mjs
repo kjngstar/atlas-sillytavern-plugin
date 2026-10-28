@@ -1,4 +1,4 @@
-import {FRAME_SCENE_KEY,FRAME_SPACE_CANONICAL_KEY,SPACE_CANONICAL_MAX_FURNISHING,clone,plain,checkSceneDocument,sameScope,diagnostic,failure,bytes,LIMITS,stable,spaceLocalId,parseSpaceLocalId} from './contracts.mjs';
+import {FRAME_SCENE_KEY,FRAME_SPACE_CANONICAL_KEY,clone,plain,checkSceneDocument,sameScope,diagnostic,failure,bytes,LIMITS,stable,spaceLocalId,parseSpaceLocalId} from './contracts.mjs';
 function record(v){if(typeof v==='string')return JSON.parse(v);if(plain(v))return clone(v);throw new Error('FRAME_INVALID');}
 const sizesAgree=(a,b)=>!!a&&!!b&&Math.abs(a.widthM-b.widthM)/Math.max(a.widthM,b.widthM,1e-9)<=0.005&&Math.abs(a.heightM-b.heightM)/Math.max(a.heightM,b.heightM,1e-9)<=0.005;
 /**
@@ -44,7 +44,7 @@ export function canonicalForScene(scene,previous,locationId,authorSize,deletedCo
   }
   const prevList=Array.isArray(previous?.furnishing)?previous.furnishing.filter(plain):[];
   const prevByLocal=new Map(prevList.filter(e=>typeof e.localId==='string').map(e=>[e.localId,e]));
-  const furnishing=[],seen=new Set();let droppedPrev=0;
+  const furnishing=[],seen=new Set();
   for(const content of groups){
     if(typeof content.id!=='string'||!content.id)continue;
     const parsedId=parseSpaceLocalId(content.id);
@@ -58,12 +58,11 @@ export function canonicalForScene(scene,previous,locationId,authorSize,deletedCo
   for(const prev of prevList){
     if(deletedContents.includes(prev.localId)||deletedContents.includes(parseSpaceLocalId(prev.localId)?.contentId))continue;
     if(typeof prev.localId!=='string'||seen.has(prev.localId))continue;
-    if(furnishing.length>=SPACE_CANONICAL_MAX_FURNISHING){droppedPrev+=1;continue;}
     furnishing.push(prev);seen.add(prev.localId);
   }
   const changed=!previous||stable(previous.size??null)!==stable(size)||stable(previous.furnishing??[])!==stable(furnishing);
   const revision=previous&&Number.isInteger(previous.revision)&&previous.revision>=0?(changed?previous.revision+1:previous.revision):1;
-  return {version:1,locationId,revision,size,furnishing,droppedPrev};
+  return {version:1,locationId,revision,size,furnishing};
 }
 export function readSceneFrame(frame,{branchId,mapId}={}){
   try{const doc=record(frame)[FRAME_SCENE_KEY];if(doc===undefined)return {ok:true,scene:null,issues:[]};const issues=checkSceneDocument(doc);if(doc.branchId!==branchId||doc.mapId!==mapId)issues.push(diagnostic('SCENE_SCOPE_MISMATCH','$.atlasScene','场景与当前地图/分支不匹配'));return {ok:issues.length===0,scene:issues.length?null:clone(doc),issues};}catch{return failure('FRAME_JSON_INVALID','$.frame_json','地图框架无法读取，未覆盖原记录');}
@@ -98,13 +97,9 @@ export function buildSceneMutation({result,mapRow,scope,currentScope,turnId,oper
         ?{widthM:spaceSize.resolution.widthM,heightM:spaceSize.resolution.heightM,referenceId:plain(spaceSize.resolution.basis)&&typeof spaceSize.resolution.basis.referenceId==='string'?spaceSize.resolution.basis.referenceId:null,note:'作者确认的地点轮廓'}
         :null;
       const next=canonicalForScene(result.scene,previous,containerId,authorSize,result.deletedContents);
-      if(next.furnishing.length>SPACE_CANONICAL_MAX_FURNISHING||next.droppedPrev>0){
-        issues.push(diagnostic('SPACE_FURNISHING_DEFERRED','$.'+FRAME_SPACE_CANONICAL_KEY,'本空间陈设条目超过首版上限 '+SPACE_CANONICAL_MAX_FURNISHING+'（本轮还需丢弃 '+next.droppedPrev+' 条既有条目）：明确 deferred 并保留原账本（不静默裁剪）',{severity:'warning',entityId:containerId}));
-      }else{
-        const probe=record(frame);probe[FRAME_SPACE_CANONICAL_KEY]=clone(next);
-        if(bytes(probe)<=LIMITS.sceneBytes+65536)frame[FRAME_SPACE_CANONICAL_KEY]=next;
-        else issues.push(diagnostic('SPACE_CANONICAL_TOO_LARGE','$.'+FRAME_SPACE_CANONICAL_KEY,'空间权威写入后超出框架预算：保留原账本，不放宽 LIMITS.sceneBytes',{severity:'warning',entityId:containerId}));
-      }
+      const probe=record(frame);probe[FRAME_SPACE_CANONICAL_KEY]=clone(next);
+      if(bytes(probe)<=LIMITS.sceneBytes+65536)frame[FRAME_SPACE_CANONICAL_KEY]=next;
+      else return failure('SPACE_CANONICAL_TOO_LARGE','$.'+FRAME_SPACE_CANONICAL_KEY,'空间权威与场景总量超出框架预算，原记录未修改');
     }
     if(bytes(frame)>LIMITS.sceneBytes+65536)return failure('FRAME_TOO_LARGE','$.frame_json','框架与细节总量超限，保留原行');
     const after={...before,frame_json:frame,row_rev:before.row_rev+1,updated_turn_id:turnId};
@@ -126,7 +121,7 @@ export function sceneLocationGeometry(scene){
   // 纯辅助通道（没有实体身份）和自身示意一样**不回写**，绝不凭空造一个 SQL 地点。
   const corridorBound=layout.kind==='floor'&&layout.corridor&&typeof layout.corridor.entityId==='string'&&layout.corridor.entityId
     ? [{...layout.corridor,id:layout.corridor.entityId}]:[];
-  const parts=layout.kind==='floor'?[...layout.rooms,...corridorBound]
+  const parts=layout.kind==='floor'?[...layout.rooms,...(layout.areas??[]),...corridorBound]
     :layout.kind==='city'?[...layout.districts,...layout.buildings.filter(b=>!b.decorative)]
       :(layout.shapes??[]).filter(s=>s&&s.placement!=='proxy');
   const centroid=polygon=>{let x=0,y=0;for(const q of polygon){x+=q.x;y+=q.y;}return {x:x/polygon.length,y:y/polygon.length};};

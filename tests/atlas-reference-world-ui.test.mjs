@@ -97,6 +97,39 @@ function boot({data=BUILDING_DATA,host={},preferences={version:1,singleClickEnte
 function withUI(t,options){const ui=boot(options);t.after(ui.dispose);return ui;}
 
 const tick=()=>new Promise(resolve=>setImmediate(resolve));
+test('地图按真实父子关系导航，同类场所可以连续嵌套，界面不显示固定等级',async t=>{
+ const maps=[WORLD,
+  {mapId:'yard',name:'院落',kind:'region',containerLocationId:'Y',containerLocationKind:'other',parentMapId:'world',points:[]},
+  {mapId:'garden',name:'内园',kind:'region',containerLocationId:'G',containerLocationKind:'other',parentMapId:'yard',points:[]},
+  {mapId:'cart',name:'车厢',kind:'interior',containerLocationId:'V',containerLocationKind:'vehicle',parentMapId:'garden',points:[]},
+ ];
+ const data=projectReferenceData({mapView:view(maps),catalogView:view([]),viewMode:'author'});
+ const {w,preview,calls}=withUI(t,{data});preview.go('cart');
+ const chain=data.ROOT.children[0];
+ assert.equal(chain.kind,'other');assert.equal(chain.children[0].kind,'other');
+ assert.equal(chain.children[0].children[0].kind,'vehicle');
+ assert.equal('LEVELS' in data,false);assert.equal('code' in chain,false);
+ assert.deepEqual([...w.document.querySelectorAll('#crumbs [data-go]')].map(b=>b.dataset.go),['world','yard','garden','cart']);
+ assert.doesNotMatch(w.document.getElementById('panelLeft').textContent,/\bL[0-7]\b|层级图层/);
+ assert.equal(w.document.getElementById('depthLadder'),null);
+ w.document.querySelector('#crumbs [data-go="garden"]').click();
+ await tick();
+ assert.equal(preview.state.nodeId,'garden');assert.deepEqual(calls.build,[]);
+});
+test('楼层用原生选择器导航；未明楼层房间保留入口，导航不会偷偷请求生成',async t=>{
+ const upper={mapId:'upper-map',name:'二楼',kind:'interior',containerLocationId:'upper',containerLocationKind:'floor',parentMapId:'bld-map',points:[]};
+ const pantry={mapId:'pantry-map',name:'厨房',kind:'interior',containerLocationId:'pantry',containerLocationKind:'room',parentMapId:'bld-map',points:[]};
+ const data=projectReferenceData({mapView:view([WORLD,BUILDING_MAP,upper,pantry]),catalogView:view([...CATALOG,{entityId:'upper',entityKind:'location',locationKind:'floor',name:'二楼',mapId:'bld-map'},{entityId:'pantry',entityKind:'location',locationKind:'room',name:'厨房',mapId:'bld-map'}]),viewMode:'author'});
+ const generated=[],{w,preview}=withUI(t,{data,host:{layout:id=>generated.push(id),build:id=>generated.push(id)}});
+ preview.go('bld-map');const select=w.document.getElementById('floorSwitcher');
+ assert.equal(select.hidden,false);assert.deepEqual([...select.options].map(o=>o.value),['bld-map','upper-map']);
+ assert.match(w.document.getElementById('spaceNavigation').textContent,/房间 · 楼层未标明/);
+ select.value='upper-map';select.dispatchEvent(new w.Event('change',{bubbles:true}));await tick();assert.equal(preview.state.nodeId,'upper-map');
+ preview.go('pantry-map');assert.equal(select.hidden,true);assert.deepEqual(generated,[]);
+ assert.equal(w.document.getElementById('depthLadder'),null);
+ assert.deepEqual([...w.document.querySelectorAll('#crumbs button')].map(b=>b.dataset.go),['world','bld-map','pantry-map']);
+ assert.match(w.document.getElementById('crumbs').textContent,/测试世界.*钟楼内部.*厨房/);
+});
 test('map tools start tucked away and retain canvas, camera, selection and independent legend state',async t=>{
  const {w,preview,calls}=withUI(t),doc=w.document,canvas=doc.getElementById('map'),toggle=doc.getElementById('mapWidgetsToggle'),widgets=doc.getElementById('mapHudWidgets');
  assert.equal(widgets.hidden,true);assert.equal(toggle.getAttribute('aria-expanded'),'false');

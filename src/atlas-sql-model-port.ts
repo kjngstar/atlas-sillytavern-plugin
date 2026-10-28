@@ -5,6 +5,7 @@ import type { AtlasModelPort } from './atlas-db-contract.ts';
 import type { ModelBatchRequest } from './atlas-ops-contract.ts';
 import { DEFAULT_SQL_PROMPT_SEGMENTS, hasLegacySqlPromptProtocol } from './atlas-sql-prompts.ts';
 import { assemblePromptLayers } from './atlas-prompt-layers.ts';
+import { DEFAULT_SQL_PROMPT_SEGMENTS as SQL_DEFAULT_SEGMENTS, sqlPromptPresetNotice } from './atlas-sql-prompts.ts';
 import { transportBudgetPort, type GenerationBudgetPort } from './atlas-sql-generation-budget.ts';
 import { normalizeModelBatching } from './atlas-model-batching.ts';
 import { atlasDiagnosticContext, observeDiagnostic, type DiagnosticObserver } from './atlas-request-diagnostics.ts';
@@ -76,9 +77,15 @@ export function createSqlModelPort(options: Options): AtlasModelPort {
     policy: request.promptMode === 'atlas-spatial-extract' ? [] : custom.map(s => ({ role: promptRole(s.role), content: substitutePromptPlaceholders(s.content, input) })),
     task: request.messages.slice(1).map(m => m.content),
   });
-  return {preset,input,messages,promptSource: preset.systemPrompt?.trim()?'connection':preset.promptSegments?.length?'preset':'builtin'};
+  // §19.3：只提示、不改写。自定义预设缺当前策略说明时，让界面说清楚「行为可能不一样」。
+  const policyNotice = sqlPromptPresetNotice((preset.promptSegments?.length ? preset.promptSegments : SQL_DEFAULT_SEGMENTS) as Parameters<typeof sqlPromptPresetNotice>[0]);
+  return {preset,input,messages,policyNotice,promptSource: preset.systemPrompt?.trim()?'connection':preset.promptSegments?.length?'preset':'builtin'};
  }
  const port: AtlasModelPort = {
+  async freezeWindow() {
+    const snapshot: unknown = structuredClone(await options.readSettings());
+    return createSqlModelPort({ ...options, readSettings: async () => snapshot });
+  },
   async generationOptions(){
     const raw=await options.readSettings();
     const {settings}=raw&&typeof raw==='object'&&(raw as {schemaVersion?:unknown}).schemaVersion===2?sanitizeSettingsV2(raw):migrateAtlasSettings(raw);
@@ -86,8 +93,8 @@ export function createSqlModelPort(options: Options): AtlasModelPort {
   },
   withBudget: (budget, stage) => createSqlModelPort({ ...options, budget, stage }),
   async preview(request:ModelBatchRequest){
-   const {input,messages,promptSource}=await prepare(request);
-   return {messages:messages.map(message=>({...message,chars:message.content.length})),promptSource,
+   const {input,messages,promptSource,policyNotice}=await prepare(request);
+   return {messages:messages.map(message=>({...message,chars:message.content.length})),promptSource,policyNotice,
     missing:{worldState:Boolean(input.injectionText),lastTurn:false,recentContext:Boolean(input.assistantText)},coreSaved:false};
   },
   async request(request:ModelBatchRequest){
@@ -95,6 +102,9 @@ export function createSqlModelPort(options: Options): AtlasModelPort {
    const context = { ...scoped, details: { ...scoped.details, batchRef: atlasRefFingerprint(request.batchId),
      stage: request.promptMode === 'atlas-spatial-extract' ? 'spatial-extract' : options.stage && options.stage !== 'observe' ? options.stage : request.phase,
      phase: request.phase,
+     workClass: request.workClass??(request.batchTargets?.kind==='maps'?'maps':request.batchTargets?.kind==='characters'?'characters':request.promptMode==='atlas-spatial-extract'?'evidence':request.phase==='geography'?'construction':request.phase==='decision'?'characters':request.phase==='outcome'?'outcomes':'observe'),
+     callReason: request.diagnosticCause??(request.phase==='repair'?'validation_repair':request.retryOf?'retry_unspecified':'scheduled'),
+     ...((request.retryOf??request.repairOfBatchId)?{retryOfBatchRef:atlasRefFingerprint(request.retryOf??request.repairOfBatchId!)}:{}),
      retryKind: request.phase === 'repair' ? 'repair' : request.retryOf || request.repairOfBatchId ? 'retry' : 'normal',
      ...(request.batchTargets ? { targetCount: request.batchTargets.count } : {}) } };
    let prepared;
@@ -109,7 +119,7 @@ export function createSqlModelPort(options: Options): AtlasModelPort {
       if(preset.toolCalling&&((preset.connectionMode??'custom')!=='custom'||(preset.apiFormat??'openai')!=='openai'))throw failure('TOOL_PROTOCOL_UNSUPPORTED','函数输出目前仅支持自定义 OpenAI 兼容连接，请关闭函数输出或切换连接');
       const budget = options.budget;
       const phase = options.stage === 'background' ? 'background' : request.phase || options.stage || 'observe';
-      const logical = budget?.claimBatch(phase, request.batchId,{kind:request.workClass??(request.batchTargets?.kind==='maps'?'maps':request.batchTargets?.kind==='characters'?'characters':request.promptMode==='atlas-spatial-extract'?'evidence':undefined),retry:Boolean(request.retryOf)||request.phase==='repair'});
+      const logical = budget?.claimBatch(phase, request.batchId,{kind:request.workClass??(request.batchTargets?.kind==='maps'?'maps':request.batchTargets?.kind==='characters'?'characters':request.promptMode==='atlas-spatial-extract'?'evidence':undefined),retry:Boolean(request.retryOf)||request.phase==='repair',cause:request.diagnosticCause??(request.phase==='repair'?'validation_repair':request.retryOf?'retry_unspecified':'scheduled'),retryOf:request.retryOf??request.repairOfBatchId,targetCount:request.batchTargets?.count,targetIds:request.diagnosticTargets});
       if (logical && !logical.ok) {
         observeDiagnostic(options.onDiagnostic, { ...context, level: 'warn', source: 'model', code: 'MODEL_REQUEST_DEFERRED',
           operation: 'generation', phase: 'budget', outcome: 'skipped', errorCode: logical.code,
@@ -122,7 +132,10 @@ export function createSqlModelPort(options: Options): AtlasModelPort {
         timeoutMs: preset.timeoutMs ?? request.timeoutMs,
       }, input, {
         fetchFn: options.fetchFn, now: options.now, messagesOverride: messages,
-        onDiagnostic: options.onDiagnostic, diagnosticContext: context,
+        onDiagnostic: event => {
+          try { budget?.recordDiagnostic?.(event); } catch { /* diagnostics must not alter request behavior */ }
+          observeDiagnostic(options.onDiagnostic, event);
+        }, diagnosticContext: context,
         ...(preset.toolCalling&&request.promptMode!=='atlas-spatial-extract'?{responseTool:{name:'emit_atlas_operations',description:'Return the complete Atlas operations exactly once as JSONL in content. Follow the stage operation contract; do not write text outside this call.',parameters:{type:'object',properties:{content:{type:'string',description:'Complete stage reply, one validated operation JSON object per line'}},required:['content'],additionalProperties:false}}}:{}),
         // M3-03A：API 内部兼容路由的第二次真实发送，也走同一局部预算。缺预算 port 时不传，
         // 由 api-client 按最严策略拒发并明确报错（绝不隐藏重试）。

@@ -475,6 +475,8 @@ test('T10-15 prompt 不夹 SQL；只给该阶段允许的操作', async () => {
     assert.deepEqual([...model.calls[0].allowedOps].sort(), [
       'character.upsert', 'event.propose', 'faction.upsert', 'information.propose',
       'item.transfer', 'item.upsert', 'location.upsert', 'relation.upsert',
+      // §5.7/§18.4：正文里真的开关门/上锁时只改状态，不重发整份 scene。
+      'space.state.patch',
     ].sort());
     assert.ok(text.includes('C1='), '提示词应带程序提供的短引用');
   } finally {

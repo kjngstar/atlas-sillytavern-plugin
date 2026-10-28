@@ -7,8 +7,6 @@ export const FRAME_SCENE_KEY = 'atlasScene';
  * 只此一处字面量：宿主 TS 侧从本模块导入，不另写第二份字符串。
  */
 export const FRAME_SPACE_CANONICAL_KEY = 'atlasSpaceCanonical';
-/** 首版陈设条目上限：超限明确 deferred，不静默裁剪、不放宽预算。 */
-export const SPACE_CANONICAL_MAX_FURNISHING = 128;
 /** Physical dimensions carry no position or parent-map polygon. */
 export function readMetricDimensions(area) {
   if (!area || area.kind !== 'dimensions' || !['confirmed','estimated'].includes(area.quality)) return null;
@@ -35,7 +33,8 @@ export function parseSpaceLocalId(value) {
   const locationId = rest.slice(0, at), contentId = rest.slice(at + 6);
   return locationId && contentId ? { locationId, contentId } : null;
 }
-export const LIMITS = Object.freeze({inputBytes:65536, sceneBytes:524288, rooms:24, contents:128, actors:128, items:256, districts:16, buildings:64, blocksPerDistrict:24, floorSide:100, roomSide:40, citySide:20000, navigationCells:180000, markers:512, overlays:256, pathPoints:2048, zones:64, features:128, links:128, watercourseSegments:24});
+/** Resource and algorithm budgets; registered content has no per-kind count quota. */
+export const LIMITS = Object.freeze({inputBytes:65536, sceneBytes:524288, blocksPerDistrict:24, navigationCells:180000, markers:512, overlays:256, pathPoints:2048, watercourseSegments:24});
 /** 02 §10：概览地物类型（含水系 watercourse）。与 src/atlas-ops-normalize.ts 的归一化口径逐字一致。 */
 export const OVERVIEW_FEATURE_TYPES = Object.freeze(['forest_texture','ridge','shore','building_cluster','road_texture','ruins_scatter','watercourse']);
 /** 概览表面类型。 */
@@ -93,6 +92,9 @@ export function parseWholeArguments(value){
 export function checkSceneDocument(doc){
   const issues=[];
   if(!plain(doc)||doc.kind!==SCENE_KIND||doc.version!==SCENE_VERSION)return [diagnostic('SCENE_VERSION_UNSUPPORTED','$','不支持的场景文档版本')];
+  // Check the actual resource budget before walking arbitrarily sized collections.
+  try{if(bytes(doc)>LIMITS.sceneBytes)return [diagnostic('SCENE_TOO_LARGE','$','场景超过 512 KiB，保留原场景')];}
+  catch{return [diagnostic('SCENE_SERIALIZATION_FAILED','$','场景无法序列化')];}
   if(typeof doc.mapId!=='string'||!doc.mapId||typeof doc.branchId!=='string'||!doc.branchId)issues.push(diagnostic('SCENE_ID_INVALID','$.mapId','需要地图与分支标识'));
   if(!['meters','cells'].includes(doc.units)||!plain(doc.layout)||!['floor','city','overview'].includes(doc.layout.kind))issues.push(diagnostic('SCENE_LAYOUT_INVALID','$.layout','需要已生成的布局与明确单位'));
   const b=doc.layout?.bounds;if(!b||![b.x,b.y,b.w,b.h].every(finite)||b.w<=0||b.h<=0)issues.push(diagnostic('SCENE_BOUNDS_INVALID','$.layout.bounds','地图范围必须为有限正尺寸'));
@@ -107,12 +109,13 @@ export function checkSceneDocument(doc){
   const eps=(b&&finite(b.w)&&finite(b.h))?1e-6*Math.max(1,Math.abs(b.w),Math.abs(b.h)):1e-6;
   const inside=p=>point(p)&&p.x>=b.x-eps&&p.x<=b.x+b.w+eps&&p.y>=b.y-eps&&p.y<=b.y+b.h+eps;
   const bad=(value,validate,path)=>{if(!validate(value))issues.push(diagnostic('SCENE_GEOMETRY_INVALID',path,'保存的几何字段不可绘制，使用 SQL 概览'));};
-  const collection=(key,validate,max=4096)=>{
+  const collection=(key,validate,max)=>{
     if(!Array.isArray(shape?.[key]))return;
-    if(shape[key].length>max){issues.push(diagnostic('SCENE_COLLECTION_LIMIT','$.layout.'+key,'保存的几何集合超出预算'));return;}
+    if(max!==undefined&&shape[key].length>max){issues.push(diagnostic('SCENE_COLLECTION_LIMIT','$.layout.'+key,'保存的几何集合超出预算'));return;}
     for(let i=0;i<shape[key].length;i++)bad(shape[key][i],validate,'$.layout.'+key+'['+i+']');
   };
   if(shape?.kind==='floor'){
+    if(shape.hostArea!==undefined)bad(shape.hostArea,p=>rect(p)&&typeof p.id==='string'&&p.id.length>0&&p.x>=b.x-eps&&p.y>=b.y-eps&&p.x+p.w<=b.x+b.w+eps&&p.y+p.h<=b.y+b.h+eps,'$.layout.hostArea');
     bad(shape.corridor,p=>rect(p)||(plain(p)&&[p.x,p.y,p.w,p.h].every(finite)&&p.w===0&&p.h===0&&!p.entityId&&shape.rooms?.length>0),'$.layout.corridor');
     // P11/R03 §18.1：命名走廊绑定。程序几何 ID 永远是 'corridor'，实体身份可选；
     // 绑定的地点**不得**同时出现在普通 rooms 里（同一实体只表达一次）。
@@ -122,9 +125,18 @@ export function checkSceneDocument(doc){
       else if(Array.isArray(shape.rooms)&&shape.rooms.some(r=>r&&r.id===c.entityId))issues.push(diagnostic('SCENE_CORRIDOR_DUPLICATED','$.layout.corridor.entityId','绑定的走廊地点不得同时出现在普通房间列表中'));
     }
     if(plain(c)&&c.name!==undefined&&c.name!==null&&typeof c.name!=='string')issues.push(diagnostic('SCENE_CORRIDOR_INVALID','$.layout.corridor.name','命名走廊的名称必须是字符串'));
-    collection('rooms',p=>rect(p)&&['north','south'].includes(p.side),LIMITS.rooms);
-    collection('groups',p=>rect(p)&&Array.isArray(p.bodies)&&p.bodies.every(rect),LIMITS.contents);collection('bodies',rect);
-    collection('actors',point,LIMITS.actors);collection('items',point,LIMITS.items);collection('doors',p=>point(p)&&finite(p.width)&&p.width>0);collection('windows',point);collection('lamps',point);
+    collection('rooms',p=>rect(p)&&['north','south'].includes(p.side));
+    if(shape.areas!==undefined){
+      if(!Array.isArray(shape.areas))issues.push(diagnostic('SCENE_FUNCTIONAL_AREAS_INVALID','$.layout.areas','功能分区必须是数组'));
+      const hosts=[...shape.rooms,...(shape.hostArea?[shape.hostArea]:[])],ids=new Set();
+      collection('areas',p=>{
+        const host=hosts.find(r=>r.id===p?.roomId);
+        const valid=rect(p)&&p.version===1&&typeof p.id==='string'&&p.id.length>0&&typeof p.name==='string'&&!ids.has(p.id)&&!hosts.some(r=>r.id===p.id)&&['estimated','confirmed'].includes(p.quality)&&host&&p.x>=host.x-eps&&p.y>=host.y-eps&&p.x+p.w<=host.x+host.w+eps&&p.y+p.h<=host.y+host.h+eps;
+        ids.add(p?.id);return valid;
+      });
+    }
+    collection('groups',p=>rect(p)&&Array.isArray(p.bodies)&&p.bodies.every(rect));collection('bodies',rect);
+    collection('actors',point);collection('items',point);collection('doors',p=>point(p)&&finite(p.width)&&p.width>0);collection('windows',point);collection('lamps',point);
   }else if(shape?.kind==='city'){
     const enclosure=shape.enclosure;
     if(enclosure!==undefined&&!CITY_ENCLOSURES.includes(enclosure))issues.push(diagnostic('SCENE_ENUM_INVALID','$.layout.enclosure','城市边界策略非法'));
@@ -138,7 +150,7 @@ export function checkSceneDocument(doc){
     if(shape.river!==null){bad(shape.riverPolygon,polygon,'$.layout.riverPolygon');bad(shape.dock,p=>point(p)&&finite(p.width)&&p.width>0,'$.layout.dock');
       bad(shape.river,p=>plain(p)&&[p.cx,p.amplitude,p.width,p.height].every(finite)&&p.width>0&&p.height>0,'$.layout.river');}
     else if(shape.riverPolygon?.length||shape.dock!==null)issues.push(diagnostic('SCENE_GEOMETRY_INVALID','$.layout.river','无河流的城市不能保留水域或码头'));
-    collection('districts',p=>plain(p)&&polygon(p.polygon)&&point(p.site),LIMITS.districts);collection('buildings',rect);collection('gates',point);
+    collection('districts',p=>plain(p)&&polygon(p.polygon)&&point(p.site));collection('buildings',rect);collection('gates',point);
     for(const key of ['roads','segments'])collection(key,p=>plain(p)&&point(p.a)&&point(p.b)&&finite(p.width)&&p.width>0);
   }else if(shape?.kind==='overview'){
     if(shape.surface!==undefined&&!OVERVIEW_SURFACES.includes(shape.surface))issues.push(diagnostic('SCENE_ENUM_INVALID','$.layout.surface','概览表面类型非法'));
@@ -163,9 +175,9 @@ export function checkSceneDocument(doc){
     const shapeRef=p=>plain(p)&&polygon(p.polygon)&&p.polygon.every(inside);
     const routeRef=p=>plain(p)&&Array.isArray(p.path)&&p.path.length>=2&&p.path.every(inside);
     collection('pins',inside,LIMITS.markers);
-    collection('shapes',shapeRef,LIMITS.zones);
-    collection('routes',routeRef,LIMITS.links);
-    collection('features',feature,LIMITS.features);
+    collection('shapes',shapeRef);
+    collection('routes',routeRef);
+    collection('features',feature);
     // P06/N01：自身示意是**当前地图容器**的范围示意，不是新地点，也不是普通 shape。
     // 它不属于 shapes/features 的实体回写列表，因此这里单独校验（可选字段：旧档没有也合法）。
     if(shape.selfArea!==undefined&&shape.selfArea!==null){
@@ -204,6 +216,5 @@ export function checkSceneDocument(doc){
   scan(doc,'$');
   if(invalidNumber)issues.push(diagnostic('SCENE_NUMBER_INVALID',invalidNumber,'场景坐标和尺寸必须是有限数值'));
   if(invalidCycle)issues.push(diagnostic('SCENE_STRUCTURE_INVALID','$','场景不得含循环或过深结构'));
-  try{if(bytes(doc)>LIMITS.sceneBytes)issues.push(diagnostic('SCENE_TOO_LARGE','$','场景超过 512 KiB，保留原场景'));}catch{issues.push(diagnostic('SCENE_SERIALIZATION_FAILED','$','场景无法序列化'));}
   return issues;
 }

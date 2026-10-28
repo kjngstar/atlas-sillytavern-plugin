@@ -328,7 +328,7 @@ function create(canvas, mini, hooks){
   const CONTENT_MIN_SPAN = 140;
   function contentExtent(){
     const g=st.geo||{};
-    if(st.kind==='floor'&&!g.parentContext)return null;
+    if(st.kind==='floor')return null;
     let x0=Infinity,y0=Infinity,x1=-Infinity,y1=-Infinity;
     const put=(x,y)=>{if(!Number.isFinite(x)||!Number.isFinite(y))return;if(x<x0)x0=x;if(x>x1)x1=x;if(y<y0)y0=y;if(y>y1)y1=y;};
     const pts=list=>{if(Array.isArray(list))for(const p of list)if(Array.isArray(p))put(p[0],p[1]);};
@@ -338,8 +338,6 @@ function create(canvas, mini, hooks){
     for(const r of g.corridorRoutes||[])pts(r.points);
     for(const f of g.overviewFeatures||[]){pts(f&&f.poly);pts(f&&f.line);}
     pts(g.selfArea&&g.selfArea.pts);
-    pts(g.parentContext?.active?.pts);
-    for(const sibling of g.parentContext?.siblings??[])pts(sibling.pts);
     for(const d of g.districts||[])pts(d&&d.pts);
     for(const L of g.lands||[])pts(L&&L.pts);
     for(const p of g.plots||[]){const r=p&&p.r;if(Array.isArray(r))put(r[0],r[1]),put(r[2],r[3]);}
@@ -360,7 +358,8 @@ function create(canvas, mini, hooks){
     return [x0,x1,y0,y1];
   }
   function fitExtent(){
-    if(st.geo.parentContext)return contentExtent()??extent();
+    const host=st.geo.hostArea;
+    if(host&&[host.x,host.y,host.w,host.h].every(Number.isFinite)&&host.w>0&&host.h>0)return [host.x,host.x+host.w,host.y,host.y+host.h];
     // Fit any standalone room to its actual geometry, without changing map units.
     const rooms=st.geo.rooms;
     if(st.kind==='floor'&&rooms?.length===1&&st.geo.corridor?.h===0){
@@ -380,10 +379,35 @@ function create(canvas, mini, hooks){
     return extent();
   }
   function fitPad(){ return contentExtent()?1.12:1.16; }
+  function compactOverviewScale(base){
+    const g=st.geo||{};
+    if(!st.node?.host||!['world','region'].includes(st.kind)||g.parentContext||g.selfArea)return base;
+    if(!contentExtent())return base; // Out-of-frame outliers must not redefine this map's view.
+    // Detailed terrain needs its full geographic view, even with few POIs.
+    if((g.overviewFeatures||[]).some(f=>f.type!=='road_texture'))return base;
+    const places=[],seen=new Set();
+    for(const m of st.node.marks||[]){
+      if(m.type!=='poi'||m.silent||m.proxy||!Number.isFinite(m.x)||!Number.isFinite(m.y))continue;
+      const key=m.id??`${m.x},${m.y}`;
+      if(!seen.has(key)){seen.add(key);places.push(m);}
+    }
+    if(places.length<2||places.length>4)return base;
+    const [x0,x1,y0,y1]=fitExtent(),area=(x1-x0)*(y1-y0);
+    let occupied=0;
+    for(const shape of g.overviewShapes||[]){
+      const pts=(shape.pts||[]).filter(p=>Array.isArray(p)&&Number.isFinite(p[0])&&Number.isFinite(p[1]));
+      if(pts.length)occupied+=(Math.max(...pts.map(p=>p[0]))-Math.min(...pts.map(p=>p[0])))*(Math.max(...pts.map(p=>p[1]))-Math.min(...pts.map(p=>p[1])));
+    }
+    if(!(area>0)||occupied/area>=.45)return base;
+    let spread=0;
+    for(let i=0;i<places.length;i++)for(let j=0;j<i;j++)spread=Math.max(spread,Math.hypot(places[i].x-places[j].x,places[i].y-places[j].y));
+    const screenSpan=Math.min(220,Math.min(st.vw,st.vh)*.42);
+    return spread>0&&screenSpan>0?Math.min(base,screenSpan/spread):base;
+  }
   function fitScale(pad){
     const [x0,x1,y0,y1] = fitExtent();
     pad = pad==null?fitPad():pad;
-    return Math.min(st.vw/((x1-x0)*pad), st.vh/((y1-y0)*pad));
+    return compactOverviewScale(Math.min(st.vw/((x1-x0)*pad), st.vh/((y1-y0)*pad)));
   }
   function fit(anim){
     const s = fitScale();
@@ -436,15 +460,7 @@ function create(canvas, mini, hooks){
     }
     ctx.restore();
 
-    const context=g.parentContext;
-    if(context){
-      for(const sibling of context.siblings){
-        ctx.beginPath();sibling.pts.forEach((p,i)=>i?ctx.lineTo(...p):ctx.moveTo(...p));ctx.closePath();
-        ctx.fillStyle='rgba(100,130,170,.035)';ctx.fill();ctx.strokeStyle='rgba(140,170,200,.45)';ctx.lineWidth=1/st.cam.s;ctx.setLineDash([5/st.cam.s,4/st.cam.s]);ctx.stroke();ctx.setLineDash([]);
-      }
-    }
     ctx.save();
-    if(context?.active?.pts?.length>=3){ctx.beginPath();context.active.pts.forEach((p,i)=>i?ctx.lineTo(...p):ctx.moveTo(...p));ctx.closePath();ctx.clip();}
     if(st.node.host&&st.node.sceneStatus!=='ready') overviewMap(g);
     else if(g.overviewShapes||g.overviewRoutes) overviewMap(g);
     else if(st.kind==='world') worldMap(g);
@@ -456,7 +472,6 @@ function create(canvas, mini, hooks){
     else                       roomMap(g);
     for(const route of g.corridorRoutes??[]){ctx.beginPath();route.points.forEach((p,i)=>i?ctx.lineTo(...p):ctx.moveTo(...p));ctx.strokeStyle=skinColor('road','stroke','rgba(127,212,255,.5)');ctx.lineWidth=1.2/st.cam.s;ctx.setLineDash([6/st.cam.s,4/st.cam.s]);ctx.stroke();ctx.setLineDash([]);}
     ctx.restore();
-    if(context?.active){ctx.beginPath();context.active.pts.forEach((p,i)=>i?ctx.lineTo(...p):ctx.moveTo(...p));ctx.closePath();ctx.strokeStyle='rgba(67,224,255,.6)';ctx.lineWidth=1.4/st.cam.s;ctx.stroke();}
   }
 
   // SQL overview geometry is usable before a decorative floor/city layout
@@ -776,7 +791,9 @@ function create(canvas, mini, hooks){
       ctx.setLineDash([4/st.cam.s,5/st.cam.s]);
       ctx.lineWidth=4/st.cam.s; ctx.strokeStyle=hexA(d.c,.10); ctx.stroke();
       ctx.setLineDash([]);
-      // 内部街巷肌理
+      // The sample scene has decorative texture. Real SQL maps use only saved
+      // geometry: hundreds of random blocks otherwise drown the few real places.
+      if(!st.node.host){
       let bx0=1e9,bx1=-1e9,by0=1e9,by1=-1e9;
       d.pts.forEach(p=>{ bx0=Math.min(bx0,p[0]); bx1=Math.max(bx1,p[0]); by0=Math.min(by0,p[1]); by1=Math.max(by1,p[1]); });
       ctx.save();
@@ -791,21 +808,27 @@ function create(canvas, mini, hooks){
         ctx.fillStyle=hexA(d.c, .05+rr()*.12); ctx.fill();
       }
       ctx.restore();
+      }
       ctx.restore();
       let cx=0,cy=0; d.pts.forEach(p=>{ cx+=p[0]; cy+=p[1]; });
       cx/=d.pts.length; cy/=d.pts.length;
       pushLabel(cx, cy-7, d.name, d.c, 'name', true);
-      pushLabel(cx, cy+11, d.id.slice(0,4).toUpperCase()+' · 街区', 'rgba(140,170,200,.72)', 'sub', true);
+      pushLabel(cx, cy+11, '街区 · 范围示意', 'rgba(140,170,200,.72)', 'sub', true);
     });
+    ctx.save();ctx.strokeStyle=skinColor('road','stroke','rgba(150,205,255,.26)');ctx.lineWidth=1.4/st.cam.s;ctx.setLineDash([6/st.cam.s,5/st.cam.s]);
+    for(const road of g.avenues||[]){ctx.beginPath();ctx.moveTo(...road.from);ctx.lineTo(...road.to);ctx.stroke();}
+    ctx.setLineDash([]);
+    for(const b of g.cityBuildings||[]){ctx.beginPath();rrect(ctx,b.x,b.y,b.w,b.h,2);ctx.fillStyle=skinColor('floorWall','fill','rgba(127,212,255,.12)');ctx.fill();ctx.strokeStyle=skinColor('floorWall','stroke','rgba(127,212,255,.6)');ctx.stroke();}
+    ctx.restore();
     // 环路 / 放射大道 / 环形城墙：
     // 这三段读的是 `g.rings` / `g.radials` / `g.walls` —— 仓库里**没有任何生产方**会产出它们
     // （referenceGeometry 的 city 分支只下发 districts/river/wallPoints/avenues）。
     // 留着它们等于留了一条"没数据也能画出一圈城墙"的伪造路径，与 G07「open city 不画默认城墙」冲突，
     // 所以整段删除。真实城墙只看 wallPoints（由 layout.wall 投影，空数组就是开放式城市）。
     // 中心
-    ctx.save();
+    if(!st.node.host){ctx.save();
     ctx.beginPath(); ctx.arc(0,0,7/st.cam.s,0,7); ctx.fillStyle='rgba(255,255,255,.25)'; ctx.fill();
-    ctx.restore();
+    ctx.restore();}
   }
 
   /* ── L3 街区 ── */
@@ -936,9 +959,10 @@ function create(canvas, mini, hooks){
     const seed = hash(st.node.id);
     const rooms=g.rooms||[];
     const planTop=rooms.length?Math.min(...rooms.map(r=>r.y)):-280;
+    if(g.hostArea){const r=g.hostArea;ctx.save();ctx.beginPath();rrect(ctx,r.x,r.y,r.w,r.h,6);ctx.fillStyle=skinColor('floorWall','fill','rgba(67,224,255,.06)');ctx.fill();ctx.strokeStyle=skinColor('floorWall','stroke','rgba(67,224,255,.4)');ctx.lineWidth=1.3/st.cam.s;ctx.stroke();ctx.restore();pushLabel(r.x+r.w/2,r.y+r.h-12/st.cam.s,r.name||st.node.name,'#7fd4ff','sub',true);}
     // 走廊
     const c = g.corridor;
-    if(c.w>0&&c.h>0){
+    if(!g.hostArea&&c.w>0&&c.h>0){
     ctx.save();
     ctx.beginPath(); rrect(ctx,c.x,c.y-c.h/2,c.w,c.h,8);
     ctx.fillStyle=skinColor('corridor','fill','rgba(38,62,98,.55)'); ctx.fill();
@@ -1007,7 +1031,7 @@ function create(canvas, mini, hooks){
     });
 
     // 陈设（M6-06②：按**真实 roomId** 归属，不再靠几何包含猜；ID 稳定可直接命中）
-    (g.rooms||[]).forEach(r=>{
+    [...(g.rooms||[]),...(g.hostArea?[g.hostArea]:[])].forEach(r=>{
       const x=r.x, y=r.y, w=r.w, h=r.h;
       const tint = r.tint || '120,180,255';
       (g.furn||[]).forEach(f=>{
@@ -1020,8 +1044,8 @@ function create(canvas, mini, hooks){
       // M6-06③：副标题只写**真实字段**。旧代码在这里硬写「禁书区 · 上锁」——
       // 那是示例世界的文案，会被原样印到任何世界的图上。现在有 status 用 status，
       // 没有就写中性描述，绝不为哪个房间编一个剧情状态。
-      pushLabel(x+w/2, y+h/2 - 4, r.name, !!r.live?C.cyan:'#a8bdd6', !!r.live?'live':'name', true);
-      pushLabel(x+w/2, y+h-13, r.status || (r.kind==='vehicle'?'车厢内部':r.role==='garden'?'园林 · 示意':r.role==='outdoor'?'室外 · 示意':r.kind==='exit'?'通道':'房间'), 'rgba(140,170,200,.75)','sub', true);
+      if(r!==g.hostArea){pushLabel(x+w/2, y+h/2 - 4, r.name, !!r.live?C.cyan:'#a8bdd6', !!r.live?'live':'name', true);
+      pushLabel(x+w/2, y+h-13, r.status || (r.kind==='vehicle'?'车厢内部':r.role==='garden'?'园林 · 示意':r.role==='outdoor'?'室外 · 示意':r.kind==='exit'?'通道':'房间'), 'rgba(140,170,200,.75)','sub', true);}
     });
 
     // Saved window geometry was projected but never drawn. Keep the reference page's cyan glazing.
@@ -1762,7 +1786,7 @@ function create(canvas, mini, hooks){
     else if(st.kind==='district'){ (st.geo.plots||[]).forEach(p=>{ const q=T(p.r[0],p.r[1]); mctx.fillStyle='rgba(120,180,255,.22)'; mctx.fillRect(q[0],q[1],(p.r[2]-p.r[0])*s,(p.r[3]-p.r[1])*s); }); }
     else if(st.kind==='building'||st.kind==='floor'||st.kind==='room'||st.kind==='detail'){
       mctx.strokeStyle='rgba(67,224,255,.5)';
-      if(st.kind==='floor'){ const c=st.geo.corridor; const q=T(c.x,c.y-c.h/2); mctx.strokeRect(q[0],q[1],c.w*s,c.h*s);
+      if(st.kind==='floor'){ const c=st.geo.hostArea??st.geo.corridor; const q=T(c.x,c.y-(st.geo.hostArea?0:c.h/2)); mctx.strokeRect(q[0],q[1],c.w*s,c.h*s);
         (st.geo.rooms||[]).forEach(r=>{ const p=T(r.x,r.y); mctx.strokeRect(p[0],p[1],r.w*s,r.h*s); }); }
       else if(st.kind==='building'){ (st.geo.wings||[]).forEach(g2=>{ const p=T(g2.x-g2.w/2,g2.y-g2.h/2); mctx.strokeRect(p[0],p[1],g2.w*s,g2.h*s); }); }
       else { const W=st.geo.walls; const p=T(W.x,W.y); mctx.strokeRect(p[0],p[1],W.w*s,W.h*s);

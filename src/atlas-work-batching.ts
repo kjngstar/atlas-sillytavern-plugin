@@ -1,3 +1,6 @@
+/** Trusted program reasons for starting another model transport; shared with diagnostics. */
+export const MODEL_CALL_REASONS = ['scheduled', 'transport_retry', 'format_repair', 'evidence_repair', 'missing_map_reply', 'batch_split', 'validation_repair', 'background_resume', 'retry_unspecified'] as const;
+export type ModelCallReason = (typeof MODEL_CALL_REASONS)[number];
 /** A batch is one compatible workload, never one entity or one SQL table. */
 export type WorkBatchingSettings = {
   mapBatches: number;

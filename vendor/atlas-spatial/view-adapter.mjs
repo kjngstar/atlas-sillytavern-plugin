@@ -54,7 +54,7 @@ export function filterSceneForView(scene,{scope,visibleLocations=[],visibleChara
   if(!author){
     // Never pass internal diagnostics, input constraints or unknown extension fields to POV.
     const top=['kind','version','generator','mapId','branchId','sourceRevision','units','metersPerCell','metricQuality'];
-    const keys={floor:['id','name','kind','bounds','corridor','rooms','groups','bodies','doors','windows','lamps','doorSwings','actors','items','path'],city:['id','name','kind','bounds','wall','origin','river','riverPolygon','districts','roads','segments','gates','buildings','dock'],overview:['id','name','kind','bounds','surface','pins','shapes','routes','features','selfArea']};
+    const keys={floor:['id','name','kind','bounds','corridor','rooms','areas','hostArea','groups','bodies','doors','windows','lamps','doorSwings','actors','items','path'],city:['id','name','kind','bounds','wall','origin','river','riverPolygon','districts','roads','segments','gates','buildings','dock'],overview:['id','name','kind','bounds','surface','pins','shapes','routes','features','selfArea']};
     const saved=d.layout;d=Object.fromEntries(top.filter(k=>d[k]!==undefined).map(k=>[k,d[k]]));d.layout=Object.fromEntries((keys[saved.kind]??[]).filter(k=>saved[k]!==undefined).map(k=>[k,saved[k]]));
   }
   const s=d.layout;
@@ -62,6 +62,8 @@ export function filterSceneForView(scene,{scope,visibleLocations=[],visibleChara
   const name=p=>({...p,name:names[p.id]??p.name??''});
   if(s.kind==='floor'){
     s.rooms=s.rooms.filter(r=>allowed(r.id,'location')).map(name);const rooms=new Set(s.rooms.map(r=>r.id));
+    if(s.hostArea){if(allowed(s.hostArea.id,'location')){s.hostArea=name(s.hostArea);rooms.add(s.hostArea.id);}else delete s.hostArea;}
+    if(s.areas)s.areas=s.areas.filter(area=>rooms.has(area.roomId)&&allowed(area.id,'location')).map(name);
     /**
      * P11/R03 §18.2 第 9 条 + COR06：命名走廊与房间共用同一套 POV 过滤。
      * - 走廊可见（作者视角，或绑定地点在可见集合里）→ 走廊的陈设/人物/灯保留，实体 ID 与名称一起下发（点击导航要用它）；
@@ -110,6 +112,8 @@ function stripLayoutForPov(s){
       // 子图导航共用同一个地点 ID。不可见时上面已经把这两个字段删掉了。
       corridor:p=>pick(p,'id','entityId','name','x','y','w','h'),
       rooms:p=>pick(p,'id','name','x','y','w','h','side','role'),
+      areas:p=>pick(p,'version','id','name','roomId','x','y','w','h','quality'),
+      hostArea:p=>pick(p,'id','name','x','y','w','h','quality'),
       groups:p=>({...pick(p,'id','name','roomId','x','y','w','h'),...(Array.isArray(p.bodies)?{bodies:p.bodies.map(b=>pick(b,'x','y','w','h')).filter(Boolean)}:{})}),
       bodies:p=>pick(p,'x','y','w','h','roomId'),
       doors:p=>pick(p,'x','y','width','roomId','wall'),

@@ -383,25 +383,13 @@ function buildOperation(
   }
 
   const source = value['source'];
+  if (source !== undefined && (typeof source !== 'string' && (!Array.isArray(source) || source.some(entry => typeof entry !== 'string')))) {
+    issues.push(issue('SOURCE_UNKNOWN', '$.source', `line ${candidate.line}: source must be a string or an array containing only strings; operation rejected`, { line: candidate.line, retryable: true }));
+    return { kind: 'error' };
+  }
   if (typeof source === 'string') modelOp.source = source;
   else if (Array.isArray(source)) {
-    const list = source.filter((entry): entry is string => typeof entry === 'string');
-    if (list.length > 0) modelOp.source = list;
-    else {
-      issues.push(
-        issue(ATLAS_ERROR_CODES.FIELD_IGNORED, '$.source', `line ${candidate.line}: source array has no string entries; ignored`, {
-          severity: 'warning',
-          line: candidate.line,
-        }),
-      );
-    }
-  } else if (source !== undefined && source !== null) {
-    issues.push(
-      issue(ATLAS_ERROR_CODES.FIELD_IGNORED, '$.source', `line ${candidate.line}: source must be a string or string array; ignored`, {
-        severity: 'warning',
-        line: candidate.line,
-      }),
-    );
+    modelOp.source = source;
   }
 
   const why = value['why'];
@@ -577,25 +565,8 @@ export function parseOperations(payload: string, ctx: ParseContext): ParseResult
     for (const candidate of lineCandidates(source)) candidates.push(candidate);
   }
 
-  const limit = ATLAS_RUNTIME_LIMITS.operationsPerResponse;
-  let validCount = 0;
-  let firstDroppedLine: number | undefined;
-
   for (const candidate of candidates) {
     const bytes = utf8ByteLength(candidate.raw);
-    if (bytes > ATLAS_RUNTIME_LIMITS.operationUtf8Bytes) {
-      issues.push(
-        issue(
-          ATLAS_ERROR_CODES.OPERATION_TOO_LARGE,
-          '$',
-          `operation on line ${candidate.line} is ${bytes} bytes, over the ${ATLAS_RUNTIME_LIMITS.operationUtf8Bytes} byte per-operation limit; line skipped, other lines unaffected`,
-          { line: candidate.line, retryable: true },
-        ),
-      );
-      incomplete = true;
-      continue;
-    }
-
     let value: unknown;
     try {
       value = JSON.parse(candidate.raw);
@@ -636,26 +607,7 @@ export function parseOperations(payload: string, ctx: ParseContext): ParseResult
       explicitNoop = true;
       continue;
     }
-    validCount += 1;
-    if (operations.length >= limit) {
-      if (firstDroppedLine === undefined) firstDroppedLine = candidate.line;
-      continue;
-    }
     operations.push(built.parsed);
-  }
-
-  if (validCount > limit) {
-    issues.push(
-      issue(
-        ATLAS_ERROR_CODES.TOO_MANY_OPERATIONS,
-        '$',
-        `response contains ${validCount} valid operations, over the ${limit} per-response limit; kept the first ${limit} and reported the remaining ${
-          validCount - limit
-        } (no silent drop)`,
-        { line: firstDroppedLine, retryable: true },
-      ),
-    );
-    incomplete = true;
   }
 
   return { operations, issues, explicitNoop, incomplete };

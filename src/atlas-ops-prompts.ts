@@ -84,6 +84,7 @@ const MINIMUM_HELP: Record<string, string> = {
   'map.estimate': 'ref + 尺寸或距离依据',
   'route.propose': 'from_ref, to_ref',
   'map.layout.request': 'ref + kind(overview/city/floor，以程序给定值为准) + spec（只写本次变化的约束：overview 用 surface/zones/links/features，city 用 districts/buildings/enclosure/riverWidth，floor 用 rooms/contents/actors/items，每条都要 id）；省略的键保持原样，删除只能写 spec.deletes；不要输出完整 scene、几何坐标、seed 或比例尺',
+  'space.state.patch': 'ref=地图引用 + data.updates 数组，每项 objectRef（本图陈设/门引用，同名家具必须配 locationRef）与至少一个变化字段：openingState=open/closed/not-applicable/unknown、locked=true/false、material=solid/glass/wood/fabric/other/unknown、present=true/false；只改状态，不改尺寸/占地，不重发 scene；canOpen/blocksMovement/blocksSight 是派生值，写了必须和门自身状态一致',
   noop: '无修改',
 };
 
@@ -99,6 +100,7 @@ const PHASE_TASK: Record<Phase, string[]> = {
     '心理/倾向可以依据人物设定合理更新，并保持简短。',
     '正文明确建立或改变人物关系时用 relation.upsert 保存；只有同场出现不证明互相认识。明确的消息、公告或传言用 information.propose 登记，公开发布写 secrecy=public 与 spread_at_ref，明确告知谁写 recipient_ref；地点有风声不等于主角已听见。不要把每句闲聊变成传言，也不要把秘密设成公开。',
     '已完成行为用 event.propose 的 activity={kind:dialogue/meal/rest/sleep/travel/combat/other,completed:true} 和 time_hint={elapsed_s:明确秒数} 或 {min_s,nominal_s,max_s}。未完成计划用completed:false，不能推进时间。已完成赶路可引用真实subject_ref人物和route_ref路线，由程序按距离及人物能力计算耗时。',
+    '正文明确开门/关门/上锁/破坏门窗柜架时，用 space.state.patch 记录那件东西当前的状态；不要为了改一扇门重发整份房间布局。',
     '同一正文中的行为有明确先后（先、随后、之后、再）时，每个 event.propose 使用唯一 ref="new:别名"，后一个 time_hint.after_ref 指向本轮前一个事件的 ref；同时进行才用 time_hint.same_interval_as。两者互斥，不用 a0 等数组下标，不引用被省略或无效的事件。例如先走60秒再交谈120秒：第一条 ref="new:walk",time_hint={elapsed_s:60}；第二条 ref="new:talk",time_hint={elapsed_s:120,after_ref:"new:walk"}。顺序应合计180秒，同时应取120秒；没有依据不要自行声称先后。',
   ],
   geography: [
@@ -130,6 +132,8 @@ const PHASE_TASK: Record<Phase, string[]> = {
     '后台可以发生真实后果，不需要主角出现在场。',
     '不要重复准备/旅行尚未完成的动作；不要给已死亡者继续安排不适用的主动行动。',
     '用 event.propose，并把关联行动写入 action_ref；必要的角色状态/物品转移放进同一事件的 effects。',
+    '后台真实发生的开关门、上锁、破坏陈设也用 space.state.patch 记成状态事件；尚未发生的打算不写。',
+    '搬动现场已登记陈设时，在绑定 action_ref 的已发生事件 effects 中使用 {type:"furnishing_move",location_ref:"原地点引用",furnishing_ref:"真实局部ID",to:{holder_ref:"同地角色引用"}}；程序原子提升并复用已有物品，不按名字新造。预定事件不附立即效果。',
   ],
   repair: [
     '上一次操作有以下局部问题。其它成功操作已经保留，禁止重复输出或修改它们。',

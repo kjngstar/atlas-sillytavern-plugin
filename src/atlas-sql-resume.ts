@@ -34,7 +34,7 @@ export async function runSqlResume(session: SqlSession, input: {turnId:string;is
       assertCurrent();
       const attempts:Array<Record<string,unknown>>=JSON.parse(String(row.attempts_json??'[]'));
       const history=JSON.parse(String(row.decisions_json));
-      const budget=createGenerationBudget({diagnosticAnchor:anchor,limit:generationOptions.batching.requestsPerOperation??0,workBatching:generationOptions.workBatching,workUsage:history.work_usage??undefined});
+      const budget=createGenerationBudget({diagnosticAnchor:anchor,limit:generationOptions.batching.requestsPerOperation??0,workBatching:generationOptions.workBatching,workUsage:history.work_usage??undefined,requestAudit:receipt.requestAudit});
       const backgroundPort=session.modelPort?logModelAttempts(bindModelBudget(session.modelPort,budget,'background'),session.now,entry=>{
         const finished=Number(entry.finished_wall_ms),started=Number(entry.started_wall_ms);
         attempts.push({id:`att_resume_${anchor.baseStorageRevision}_${attempts.length}`,...entry,duration_ms:Math.max(0,finished-started)});
@@ -60,6 +60,7 @@ export async function runSqlResume(session: SqlSession, input: {turnId:string;is
       receipt.worldChanged ||= simulation.worldChanged;
       receipt.status=simulation.catchingUp||receipt.groups.some(g=>g.status==='rejected'||g.status==='blocked')?'partial':'committed';
       history.work_usage=budget.workUsage();history.work_batching=generationOptions.workBatching;
+      receipt.requestAudit=budget.audit?.();
       if(generationOptions.workBatching)receipt.requestPlan={normalLimits:workPlanLimits(generationOptions.workBatching),extraLimit:generationOptions.workBatching.extraRequests,usage:budget.workUsage()!};
       history.operations.push(...simulation.modelOperations.map(op=>op.value));
       history.operation_meta.push(...simulation.modelOperations.map(({opId,line,rawHash})=>({opId,line,rawHash})));

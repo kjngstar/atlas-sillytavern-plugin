@@ -40,7 +40,6 @@ function setup(value,context,kind){
       mpp=a;metricProposal={metersPerCell:mpp,scaleQuality:'estimated',basis:{source:'layout-extent',widthM:w,heightM:h}};
     }
   }
-  if((kind==='floor'&&(w>LIMITS.floorSide||h>LIMITS.floorSide))||(kind==='city'&&(w>LIMITS.citySide||h>LIMITS.citySide)))throw new Error('EXTENT_TOO_LARGE');
   const issues=[],spec={id:map.id,parentId:map.containerLocationId??null,name:label(map.name)||label(input.name)||map.id,width:w,height:h};
   if(kind==='overview'){
     // P06/N01：容器类别与名称由程序给出；确认轮廓只认「作者确认的多边形」——
@@ -53,9 +52,9 @@ function setup(value,context,kind){
   return {scope,input,map,known,spec,issues,mpp,units,metricProposal,previous:context.previousScene??null};
 }
 const same=(a,b)=>stable(normalizeScope(a))===stable(normalizeScope(b));
-function collection(s,key,limit,kind,normalize){
+function collection(s,key,kind,normalize){
   const values=s.input[key]??[];
-  if(!Array.isArray(values)||values.length>limit)throw new Error('COLLECTION_LIMIT:'+key);
+  if(!Array.isArray(values))throw new Error('COLLECTION_INVALID:'+key);
   const seen=new Set(),out=[];
   for(let n=0;n<values.length;n++){
     const raw=values[n],path='$.'+key+'['+n+']';
@@ -81,8 +80,8 @@ function deletionSet(s,key){
   }
   return out;
 }
-function collectAndMerge(s,key,limit,kind,normalize){
-  const requestRows=collection(s,key,limit,kind,normalize);
+function collectAndMerge(s,key,kind,normalize){
+  const requestRows=collection(s,key,kind,normalize);
   if(s.input.rebuild===true)return requestRows;
   const saved=s.previous?.constraints;
   if(!plain(saved)||!Array.isArray(saved[key]))return requestRows;
@@ -92,7 +91,6 @@ function collectAndMerge(s,key,limit,kind,normalize){
     if(kind&&!s.known[kind].has(raw.id)){s.issues.push(diagnostic('ENTITY_REF_UNKNOWN','$.previousScene.constraints.'+key+'.id','已保存约束引用的实体不在当前分支引用表中',{entityId:raw.id}));continue;}
     try{const row=normalize(raw);out.set(raw.id,{...row,id:raw.id,name:label(raw.name)||raw.id});}catch(e){s.issues.push(diagnostic(String(e.message),'$.previousScene.constraints.'+key,'已保存约束条目不可用，其他独立项继续处理',{entityId:raw.id}));}
   }
-  if(out.size>limit){s.issues.push(diagnostic('COLLECTION_LIMIT:'+key,'$.'+key,'合并已保存约束后超出预算，仅保留本次请求条目'));return requestRows;}
   return sort([...out.values()]);
 }
 function dimensions(raw){if(!finite(raw.w)||!finite(raw.h)||raw.w<=0||raw.h<=0)throw new Error('DIMENSION_INVALID');return {w:raw.w,h:raw.h};}
@@ -161,7 +159,7 @@ function generateFloorOnce(value,context){
       const lock=rectLockOf(ctx,s.spec.corridorLocationRef);
       if(lock)s.spec.corridorLock=lock;
     }
-    s.spec.rooms=collectAndMerge(s,'rooms',LIMITS.rooms,'locations',r=>{const authority=r.id===s.map.containerLocationId?ctx.spaceSize??ctx.spaceCanonical?.size:ctx.childSpaces?.[r.id];const d=ctx.locks?.rooms?.[r.id]?.w>0?dimensions(ctx.locks.rooms[r.id]):authority?dimensions({w:authority.widthM,h:authority.heightM}):dimensions(r);if(d.w>LIMITS.roomSide||d.h>LIMITS.roomSide||!['north','south'].includes(r.side)||r.role!==undefined&&!['indoor','outdoor','garden'].includes(r.role))throw new Error('ROOM_CONSTRAINT_UNSUPPORTED');const locked=trustedLock(ctx,'rooms',r.id);return {...d,side:r.side,...(r.role?{role:r.role}:{}),...(locked?{locked}:{} ),...proxyPlacement(ctx,r.id)};});
+    s.spec.rooms=collectAndMerge(s,'rooms','locations',r=>{if(r.id!==s.map.containerLocationId&&ctx.locationsById?.[r.id]?.kind==='floor')throw new Error('VERTICAL_SPACE_NAVIGATION_ONLY');const authority=r.id===s.map.containerLocationId?ctx.spaceSize??ctx.spaceCanonical?.size:ctx.childSpaces?.[r.id];const d=ctx.locks?.rooms?.[r.id]?.w>0?dimensions(ctx.locks.rooms[r.id]):authority?dimensions({w:authority.widthM,h:authority.heightM}):dimensions(r);if(!['north','south'].includes(r.side)||r.role!==undefined&&!['indoor','outdoor','garden'].includes(r.role))throw new Error('ROOM_CONSTRAINT_UNSUPPORTED');const locked=trustedLock(ctx,'rooms',r.id);return {...d,side:r.side,...(r.role?{role:r.role}:{}),...(locked?{locked}:{} ),...proxyPlacement(ctx,r.id)};});
     // §18.2 第 4 条：rooms 中不得重复出现被绑定的走廊实体 —— 旧约束带来的条目同样要移除。
     if(s.spec.corridorEntityId){
       const before=s.spec.rooms.length;
@@ -169,6 +167,15 @@ function generateFloorOnce(value,context){
       if(s.spec.rooms.length<before)s.issues.push(diagnostic('CORRIDOR_ROOM_DEDUPED','$.rooms','该地点已绑定为命名走廊，不再作为普通房间排布；同一实体只表达一次',{entityId:s.spec.corridorEntityId,severity:'warning'}));
     }
     s.spec.singleRoom=s.spec.rooms.length===1&&s.spec.rooms[0].id===s.map.containerLocationId;
+    // A room can contain a real storage room without ceasing to be a usable
+    // room itself. The solver keeps the host's free floor outside its children.
+    if(!s.spec.singleRoom&&s.map.containerKind==='room'){
+      s.spec.hostRoom={id:s.map.containerLocationId,name:s.map.containerName??s.map.name};
+      s.spec.hostEntryDoors=(ctx.entryDoors??[]).map(d=>{
+        const size=d.sourceRoomSize;
+        return size&&d.quality!=='confirmed'?{...d,x:d.x*s.spec.width/size.w,y:d.y*s.spec.height/size.h}:d;
+      });
+    }
     if(s.spec.singleRoom&&ctx.parentGroups?.length)s.spec.parentGroups=ctx.parentGroups.filter(g=>Math.abs(g.sourceRoomSize.w-s.spec.rooms[0].w)<1e-7&&Math.abs(g.sourceRoomSize.h-s.spec.rooms[0].h)<1e-7).map(g=>({id:g.id,roomId:g.roomId,x:g.x+(s.spec.width-s.spec.rooms[0].w)/2,y:g.y+(s.spec.height-s.spec.rooms[0].h)/2,w:g.w,h:g.h}));
     const actualRooms=new Set(s.spec.rooms.map(r=>r.id));
     s.spec.roomConnections=(ctx.roomConnections??[]).filter(edge=>actualRooms.has(edge.from)&&actualRooms.has(edge.to));
@@ -182,9 +189,10 @@ function generateFloorOnce(value,context){
       return d;
     });
     if(!s.spec.rooms.length){const failed=failure('NO_VALID_ROOMS','$.rooms','没有可生成的有效房间',{kept:s.previous?clone(s.previous):null});failed.issues.push(...s.issues);return failed;}
-    if(s.spec.rooms.reduce((n,r)=>n+Math.ceil(r.w/.2)*Math.ceil(r.h/.2),0)>LIMITS.navigationCells)throw new Error('NAVIGATION_BUDGET_EXCEEDED');
+    if(s.spec.rooms.reduce((n,r)=>n+Math.ceil(r.w/.2)*Math.ceil(r.h/.2),s.spec.hostRoom?Math.ceil(s.spec.width/.2)*Math.ceil(s.spec.height/.2):0)>LIMITS.navigationCells)throw new Error('NAVIGATION_BUDGET_EXCEEDED');
     // §18.2 第 6 条：contents/actors 的 roomId 可以指向绑定的走廊（它是本图的通行空间，不是新实体）。
     const roomIds=new Set(s.spec.rooms.map(r=>r.id));
+    if(s.spec.hostRoom)roomIds.add(s.spec.hostRoom.id);
     if(s.spec.corridorEntityId)roomIds.add(s.spec.corridorEntityId);
     // P12/R03 §19.4：本空间**既有陈设账本**先行。同时刻只补细节/位置，不因换图重新生成整套家具：
     // 账本里已登记而本次请求没提到的条目，按原 localId 的局部 id 回填（尺寸与身份沿用账本）。
@@ -193,8 +201,8 @@ function generateFloorOnce(value,context){
         const parsed=parseSpaceLocalId(entry.localId);
         return !!parsed&&parsed.locationId===s.map.containerLocationId&&!!parsed.contentId;
       });
-    if(ledger.length&&s.spec.singleRoom){
-      const home=s.spec.rooms[0]?.id;
+    if(ledger.length&&(s.spec.singleRoom||s.spec.hostRoom)){
+      const home=s.spec.hostRoom?.id??s.spec.rooms[0]?.id;
       const own=id=>{const parsed=parseSpaceLocalId(id);return parsed?.locationId===s.map.containerLocationId?parsed.contentId:id;};
       s.input.contents=(s.input.contents??[]).map(row=>plain(row)?{...row,id:own(row.id)}:row);
       s.input.items=(s.input.items??[]).map(row=>plain(row)?{...row,on:own(row.on)}:row);
@@ -222,10 +230,10 @@ function generateFloorOnce(value,context){
       if(seeded.length)s.input.contents=[...seeded,...(Array.isArray(s.input.contents)?s.input.contents:[])];
       if(seededItems.length)s.input.items=[...seededItems,...(Array.isArray(s.input.items)?s.input.items:[])];
     }
-    s.spec.contents=collectAndMerge(s,'contents',LIMITS.contents,null,r=>{if(!roomIds.has(r.roomId))throw new Error('ROOM_REF_UNKNOWN');if(!FLOOR_FURNITURE_TYPES.includes(r.type))throw new Error('FURNITURE_TYPE_UNSUPPORTED');const locked=trustedLock(ctx,'contents',r.id);return {...dimensions(r),roomId:r.roomId,type:r.type,...(locked?{locked}:{})};});
+    s.spec.contents=collectAndMerge(s,'contents',null,r=>{if(!roomIds.has(r.roomId))throw new Error('ROOM_REF_UNKNOWN');if(!FLOOR_FURNITURE_TYPES.includes(r.type))throw new Error('FURNITURE_TYPE_UNSUPPORTED');const locked=trustedLock(ctx,'contents',r.id);return {...dimensions(r),roomId:r.roomId,type:r.type,...(locked?{locked}:{})};});
     const groups=new Set(s.spec.contents.map(g=>g.id));
-    s.spec.actors=collectAndMerge(s,'actors',LIMITS.actors,'characters',r=>{if(!roomIds.has(r.roomId)&&!(r.roomId===s.map.containerLocationId&&!s.spec.singleRoom))throw new Error('ROOM_REF_UNKNOWN');if(r.near&&!groups.has(r.near))throw new Error('NEAR_REF_UNKNOWN');const position=trustedLock(ctx,'actors',r.id);return {roomId:r.roomId,...(r.near?{near:r.near}:{}),...(position?{position}:{})};});
-    s.spec.items=collectAndMerge(s,'items',LIMITS.items,'items',r=>{if(!groups.has(r.on))throw new Error('ITEM_SUPPORT_UNKNOWN');return {on:r.on};});
+    s.spec.actors=collectAndMerge(s,'actors','characters',r=>{if(!roomIds.has(r.roomId)&&!(r.roomId===s.map.containerLocationId&&!s.spec.singleRoom))throw new Error('ROOM_REF_UNKNOWN');if(r.near&&!groups.has(r.near))throw new Error('NEAR_REF_UNKNOWN');const position=trustedLock(ctx,'actors',r.id);return {roomId:r.roomId,...(r.near?{near:r.near}:{}),...(position?{position}:{})};});
+    s.spec.items=collectAndMerge(s,'items','items',r=>{if(!groups.has(r.on))throw new Error('ITEM_SUPPORT_UNKNOWN');return {on:r.on};});
     return finish(s,ctx,E.floor);
   }catch(e){return failure(String(e.message),'$','生成请求不可用；保留已保存布局',{kept:context?.previousScene?clone(context.previousScene):null});}
 }
@@ -237,13 +245,28 @@ export function generateCity(value,context){
     if(s.input.riverWidth!==undefined&&(!finite(s.input.riverWidth)||s.input.riverWidth<0))return failure('RIVER_CONSTRAINT_INVALID','$.riverWidth','河宽应为非负数，零表示无水系',{kept:s.previous?clone(s.previous):null});
     s.spec.riverWidth=s.input.riverWidth??0;
     s.spec.seed=label(context.seed)||s.map.id; // The program provides the seed; the AI cannot reshuffle a saved city.
-    s.spec.blocksPerDistrict=Number.isInteger(s.input.blocksPerDistrict)?Math.max(0,Math.min(LIMITS.blocksPerDistrict,s.input.blocksPerDistrict)):8;
+    s.spec.blocksPerDistrict=Number.isInteger(s.input.blocksPerDistrict)?Math.max(0,Math.min(LIMITS.blocksPerDistrict,s.input.blocksPerDistrict)):(s.previous?.constraints?.blocksPerDistrict??0);
     // G07：新城市默认开放边界；旧档（无 enclosure 且有旧场景）保持原有城墙输出，升级不拆旧墙。
     if(s.input.enclosure!==undefined&&!CITY_ENCLOSURES.includes(s.input.enclosure))s.issues.push(diagnostic('ENCLOSURE_INVALID','$.enclosure','城市边界策略只能是 open 或 wall；已按既有/默认策略处理',{severity:'warning'}));
     s.spec.enclosure=CITY_ENCLOSURES.includes(s.input.enclosure)?s.input.enclosure:(s.previous?(s.previous.constraints?.enclosure??'wall'):'open');
-    s.spec.districts=collectAndMerge(s,'districts',LIMITS.districts,'locations',r=>{if(!['west','east'].includes(r.bank)||!finite(r.order))throw new Error('DISTRICT_CONSTRAINT_INVALID');return {bank:r.bank,order:r.order,...proxyPlacement(ctx,r.id)};});
+    s.spec.districts=collectAndMerge(s,'districts','locations',r=>{if(!['west','east'].includes(r.bank)||!finite(r.order))throw new Error('DISTRICT_CONSTRAINT_INVALID');return {bank:r.bank,order:r.order,...proxyPlacement(ctx,r.id)};});
     const districtIds=new Set(s.spec.districts.map(d=>d.id));
-    s.spec.buildings=collectAndMerge(s,'buildings',LIMITS.buildings,'locations',r=>{if(!districtIds.has(r.districtId))throw new Error('DISTRICT_REF_UNKNOWN');const locked=trustedLock(ctx,'buildings',r.id);return {...(ctx.locks?.buildings?.[r.id]?.w>0?dimensions(ctx.locks.buildings[r.id]):dimensions(r)),districtId:r.districtId,...(locked?{locked}:{}),...proxyPlacement(ctx,r.id)};});
+    s.spec.buildings=collectAndMerge(s,'buildings','locations',r=>{
+      let districtId=r.districtId;
+      const row=ctx.locationsById?.[r.id],parent=row?.parent_location_id,assigned=ctx.locationsById?.[districtId];
+      const locked=trustedLock(ctx,'buildings',r.id);
+      if(parent&&assigned?.kind==='district'&&districtId!==parent){
+        if(locked)throw new Error('DISTRICT_MEMBERSHIP_CONFLICT');
+        if(districtIds.has(parent))districtId=parent;
+        else if(parent===s.map.containerLocationId){
+          s.spec.districts.push({id:parent,name:s.map.containerName??s.map.name,bank:'west',order:s.spec.districts.length});
+          districtIds.add(parent);districtId=parent;
+        }else throw new Error('DISTRICT_MEMBERSHIP_CONFLICT');
+        s.issues.push(diagnostic('BUILDING_DISTRICT_RECONCILED','$.buildings','建筑分区与已登记归属不符，已保留真实归属，不把示意排位当作包含关系',{severity:'warning',entityId:r.id}));
+      }
+      if(!districtIds.has(districtId))throw new Error('DISTRICT_REF_UNKNOWN');
+      return {...(ctx.locks?.buildings?.[r.id]?.w>0?dimensions(ctx.locks.buildings[r.id]):dimensions(r)),districtId,...(locked?{locked}:{}),...proxyPlacement(ctx,r.id)};
+    });
     return finish(s,ctx,E.city);
   }catch(e){return failure(String(e.message),'$','生成请求不可用；保留已保存布局',{kept:context?.previousScene?clone(context.previousScene):null});}
 }
@@ -262,7 +285,6 @@ export function generateOverview(value,context){
   if(!sizes.length)return first;
   const widthM=Math.ceil(Math.max(context.map.frame.cols*context.map.metersPerCell,sizes.reduce((n,s)=>n+s.widthM+2,2))*4)/4;
   const heightM=Math.ceil(Math.max(context.map.frame.rows*context.map.metersPerCell,2*Math.max(...sizes.map(s=>s.heightM))+2)*4)/4;
-  if(widthM>LIMITS.citySide||heightM>LIMITS.citySide)return first;
   const result=generateOverviewOnce(value,{...context,map:{...context.map,metersPerCell:.25,frame:{...context.map.frame,cols:widthM/.25,rows:heightM/.25}}});
   if(result.ok&&!result.issues.some(i=>i.severity==='error')){result.plannedSize={widthM,heightM};result.metricProposal={metersPerCell:.25,scaleQuality:'estimated',basis:{source:'layout-capacity',widthM,heightM}};return result;}
   return first;
@@ -277,7 +299,7 @@ function generateOverviewOnce(value,context){
     // G03：seed 由程序按地图给定；模型试图「换个 seed 重排」一律忽略并留下诊断，绝不因一次请求挪动已保存几何。
     if(s.input.seed!==undefined&&s.input.seed!==s.spec.seed)s.issues.push(diagnostic('SEED_OVERRIDDEN','$.seed','seed 由程序按地图给定，模型提供的值已忽略；已保存几何不会因此重排',{severity:'warning'}));
     s.spec.units=s.units; // 单位进入签名：拿到尺度后必须换成米制并重算，不能沿用格制场景。
-    s.spec.geometryPolicyVersion=3;
+    s.spec.geometryPolicyVersion=4;
     // 02 §6.2：单位从格变米（或反向）时，把已保存的格几何整体缩放一次再复用；
     // 形状、实体 ID、相对位置与 seed 都不变，只是坐标系换了。
     {
@@ -289,7 +311,8 @@ function generateOverviewOnce(value,context){
     else s.spec.surface=s.input.surface;
     if(s.input.width!==undefined||s.input.height!==undefined)s.issues.push(diagnostic('EXTENT_OVERRIDDEN','$.width','概览幅面由程序按地图框架给定，模型提供的 width/height 已忽略',{severity:'warning'}));
     const pointOf=id=>{const p=ctx.locks?.points?.[id];return p&&finite(p.x)&&finite(p.y)?{x:p.x,y:p.y}:null;};
-    s.spec.zones=collectAndMerge(s,'zones',LIMITS.zones,'locations',r=>{
+    s.spec.zones=collectAndMerge(s,'zones','locations',r=>{
+      if(r.id!==s.map.containerLocationId&&ctx.locationsById?.[r.id]?.kind==='floor')throw new Error('VERTICAL_SPACE_NAVIGATION_ONLY');
       const out={};
       const size=ctx.childSpaces?.[r.id];
       if(s.units==='meters'&&size?.widthM>0&&size.heightM>0)out.physicalSize={w:size.widthM,h:size.heightM};
@@ -309,7 +332,7 @@ function generateOverviewOnce(value,context){
     s.spec.zones=s.spec.zones.filter(z=>z.id!==s.map.containerLocationId);
     const zoneIds=new Set(s.spec.zones.map(z=>z.id));
     for(const z of s.spec.zones)if(z.near&&!zoneIds.has(z.near)&&!s.known.locations.has(z.near))s.issues.push(diagnostic('ZONE_NEAR_UNKNOWN','$.zones','near 指向的地点不在本分支引用表中，已忽略该提示',{severity:'warning',entityId:z.id}));
-    s.spec.links=collectAndMerge(s,'links',LIMITS.links,'routes',r=>{
+    s.spec.links=collectAndMerge(s,'links','routes',r=>{
       const row=ctx.routesById?.[r.id],locked=ctx.locks?.routes?.[r.id],out={};
       const from=row?.from_location_id??null,to=row?.to_location_id??null;
       if(from)out.fromLocationId=from;if(to)out.toLocationId=to;
@@ -318,7 +341,8 @@ function generateOverviewOnce(value,context){
       if(locked?.path?.length>=2)out.locked={quality:locked.quality==='confirmed'?'confirmed':'estimated',path:locked.path,fromLocationId:locked.fromLocationId??from,toLocationId:locked.toLocationId??to};
       return out;
     });
-    s.spec.features=collectAndMerge(s,'features',LIMITS.features,null,r=>{
+    s.spec.features=collectAndMerge(s,'features',null,r=>{
+      if(ctx.locationsById?.[r.zoneId]?.kind==='floor')throw new Error('VERTICAL_SPACE_NAVIGATION_ONLY');
       // G05：type 非法 → 抛出带 path/id 的单项目诊断，由 collection 捕获后跳过该项；其余图元照常生成。
       if(!OVERVIEW_FEATURE_TYPES.includes(r.type))throw new Error('FEATURE_TYPE_UNSUPPORTED');
       const out={type:r.type};
