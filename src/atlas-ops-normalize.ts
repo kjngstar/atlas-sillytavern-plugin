@@ -505,11 +505,125 @@ function overviewEntryIssue(
   return null;
 }
 
+/* ───────────────────── §5.7 / §18.4 space.state.patch ───────────────────── */
+
+/** 单条 `space.state.patch` 能改的对象数上限。集中一处定义，嵌套数组不能绕开。 */
+export const SPACE_STATE_PATCH_LIMIT = 32;
+
+const SPACE_PATCH_CHANGE_FIELDS = ['openingState', 'locked', 'material', 'present', 'destroyed', 'canOpen', 'blocksMovement', 'blocksSight'] as const;
+const SPACE_PATCH_ALLOWED_FIELDS: readonly string[] = ['objectRef', 'locationRef', 'mapRef', ...SPACE_PATCH_CHANGE_FIELDS];
+/** 几何不是状态：这些字段出现即拒，不静默丢掉。 */
+const SPACE_PATCH_IMMUTABLE_FIELDS = ['widthM', 'heightM', 'depthM', 'footprintCells', 'size', 'geometry', 'frame', 'scene'] as const;
+const SPACE_PATCH_OPENING_STATES = ['open', 'closed', 'not-applicable', 'unknown'] as const;
+const SPACE_PATCH_MATERIALS = ['solid', 'glass', 'wood', 'fabric', 'other', 'unknown'] as const;
+const SPACE_PATCH_BOOLEAN_FIELDS = ['locked', 'present', 'destroyed', 'canOpen', 'blocksMovement', 'blocksSight'] as const;
+
+/**
+ * §18.4：开关、锁、材质、在场各自独立；几何不可写；至少一项有效变化。
+ *
+ * 这里做**严格类型**校验而不是归一：`locked:"yes"` 这种写法必须报错，
+ * 因为把字符串当成「大概是想锁上」正是「图上门锁着、正文说能进」的来源。
+ */
+export function normalizeSpaceStateUpdates(
+  data: Record<string, unknown>,
+  parsed?: { opId?: string; line?: number },
+): { ok: boolean; issues: Issue[] } {
+  const issues: Issue[] = [];
+  const push = (code: string, path: string, message: string): void => {
+    issues.push({
+      code,
+      path,
+      message,
+      severity: 'error',
+      retryable: true,
+      ...(parsed?.opId !== undefined ? { opId: parsed.opId } : {}),
+      ...(parsed?.line !== undefined ? { line: parsed.line } : {}),
+    });
+  };
+
+  const raw = data['updates'];
+  if (!Array.isArray(raw)) {
+    push('SPACE_PATCH_UPDATES_REQUIRED', '$.data.updates', `space.state.patch 需要 data.updates 数组；示例：{"op":"space.state.patch","ref":"M1","data":{"updates":[{"objectRef":"F3","locationRef":"L3","openingState":"closed","locked":true}]}}`);
+    return { ok: false, issues };
+  }
+  if (raw.length === 0) {
+    push('SPACE_PATCH_EMPTY', '$.data.updates', 'space.state.patch 的 updates 为空：没有状态变化就不要发这个操作（无变化用 noop）');
+    return { ok: false, issues };
+  }
+  if (raw.length > SPACE_STATE_PATCH_LIMIT) {
+    push('SPACE_PATCH_TOO_MANY', '$.data.updates', `一次最多 ${SPACE_STATE_PATCH_LIMIT} 个对象状态；${raw.length} 项超限，按批拆分而不是靠嵌套数组绕开容量`);
+    return { ok: false, issues };
+  }
+
+  raw.forEach((entry, index) => {
+    const path = `$.data.updates[${index}]`;
+    if (!isPlainObject(entry)) {
+      push('SPACE_PATCH_ENTRY_INVALID', path, '每个 update 必须是对象');
+      return;
+    }
+    for (const field of SPACE_PATCH_IMMUTABLE_FIELDS) {
+      if (!hasOwn(entry, field)) continue;
+      push('SPACE_PATCH_GEOMETRY_IMMUTABLE', `${path}.${field}`, `状态补丁不得改几何字段 ${field}：占地/尺寸属于陈设账本与作者锁`);
+    }
+    if (hasOwn(entry, 'authorLocked')) {
+      push('SPACE_PATCH_AUTHOR_LOCK_REFUSED', `${path}.authorLocked`, '作者锁不是模型能写的字段：开锁不得解除作者的锁定/确认几何');
+    }
+    for (const key of Object.keys(entry)) {
+      if (SPACE_PATCH_ALLOWED_FIELDS.includes(key)) continue;
+      if ((SPACE_PATCH_IMMUTABLE_FIELDS as readonly string[]).includes(key) || key === 'authorLocked') continue;
+      issues.push({
+        code: ATLAS_ERROR_CODES.FIELD_IGNORED,
+        path: `${path}.${key}`,
+        message: `space.state.patch: unknown field ${key} ignored (operation continues)`,
+        severity: 'warning',
+        retryable: false,
+        ...(parsed?.opId !== undefined ? { opId: parsed.opId } : {}),
+        ...(parsed?.line !== undefined ? { line: parsed.line } : {}),
+      });
+    }
+
+    const objectRef = typeof entry['objectRef'] === 'string' ? entry['objectRef'].trim() : '';
+    if (objectRef === '') push('SPACE_PATCH_OBJECT_REQUIRED', `${path}.objectRef`, '每个 update 必须写 objectRef（本图目录里的陈设/门引用）');
+    for (const refField of ['locationRef', 'mapRef'] as const) {
+      const value = entry[refField];
+      if (value === undefined || value === null) continue;
+      if (typeof value !== 'string' || value.trim() === '') {
+        push('SPACE_PATCH_REF_INVALID', `${path}.${refField}`, `${refField} 必须是非空字符串`);
+      }
+    }
+
+    const openingState = entry['openingState'];
+    if (openingState !== undefined && (typeof openingState !== 'string' || !(SPACE_PATCH_OPENING_STATES as readonly string[]).includes(openingState))) {
+      push('SPACE_PATCH_OPENING_INVALID', `${path}.openingState`, `openingState 必须是 ${SPACE_PATCH_OPENING_STATES.join(' / ')}，实际是 ${JSON.stringify(openingState)}`);
+    }
+    const material = entry['material'];
+    if (material !== undefined && (typeof material !== 'string' || !(SPACE_PATCH_MATERIALS as readonly string[]).includes(material))) {
+      push('SPACE_PATCH_MATERIAL_INVALID', `${path}.material`, `material 必须是 ${SPACE_PATCH_MATERIALS.join(' / ')}，实际是 ${JSON.stringify(material)}`);
+    }
+    for (const field of SPACE_PATCH_BOOLEAN_FIELDS) {
+      const value = entry[field];
+      if (value === undefined) continue;
+      if (typeof value !== 'boolean') {
+        push('SPACE_PATCH_BOOLEAN_INVALID', `${path}.${field}`, `${field} 必须是 true/false，实际是 ${JSON.stringify(value)}；不确定就不要写`);
+      }
+    }
+
+    const declaredChanges = SPACE_PATCH_CHANGE_FIELDS.filter((field) => {
+      const value = entry[field];
+      return value !== undefined && value !== null;
+    });
+    if (declaredChanges.length === 0) {
+      push('SPACE_PATCH_NO_CHANGE', path, `这个 update 没有 ${SPACE_PATCH_CHANGE_FIELDS.join(' / ')} 任何一项：没有变化就不要发`);
+    }
+  });
+
+  return { ok: !issues.some((entry) => entry.severity === 'error'), issues };
+}
+
 /**
  * §8.4 “可选参数”列的冻结副本（含各操作的最少参数）。
  * 未列出的运行态字段不可写：出现时 FIELD_IGNORED，绝不静默写库。
- */
-export const OP_KNOWN_FIELDS: Record<string, readonly string[]> = {
+ */export const OP_KNOWN_FIELDS: Record<string, readonly string[]> = {
   'location.upsert': [
     'name',
     'aliases',
@@ -557,6 +671,8 @@ export const OP_KNOWN_FIELDS: Record<string, readonly string[]> = {
     'properties',
     'status',
     'placement',
+    // §18.2：从冻结陈设目录提升成真实物品的显式来源（P12）。
+    'fromFurnishingRef',
   ],
   'item.transfer': ['to', 'quantity', 'from', 'owner_ref'],
   'faction.upsert': [
@@ -654,6 +770,12 @@ export const OP_KNOWN_FIELDS: Record<string, readonly string[]> = {
    * data = {kind: floor|city, spec: {…}}；程序负责生成几何并落库。
    */
   'map.layout.request': ['kind', 'spec'],
+  /**
+   * §5.7 / §18.4：只提交「已有门窗/陈设的状态变化」，不提交几何、不重发 scene。
+   * 嵌套 updates 的字段白名单在 `normalizeSpaceStateUpdates` 里单独一份——
+   * 这里只能列顶层字段，否则嵌套数组会被当成自由对象整包放行。
+   */
+  'space.state.patch': ['updates'],
   [ATLAS_NOOP]: [],
 };
 
@@ -1011,16 +1133,14 @@ export function normalizeOperation(
     issues.push(issue(ATLAS_ERROR_CODES.FIELD_IGNORED, '$.ref', `${opName}: ref must be a string; ignored`));
   }
 
+  if (raw.source !== undefined && typeof raw.source !== 'string' && (!Array.isArray(raw.source) || raw.source.some(entry => typeof entry !== 'string'))) {
+    issues.push(issue('SOURCE_UNKNOWN', '$.source', `${opName}: source must contain only source reference strings; operation rejected`, { severity: 'error', retryable: true }));
+    return { op: null, issues, ignoredFields, systemFields };
+  }
   if (typeof raw.source === 'string') {
     op.source = raw.source.trim();
   } else if (Array.isArray(raw.source)) {
-    const list = raw.source
-      .filter((entry): entry is string => typeof entry === 'string')
-      .map((entry) => entry.trim());
-    if (list.length > 0) op.source = list;
-    else issues.push(issue(ATLAS_ERROR_CODES.FIELD_IGNORED, '$.source', `${opName}: source has no usable entries; ignored`));
-  } else if (raw.source !== undefined && raw.source !== null) {
-    issues.push(issue(ATLAS_ERROR_CODES.FIELD_IGNORED, '$.source', `${opName}: source must be a string or string array; ignored`));
+    op.source = raw.source.map(entry => entry.trim());
   }
 
   if (typeof raw.why === 'string') {
@@ -1453,6 +1573,22 @@ export function validateMinimum(
       }
       // 深校验（集合逐条、程序字段忽略）在 normalizeLayoutSpec：error 只拒绝本操作。
       const checked = normalizeLayoutSpec(data, parsed);
+      if (!checked.ok) {
+        const first = checked.issues.find((i) => i.severity === 'error') ?? checked.issues[0];
+        return { ok: false, issue: first };
+      }
+      return { ok: true };
+    }
+
+    case 'space.state.patch': {
+      if (ref === '') {
+        return fail(
+          '$.ref',
+          'space.state.patch requires ref naming the map whose frozen object catalogue is being patched; example: {"op":"space.state.patch","ref":"M1","data":{"updates":[{"objectRef":"F3","locationRef":"L3","openingState":"closed"}]}}',
+        );
+      }
+      // 深校验（逐条类型、几何不可写、至少一项变化、容量）在 normalizeSpaceStateUpdates。
+      const checked = normalizeSpaceStateUpdates(data, parsed);
       if (!checked.ok) {
         const first = checked.issues.find((i) => i.severity === 'error') ?? checked.issues[0];
         return { ok: false, issue: first };

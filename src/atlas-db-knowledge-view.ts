@@ -11,6 +11,8 @@
  */
 
 import { renderSceneContext } from './atlas-scene-context.ts';
+import { readActorSceneFacts } from './atlas-scene-facts.ts';
+import type { PlanIssue } from './atlas-world-contract.ts';
 import { queryBound } from './atlas-db-runtime.ts';
 import { decodeRow } from './atlas-db-codec.ts';
 import { resolveEffectivePosition } from './atlas-sim-position.ts';
@@ -246,7 +248,7 @@ export function projectPortrayal(
 /** 供 ViewQuery kind='prompt' 使用：一次返回两个投影与其边界说明。 */
 export function projectPromptView(
   world: KnowledgeWorld,
-  query: { povId?: string | null; sceneLocationId?: string | null; actorIds?: string[]; viewMode?: 'pov' | 'author' },
+  query: { povId?: string | null; sceneLocationId?: string | null; actorIds?: string[]; viewMode?: 'pov' | 'author' | 'player' },
 ): { pov: PovProjection; portrayal: NarratorPortrayal | null; promptScope: string[] } {
   const branch = queryBound(world.db, 'SELECT pov_character_id FROM branches WHERE id = ?', [world.branchId])[0];
   const candidates = queryBound(world.db, "SELECT id, location_id FROM characters WHERE branch_id = ? AND role = 'protagonist' AND status = 'active'", [world.branchId]);
@@ -269,7 +271,24 @@ export function projectPromptView(
   };
 }
 
-/** Serialize only what the POV knows. Author truth/payload and narrator thoughts are excluded. */
+/**
+ * P10 §16.3 / P11 §17.2：从 SQL 读出现场空间，交给 `buildActorSceneContext` 组装成正文行。
+ *
+ * 读取实现在 `atlas-scene-facts.ts`，与 NPC 决策切片共用同一个读取口 ——
+ * 否则「正文说门是关的、决策以为门是开的」就是两套各自猜出来的事实。
+ */
+export function buildPovSceneLines(
+  world: KnowledgeWorld,
+  input: { povId: string; locationId: string | null; position: import('./atlas-scene-facts.ts').SceneFactsPosition },
+): { lines: string[]; diagnostics: PlanIssue[] } {
+  const facts = readActorSceneFacts(world, {
+    actorId: String(input?.povId ?? ''),
+    locationId: input?.locationId ?? null,
+    position: input?.position ?? null,
+  });
+  return { lines: facts.lines, diagnostics: facts.diagnostics };
+}
+
 export function renderSqlSceneContext(world: KnowledgeWorld): string {
   const projection = projectPromptView(world, {});
   const clockS = Number(queryBound(world.db, 'SELECT clock_s FROM branches WHERE id = ?', [world.branchId])[0]?.clock_s ?? 0);
@@ -282,6 +301,9 @@ export function renderSqlSceneContext(world: KnowledgeWorld): string {
     const location = locationId ? queryBound(world.db, 'SELECT name FROM locations WHERE branch_id = ? AND id = ?', [world.branchId, locationId])[0] : null;
     if (location) scene.push(`当前位置：${clean(location.name)}`);
     if (position.kind === 'in_transit') scene.push('当前位置：在途；不能把出发地或目的地当成已经抵达。');
+    // P10 §16.3：SQL 主路径接入当前 actor 的空间投影（地点链 / 入口 / 关键陈设的真实占地 / 约束）。
+    const spatial = buildPovSceneLines(world, { povId: projection.pov.povId, locationId, position });
+    for (const line of spatial.lines) scene.push(line);
   }
   const clues: string[] = [];
   const included = new Set<string>();

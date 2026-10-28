@@ -383,25 +383,13 @@ function buildOperation(
   }
 
   const source = value['source'];
+  if (source !== undefined && (typeof source !== 'string' && (!Array.isArray(source) || source.some(entry => typeof entry !== 'string')))) {
+    issues.push(issue('SOURCE_UNKNOWN', '$.source', `line ${candidate.line}: source must be a string or an array containing only strings; operation rejected`, { line: candidate.line, retryable: true }));
+    return { kind: 'error' };
+  }
   if (typeof source === 'string') modelOp.source = source;
   else if (Array.isArray(source)) {
-    const list = source.filter((entry): entry is string => typeof entry === 'string');
-    if (list.length > 0) modelOp.source = list;
-    else {
-      issues.push(
-        issue(ATLAS_ERROR_CODES.FIELD_IGNORED, '$.source', `line ${candidate.line}: source array has no string entries; ignored`, {
-          severity: 'warning',
-          line: candidate.line,
-        }),
-      );
-    }
-  } else if (source !== undefined && source !== null) {
-    issues.push(
-      issue(ATLAS_ERROR_CODES.FIELD_IGNORED, '$.source', `line ${candidate.line}: source must be a string or string array; ignored`, {
-        severity: 'warning',
-        line: candidate.line,
-      }),
-    );
+    modelOp.source = source;
   }
 
   const why = value['why'];

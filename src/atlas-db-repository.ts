@@ -1,6 +1,7 @@
 import { workPlanLimits } from './atlas-work-batching.ts';
 import {buildSqlForegroundRequest} from './atlas-sql-model-context.ts';
 import {LAYOUT_CONTEXT_FRAME_KEY, buildSqlLayoutTask, computeMapLayoutSignature, unknownLayoutEntityRefs} from './atlas-sql-layout-task.ts';
+import { planFunctionalAreaProjections } from './atlas-functional-areas.ts';
 import { planLayoutEvidence, parseLayoutEvidence, attachLayoutEvidence, type LayoutExcerpt, type LayoutEvidenceRejection } from './atlas-layout-evidence.ts';
 import {applySqlLegacyImport} from './atlas-sql-legacy-import.ts';
 /**
@@ -96,6 +97,8 @@ import {
   type SourceSummary,
 } from './atlas-construction-sources.ts';
 import { WORLD_SOURCE_CHUNKING_VERSION, selectWorldConstructionSources, type WorldSourceChunk, type WorldSourceSelection, type WorldSourceEntry } from './atlas-sql-world-sources.ts';
+import { computeSourceCoverage, type SourceCoverageV1 } from './atlas-world-build-plan.ts';
+import { prepareWorldBuildWindow, settleWorldBuildWindow, worldBuildMapReady, type WorldBuildWindow } from './atlas-world-build-execution.ts';
 import { SPATIAL_REQUEST_KEY, SPATIAL_SCENE_KEY, normalizeFrame } from './atlas-spatial-frame.ts';
 import { projectPromptView } from './atlas-db-knowledge-view.ts';
 import type { SqlDatabase } from './atlas-db-runtime.ts';
@@ -124,6 +127,9 @@ import type {
   ViewResult,
 } from './atlas-ops-contract.ts';
 import type { SourceSnapshotEntry } from './atlas-ops-contract.ts';
+import { auditSavedSpatialMoves } from './atlas-scene-audit.ts';
+import { contradictionsToDiagnostics } from './atlas-scene-contradictions.ts';
+import { planLayoutRepair } from './atlas-layout-repair-context.ts';
 // P09A：业务变化的判据（表 + 组用途），不靠 id 前缀。
 import { groupChangesBusiness } from './atlas-ops-contract.ts';
 import { normalizeGenerationOptions, isModelBatchSizeFailure } from './atlas-model-batching.ts';
@@ -230,6 +236,8 @@ type ConstructionQueuePlan = {
  * 由调用方随同一候选 + ACK 落盘 —— 候选没保存时正式进度一个字节都不动。
  */
 function planConstructionQueue(args: {
+  scopeKeyOverride?: string;
+  sourceScan?: boolean;
   tables: ReturnType<typeof createTableReadPort>;
   branchId: string;
   chatUid: string;
@@ -247,7 +255,7 @@ function planConstructionQueue(args: {
 }): ConstructionQueuePlan | null {
   const { tables, branchId, mode, turnId } = args;
   const rows = readProgressRows(tables, branchId);
-  const scopeKey = scopeKeyFor(mode, args.focusLocationIds);
+  const scopeKey = args.scopeKeyOverride ?? scopeKeyFor(mode, args.focusLocationIds);
   const scopeRow = rowsInScope(rows, scopeKey, 'scope')[0] ?? null;
   const discovery = discoverTargets({
     tables,
@@ -310,7 +318,7 @@ function planConstructionQueue(args: {
     const row = tables.selectOne('locations', branchId, id);
     return row && !['destroyed', 'merged', 'archived'].includes(String(row.status));
   }).slice(0, ATLAS_RUNTIME_LIMITS.worldFillTargets);
-  const wantSources = Boolean(reusedUnit) || allocation.targetIds.length > 0 || sourceFocusIds.length > 0;
+  const wantSources = args.sourceScan === true || Boolean(reusedUnit) || allocation.targetIds.length > 0 || sourceFocusIds.length > 0;
   const sourcePlan = wantSources
     ? planConstructionSources({
         tables,
@@ -334,7 +342,7 @@ function planConstructionQueue(args: {
     allocation.targetIds = sourceFocusIds;
   }
 
-  if (!reusedUnit && allocation.targetIds.length > 0) {
+  if (!reusedUnit && (allocation.targetIds.length > 0 || args.sourceScan && unitChunkKeys.length > 0)) {
     allocationSeq += 1;
     schedulerSeq += 1;
     const id = constructionUnitId(scopeKey, allocation.targetIds, unitChunkKeys, allocationSeq);
@@ -502,6 +510,8 @@ type ConstructionSourcePlan = {
   chunkKeys: string[];
   selection: WorldSourceSelection;
   summary: SourceSummary;
+  /** §9.1 覆盖账本：`sourceScanComplete` 只在这里判定，回执直接引用，不各自重算。 */
+  coverage: SourceCoverageV1;
   preMutations: RowMutation[];
   /** 结构处理成功：本批**真正消费**的块转 processed（未覆盖的保持原状）。 */
   processedMutations: (consumedChunkKeys: readonly string[]) => RowMutation[];
@@ -695,11 +705,30 @@ function planConstructionSources(args: {
 
   const summary = summarizeSources(args.rows, scopeKey);
 
+  /**
+   * §9.1 覆盖账本：`sourceScanComplete` 的唯一判定点。
+   *
+   * 统计范围限制在**账本当前存在的块**上（`knownChunkKeys`）：历史 hash 遗留的
+   * processed 块不算覆盖，否则换了原文 hash 之后仍会被判成「早就读完」。
+   * 本批新选中、还没结算的块是 pending → 计进 unchecked，所以发现阶段几乎不可能
+   * 报 complete —— 这是对的：真正读完是在结算之后。
+   */
+  const ledgerChunkKeys = [...ledger.chunks.values()].map((chunk) => chunk.chunkKey);
+  const coverage = computeSourceCoverage({
+    known: selection.known,
+    deferred: selection.deferred,
+    processedChunkKeys: [...ledger.chunks.values()]
+      .filter((chunk) => chunk.status === 'processed')
+      .map((chunk) => chunk.chunkKey),
+    knownChunkKeys: ledgerChunkKeys,
+  });
+
   return {
     scopeKey,
     chunkKeys,
     selection,
     summary,
+    coverage,
     preMutations,
     processedMutations: (consumedChunkKeys: readonly string[]) => {
       const consumed = consumedSet(consumedChunkKeys);
@@ -1286,6 +1315,11 @@ export function createSqlRepository(options: RepositoryOptions) {
       return prepareTurnInner(input);
     },
 
+    async prepareWorldBuildBatch(input: TurnInput): Promise<PreparedCommit> {
+      if (!input.worldBuild) throw new AtlasDbError('INVALID_PAYLOAD', '建设批次必须由建设控制器构造', {});
+      return prepareTurnInner({ ...input, constructionContinue: true, sceneOnly: true, manual: false, narrativeKind: 'manual', phaseBatches: [] });
+    },
+
     /** E09 prepareRollback：在候选库恢复数据/clock/knowledge，生成新同步意图。 */
     async prepareRollback(input: RollbackInput): Promise<PreparedCommit> {
       return prepareRollbackInner(input);
@@ -1342,9 +1376,11 @@ export function createSqlRepository(options: RepositoryOptions) {
     if (anchor.baseRevision !== rev) {
       throw new AtlasDbError('STALE_BASE', `基版本已变化：锚点 ${anchor.baseRevision}，当前 ${rev}`, { base: anchor.baseRevision, current: rev });
     }
+    const windowPort = options.modelPort?.freezeWindow ? await options.modelPort.freezeWindow() : options.modelPort;
+    if(options.modelPort?.freezeWindow&&(currentRevision()!==rev||input.isCurrent&&!input.isCurrent()))throw new AtlasDbError('STALE_BASE','冻结窗口设置期间世界或聊天已变化',{});
     let generationOptions=normalizeGenerationOptions(input.generationOptions);
-    if(input.generationOptions===undefined&&options.modelPort?.generationOptions){
-      generationOptions=normalizeGenerationOptions(await options.modelPort.generationOptions());
+    if(input.generationOptions===undefined&&windowPort?.generationOptions){
+      generationOptions=normalizeGenerationOptions(await windowPort.generationOptions());
       if(currentRevision()!==rev||input.isCurrent&&!input.isCurrent())throw new AtlasDbError('STALE_BASE','读取分批设置期间世界或聊天已变化',{});
     }
     input={...input,generationOptions,...(generationOptions.workBatching&&input.worldCompletion?{worldCompletion:{...input.worldCompletion,policy:{...input.worldCompletion.policy,budgetMode:'workload',maxNewLocations:ATLAS_RUNTIME_LIMITS.operationsPerResponse,maxNewRoutes:ATLAS_RUNTIME_LIMITS.operationsPerResponse,maxAdditionalDepth:ATLAS_RUNTIME_LIMITS.locationDepth}}}:{})};
@@ -1396,7 +1432,7 @@ export function createSqlRepository(options: RepositoryOptions) {
       });
     };
     const turnBudget = createGenerationBudget({diagnosticAnchor:input.anchor,limit:generationOptions.batching.requestsPerOperation??0,workBatching:generationOptions.workBatching});
-    const modelPort = options.modelPort ? bindModelBudget(options.modelPort, turnBudget) : null;
+    const modelPort = windowPort ? bindModelBudget(windowPort, turnBudget) : null;
     let explicitNoop = false;
     let responseIncomplete = false;
     let repairAttempted = false;
@@ -1405,7 +1441,8 @@ export function createSqlRepository(options: RepositoryOptions) {
     let modelPhaseFailed = false;
     let foregroundBatches = 0;
 
-    const sourceSnapshot: SourceSnapshotEntry[] = input.sourceSnapshot ?? [];
+    let sourceSnapshot: SourceSnapshotEntry[] = input.sourceSnapshot ?? [];
+    let worldBuildWindow: WorldBuildWindow | null = null;
 
     if (input.manual) {
       const manualOps = input.operations ?? [];
@@ -1526,6 +1563,7 @@ export function createSqlRepository(options: RepositoryOptions) {
       if (input.isCurrent && !input.isCurrent()) throw new AtlasDbError('TURN_CANCELLED', '模型等待期间聊天或正文已变化，候选已丢弃', {});
     } catch (error) {
       await discardPreparedImpl(candidate.token);
+      if (error instanceof AtlasDbError) error.detail.requestAudit=turnBudget.audit?.();
       throw error;
     }
     if (revAfterModel !== anchor.baseRevision) {
@@ -1533,7 +1571,7 @@ export function createSqlRepository(options: RepositoryOptions) {
       throw new AtlasDbError(
         'STALE_BASE',
         `模型响应期间基线已变化：候选基于 revision ${anchor.baseRevision}，当前 ${revAfterModel}（候选已丢弃）`,
-        { base: anchor.baseRevision, current: revAfterModel },
+        { base: anchor.baseRevision, current: revAfterModel, requestAudit:turnBudget.audit?.() },
       );
     }
 
@@ -1646,7 +1684,39 @@ export function createSqlRepository(options: RepositoryOptions) {
         }
       }
 
-      // All program/model settlement belongs to this same isolated floor. No SQL
+      if (input.worldBuild) {
+        worldBuildWindow = prepareWorldBuildWindow({ db: candidateDb, input, turnId, makeId });
+        input = worldBuildWindow.input;
+        sourceSnapshot = input.sourceSnapshot;
+        const stateApplied = applyGroups(candidateDb, worldBuildWindow.groups, { branchId, turnId, attemptId: 'world-build-plan', validate: true });
+        groupResults.push(...stateApplied.groups);
+        if (stateApplied.journalIssues.length || stateApplied.groups.some(group => group.status === 'rejected' || group.status === 'blocked'))
+          throw new AtlasDbError('WORLD_BUILD_STATE_WRITE_FAILED', '建设计划未通过日志或一致性校验', { groups: stateApplied.groups });
+        allIssues.push(...worldBuildWindow.issues);
+        if (worldBuildWindow.operations.length || worldBuildWindow.records.length) {
+          const refs = scanKnownRefs(tables, branchId, { requiredRefs: worldBuildWindow.operations.flatMap(op => {
+            const ref = op.value.ref;
+            const own = ref && !ref.startsWith('new:') ? [{ id: ref, kind: op.value.op.startsWith('character.') ? 'character' as const : op.value.op.startsWith('route.') ? 'route' as const : 'location' as const }] : [];
+            const locations = ['parent_ref','from_ref','to_ref','location_ref'].flatMap(key=>{ const id=op.value.data?.[key]; return typeof id==='string'&&!id.startsWith('new:')?[{id,kind:'location' as const}]:[]; });
+            const map = op.value.data?.['map_ref'];
+            return [...own,...locations,...(typeof map==='string'?[{id:map,kind:'map' as const}]:[])];
+          }) }).refs;
+          const program = compileOperations({ operations: worldBuildWindow.operations, anchor, phase: 'geography', clockS: clockBefore, revision: rev,
+            tables, sources: { phase: 'geography', snapshot: sourceSnapshot, clockS: clockBefore }, makeId, knownRefs: refs, turnId,
+            allowedOps: ['location.upsert', 'route.propose', 'character.upsert'] });
+          const builtProgram = buildAtomicGroups(program.results.map(entry => ({ opId: entry.opId, ...entry.result })));
+          allIssues.push(...program.issues, ...builtProgram.issues);
+          const programGroups = [...orderGroups(builtProgram.groups).order];
+          if (worldBuildWindow.records.length) programGroups.push({ id: `world-build:${turnId}:records`, purpose: 'bookkeeping', opIds: [],
+            dependsOn: programGroups.map(group => group.id), readSet: [], mutations: worldBuildWindow.records });
+          const appliedProgram = applyGroups(candidateDb, programGroups, { branchId, turnId, attemptId: 'world-build-local', validate: true });
+          groupResults.push(...appliedProgram.groups);
+          parsedOperations.push(...worldBuildWindow.operations);
+          for (const result of appliedProgram.groups) allIssues.push(...result.issues);
+          if (appliedProgram.journalIssues.length) throw new AtlasDbError('JOURNAL_WRITE_FAILED', '本地建设结果日志未保存', {});
+        }
+      }
+
       /* ───────── M3-10/11：世界建设阶段（01 §4 优先级；在 settle 之前，
          让本轮后台决策能读到刚建好的结构）───────── */
       // 单一本回合局部预算：前景 + 纠错（attempts）为起点，建设与布局共用同一个 port，
@@ -1676,6 +1746,13 @@ export function createSqlRepository(options: RepositoryOptions) {
         queueFailureCode: '',
         /** P10/R02：本批真正消费（进入请求）的来源块键。 */
         sourceCovered: [] as string[],
+        /**
+         * P03 §9.1 覆盖账本：来源到底读完了没有。
+         *
+         * 由 `planConstructionSources` 产出，**只在这里算一次** —— 回执、UI、完成率
+         * 都引用同一个对象，不各自拿 chunk 计数再推一遍（推出来的数字迟早对不上）。
+         */
+        sourceCoverage: null as SourceCoverageV1 | null,
         /** P10/R02：本单元已接受的 new: 别名 → 真实 ID（部分成功时留给重试做转换）。 */
         bindings: {} as Record<string, string>,
       };
@@ -1685,6 +1762,8 @@ export function createSqlRepository(options: RepositoryOptions) {
         // P09B/R01：先由持久队列决定本批焦点。队列空了就不再发建设请求（零请求即「暂无待处理」）。
         const queuePolicy = normalizeCompletionPolicy(input.worldCompletion.policy);
         construction.queuePlan = planConstructionQueue({
+          scopeKeyOverride: worldBuildWindow ? `world-build-sources:${worldBuildWindow.job.id}` : undefined,
+          sourceScan: Boolean(worldBuildWindow),
           tables,
           branchId,
           chatUid: anchor.chatUid,
@@ -1693,7 +1772,7 @@ export function createSqlRepository(options: RepositoryOptions) {
           policy: queuePolicy,
           turnId,
           // P10/R02：来源选取与目标队列在同一处算，两者共用同一份 chat/branch 缓存与预算。
-          sourceSnapshot,
+          sourceSnapshot: worldBuildWindow ? sourceSnapshot.filter(source => source.kind === 'lorebook') : sourceSnapshot,
           sourceFocusTerms: input.worldCompletion.focusTerms,
           sourceMaxChars: input.worldCompletion.sourceMaxChars,
           sourceChunkChars: input.worldCompletion.sourceChunkChars,
@@ -1701,13 +1780,14 @@ export function createSqlRepository(options: RepositoryOptions) {
         });
         const queuePlan = construction.queuePlan;
         if (queuePlan) {
+          construction.sourceCoverage = queuePlan.sourcePlan?.coverage ?? null;
           construction.queue = {
             scopeKey: queuePlan.scopeKey,
             selectedTargets: queuePlan.focusIds.length,
             pendingTargets: queuePlan.discovery.enqueueIds.length,
             freshUnits: queuePlan.freshUnitCount,
             retryUnits: queuePlan.retryUnitCount,
-            noPending: queuePlan.focusIds.length === 0,
+            noPending: queuePlan.focusIds.length === 0 && !queuePlan.sourceSelection?.chunks.length,
           };
           if (queuePlan.discovery.truncated) {
             allIssues.push({
@@ -1731,7 +1811,8 @@ export function createSqlRepository(options: RepositoryOptions) {
             });
           }
         }
-        const task = queuePlan && queuePlan.focusIds.length === 0 ? null : buildSqlWorldCompletionTask(tables, branchId, {
+        const task = queuePlan && queuePlan.focusIds.length === 0 && !worldBuildWindow ? null : buildSqlWorldCompletionTask(tables, branchId, {
+          sourceScan: Boolean(worldBuildWindow),
           mode: input.worldCompletion.mode,
           focusLocationIds: queuePlan ? queuePlan.focusIds : input.worldCompletion.focusLocationIds,
           policy: input.worldCompletion.policy,
@@ -1882,7 +1963,7 @@ export function createSqlRepository(options: RepositoryOptions) {
               } else {
                 const compiledConstruction = compileOperations({
                   operations: constructionParsed, anchor, phase: 'geography', clockS: clockBefore, revision: rev,
-                  tables: readPort, sources: { phase: 'geography', snapshot: sourceSnapshot, clockS: clockBefore }, makeId,
+                  tables: readPort, sources: { phase: 'geography', snapshot: construction.queuePlan?.sourceSelection ? sourceSnapshot.filter(source => construction.queuePlan?.sourceSelection?.chunks.some(chunk => chunk.sourceKey === source.key)) : sourceSnapshot, clockS: clockBefore }, makeId,
                   knownRefs: constructionRefs, turnId, allowedOps: WORLD_CONSTRUCTION_OPS,
                 });
                 allIssues.push(...compiledConstruction.issues);
@@ -2068,7 +2149,7 @@ export function createSqlRepository(options: RepositoryOptions) {
       const simulation = await settleSqlTurn({ db: candidateDb, branchId, anchor, turnId, clockBefore,
         sceneOnly:input.sceneOnly,
         generationOptions,
-        operations: input.sceneOnly?[]:parsedOperations, modelPort: input.manual||input.sceneOnly || !options.modelPort ? null : logModelAttempts(bindModelBudget(options.modelPort, turnBudget, 'background'),now,recordAttempt),
+        operations: input.sceneOnly?[]:parsedOperations, modelPort: input.manual||input.sceneOnly || !windowPort ? null : logModelAttempts(bindModelBudget(windowPort, turnBudget, 'background'),now,recordAttempt),
         // M3-11：settle 用**同一本回合预算**的剩余额度，不另起计数；被保留给到期后台的名额
         // 在 stageRemaining 里已经扣掉，所以建设不会抢先吃掉它。
         modelBudget: Math.max(0, turnBudget.stageRemaining('background')),
@@ -2094,7 +2175,18 @@ export function createSqlRepository(options: RepositoryOptions) {
         layoutReport.issues.length = 0;
       };
       let mapBatchesRemaining=generationOptions.workBatching?.mapBatches??Number.MAX_SAFE_INTEGER;
-      let layoutTask=input.layoutMaps?buildSqlLayoutTask(candidateDb,branchId,input,turnId,layoutReport):null;
+      const applyFunctionalAreas=(mapIds:readonly string[],requireCurrentInputs:boolean):void=>{
+        const plan=planFunctionalAreaProjections({tables:createTableReadPort(candidateDb),branchId,turnId,mapIds,requireCurrentInputs});
+        allIssues.push(...plan.issues);
+        if(plan.groups.length){
+          const result=applyGroups(candidateDb,plan.groups,{branchId,turnId,attemptId:'functional-areas',validate:true});
+          groupResults.push(...result.groups);
+          if(result.journalIssues.length||result.groups.some(group=>group.status==='rejected'||group.status==='blocked'))throw new AtlasDbError('FUNCTIONAL_AREA_WRITE_FAILED','功能分区未通过候选日志校验',{groups:result.groups,issues:result.journalIssues});
+        }
+      };
+      if(Array.isArray(input.layoutMaps)&&input.layoutMaps.length)applyFunctionalAreas(input.layoutMaps,true);
+      const layoutInput=worldBuildWindow&&Array.isArray(input.layoutMaps)?{...input,layoutMaps:input.layoutMaps.filter(mapId=>!worldBuildMapReady(candidateDb,branchId,mapId))}:input;
+      let layoutTask=layoutInput.layoutMaps?buildSqlLayoutTask(candidateDb,branchId,layoutInput,turnId,layoutReport):null;
       drainLayoutReport();
       // Freeze the target set, then combine compatible maps inside its capacity.
       const pendingLayoutIds=layoutTask?[...layoutTask.mapIds,...layoutTask.remainingLocationIds]:[];
@@ -2109,7 +2201,7 @@ export function createSqlRepository(options: RepositoryOptions) {
       // All stages and retries share the optional request cap chosen by the user.
       const layoutBudget=turnBudget;
       const canSupplement=()=>!generationOptions.workBatching||(turnBudget.workUsage()?.extra??0)<generationOptions.workBatching.extraRequests;
-      const layoutModelPort=options.modelPort?bindModelBudget(options.modelPort,layoutBudget,'geography'):null;
+      const layoutModelPort=windowPort?bindModelBudget(windowPort,layoutBudget,'geography'):null;
       const requestSpatialWithTransportRetry=async(request:ModelBatchRequest,kind:string):Promise<ModelBatchResponse>=>{
         const started=now();
         try{return await layoutModelPort!.request(request);}
@@ -2149,6 +2241,17 @@ export function createSqlRepository(options: RepositoryOptions) {
         });
         groupResults.push(...armed.groups);
         allIssues.push(...armed.issues);
+      }
+      // A saved failed request must be rearmed when its construction target is
+      // selected again. Use the same journal path as the explicit layout retry.
+      for(const target of worldBuildWindow?.selected??[]){
+        if(target.workKind!=='map-layout'||!target.subjectId)continue;
+        const frame=normalizeFrame(createTableReadPort(candidateDb).selectOne('maps',branchId,target.subjectId)?.frame_json);
+        if((frame[SPATIAL_REQUEST_KEY] as {status?:unknown}|undefined)?.status!=='failed')continue;
+        const armed=armLayoutRetry({db:candidateDb,branchId,mapId:target.subjectId,
+          requestId:`build_${worldBuildWindow!.job.id}_${worldBuildWindow!.job.runEpoch}_${worldBuildWindow!.job.nextWindowSequence}_${target.subjectId}`,
+          operationId:`build_retry_${target.id}`,turnId,ports:spatialPorts});
+        groupResults.push(...armed.groups);allIssues.push(...armed.issues);
       }
 
       const materializeLayouts=():void=>{
@@ -2193,6 +2296,7 @@ export function createSqlRepository(options: RepositoryOptions) {
         // M4-21 / M4-23：结构指纹结算 —— 只有「场景真的落成、请求已被消费」的图才记指纹。
         // 记上之后，成员/来源不变时 buildSqlLayoutTask 不再为同一张图重复请求模型（W07）。
         if (completedSpatialMaps.size) {
+          applyFunctionalAreas([...completedSpatialMaps],false);
           const processedRequests = new Set(spatial.processed);
           const ctxPort = createTableReadPort(candidateDb);
           const ctxMutations: RowMutation[] = [];
@@ -2455,7 +2559,16 @@ export function createSqlRepository(options: RepositoryOptions) {
         const supplements=generationOptions.workBatching?pendingLayoutIds.filter(id=>retriedLayoutIds.has(id)):[];
         const nextTargets=supplements.length?supplements:pendingLayoutIds;
         layoutTask=nextTargets.length&&(mapBatchesRemaining>0||supplements.length>0)?buildSqlLayoutTask(candidateDb,branchId,{...input,generationOptions:{...generationOptions,...(generationOptions.workBatching?{workBatching:{...generationOptions.workBatching,mapBatches:supplements.length?1:mapBatchesRemaining}}:{})},layoutMaps:nextTargets,layoutBatchMapLimit:smallerLayoutBatches.get(pendingLayoutIds[0])},`${turnId}_layout_${layoutTasks.length}`,layoutReport):null;
-        if(layoutTask&&layoutTask.mapIds.some(id=>retriedLayoutIds.has(id))){const suffix='\n【未完成项补交】只处理本图目录列出的地图；已完成地图已从本批移除，不要重新生成。';layoutTask.request.messages[1].content+=suffix;layoutTask.request.promptInput!.injectionText=layoutTask.request.messages[1].content;}
+        if(layoutTask&&layoutTask.mapIds.some(id=>retriedLayoutIds.has(id))){
+          const repair=planLayoutRepair({ maps:layoutTask.mapIds.map(mapId=>({mapId,batchId:currentLayoutTask.request.batchId,attempts:0})),
+            failures:layoutTask.mapIds.map(mapId=>({mapId,kind:'validation-rejected',originBatchId:currentLayoutTask.request.batchId,
+              issues:allIssues.filter(issue=>issue.path.startsWith('$.layout')||issue.path.startsWith('$.spec')||issue.code==='ENUM_INVALID').map(issue=>({code:issue.code,path:issue.path}))})),
+            membersByMap:Object.fromEntries(layoutTask.mapIds.map(mapId=>[mapId,pageAllRows(tables,'locations',branchId).filter(row=>row.map_id===mapId&&row.status==='active').map(row=>String(row.id))])),
+            batchPrefix:`${turnId}_layout_repair` });
+          allIssues.push(...repair.issues);
+          const suffix='\n【未完成项补交】只处理本图目录列出的地图；已完成地图已从本批移除，不要重新生成。保留原有作者锁。定向纠错依据：'+JSON.stringify(repair.batches.flatMap(batch=>batch.contexts));
+          layoutTask.request.messages[1].content+=suffix;layoutTask.request.promptInput!.injectionText=layoutTask.request.messages[1].content;
+        }
         drainLayoutReport();
       }
       if(pendingLayoutIds.length||evidenceBlockedMaps.size||deferredLayoutIds.size)allIssues.push({code:'LAYOUT_BATCH_PENDING',path:'$.layout',message:`${new Set([...pendingLayoutIds,...evidenceBlockedMaps,...deferredLayoutIds]).size} 张地图保留为待细化。${turnBudget.limit>0?`本次操作按用户设置最多发送 ${turnBudget.limit} 次模型请求；`:''}已登记地点和已完成布局保留，可选中需要的地图后继续生成。`,severity:'warning',retryable:true});
@@ -2584,6 +2697,23 @@ export function createSqlRepository(options: RepositoryOptions) {
         }
       }
 
+      const sceneAudit = auditSavedSpatialMoves({ db: candidateDb, beforeDb: requireDb(), branchId, turnId });
+      if (sceneAudit.groups.length) {
+        const audited = applyGroups(candidateDb, sceneAudit.groups, { branchId, turnId, attemptId: 'scene-audit', validate: true });
+        groupResults.push(...audited.groups);
+        if (audited.journalIssues.length || audited.groups.some(group => group.status === 'rejected' || group.status === 'blocked'))
+          throw new AtlasDbError('SCENE_AUDIT_WRITE_FAILED', '空间矛盾记录未通过日志校验', {});
+      }
+      allIssues.push(...contradictionsToDiagnostics(sceneAudit.contradictions));
+      let worldBuildReceipt: import('./atlas-world-contract.ts').WorldBuildReceiptV1 | undefined;
+      if (worldBuildWindow) {
+        const settled = settleWorldBuildWindow({ db: candidateDb, input, turnId, makeId }, worldBuildWindow, turnBudget.audit?.().transports ?? attempts.length, allIssues);
+        const savedProgress = applyGroups(candidateDb, settled.groups, { branchId, turnId, attemptId: 'world-build-settled', validate: true });
+        groupResults.push(...savedProgress.groups);
+        if (savedProgress.journalIssues.length || savedProgress.groups.some(group => group.status === 'rejected' || group.status === 'blocked'))
+          throw new AtlasDbError('WORLD_BUILD_STATE_WRITE_FAILED', '建设结果进度未通过校验', { groups: savedProgress.groups });
+        worldBuildReceipt = settled.receipt;
+      }
       const fkViolations = foreignKeyCheck(candidateDb);
       const finalCheck = validateCandidate(candidateDb, { branchId });
       const ok = fkViolations.length === 0 && finalCheck.ok;
@@ -2627,7 +2757,8 @@ export function createSqlRepository(options: RepositoryOptions) {
       });
       if ((simulation.catchingUp || simulation.elapsed.quality === 'unknown') && receipt.status !== 'failed') receipt.status = 'partial';
       if (construction.attempted && construction.status !== 'ready' && receipt.status !== 'failed') receipt.status = 'partial';
-      receipt.requestAudit = turnBudget.audit?.();
+      receipt.requestAudit = input.worldBuild?.abortedWindow?.requestAudit ?? turnBudget.audit?.();
+      if (worldBuildReceipt) receipt.worldBuild = worldBuildReceipt;
       if(generationOptions.workBatching)receipt.requestPlan={normalLimits:workPlanLimits(generationOptions.workBatching),extraLimit:generationOptions.workBatching.extraRequests,usage:turnBudget.workUsage()!};
       if (construction.reasonCode === 'MODEL_BUDGET_EXHAUSTED' && receipt.status !== 'failed') receipt.status = 'partial';
       if (input.layoutMaps && allIssues.some(issue => issue.severity === 'error')) {
@@ -2641,7 +2772,12 @@ export function createSqlRepository(options: RepositoryOptions) {
         receipt.status === 'failed' ? null : newRevision,
         JSON.stringify(receipt),
         JSON.stringify(attempts.slice(0, ATLAS_RUNTIME_LIMITS.detailedAttemptsPerTurn)),
-        JSON.stringify({ work_usage:turnBudget.workUsage(),work_batching:generationOptions.workBatching,operations: parsedOperations.map((p) => p.value),
+        JSON.stringify({ world_build: worldBuildReceipt ? { version:1, jobId: worldBuildReceipt.jobId, action:input.worldBuild?.action,
+          window: worldBuildWindow?.window===true, aborted:!!input.worldBuild?.abortedWindow,
+          windowSequence:input.worldBuild?.abortedWindow?.windowSequence??(worldBuildWindow?.window?worldBuildWindow.job.nextWindowSequence:null),
+          runEpoch:worldBuildWindow?.job.runEpoch,originFloorId:worldBuildWindow?.job.originFloorId } : undefined,
+          scene_audit: { contradictions: sceneAudit.contradictions, unevaluated: sceneAudit.unevaluated },
+          work_usage:turnBudget.workUsage(),work_batching:generationOptions.workBatching,operations: parsedOperations.map((p) => p.value),
           operation_meta: parsedOperations.map(({ opId, line, rawHash }) => ({ opId, line, rawHash })),
           known_refs: foregroundKnownRefs,
           scene_maps: input.sceneMaps === true,
@@ -2697,17 +2833,18 @@ export function createSqlRepository(options: RepositoryOptions) {
 
       return await exportCandidateImpl(candidate, receipt);
     } catch (err) {
-      const failedForeignKeys=committed?[]:foreignKeyCheck(candidateDb);
+      const candidateAlive=candidates.has(candidate.token);
+      const failedForeignKeys=committed||!candidateAlive?[]:foreignKeyCheck(candidateDb);
       if (!committed) {
-        if (transactionOpen) rollbackTransaction(candidateDb);
+        if (transactionOpen&&candidateAlive) rollbackTransaction(candidateDb);
         await discardPreparedImpl(candidate.token);
       } else if (err instanceof AtlasDbError && err.code === 'TURN_FAILED') {
         throw err;
       } else {
         await discardPreparedImpl(candidate.token);
       }
-      if (err instanceof AtlasDbError) throw err;
-      throw new AtlasDbError('TURN_PREPARE_FAILED', `准备回合失败（${preparationStep}）：${(err as Error).message}${failedForeignKeys.length?'；未完成依赖：'+failedForeignKeys.map(v=>`${v.table}→${v.parent}`).join(', '):''}`, { sequencesUsed,preparationStep,foreignKeys:failedForeignKeys,groups:groupResults });
+      if (err instanceof AtlasDbError) { err.detail.requestAudit = turnBudget.audit?.(); throw err; }
+      throw new AtlasDbError('TURN_PREPARE_FAILED', `准备回合失败（${preparationStep}）：${(err as Error).message}${failedForeignKeys.length?'；未完成依赖：'+failedForeignKeys.map(v=>`${v.table}→${v.parent}`).join(', '):''}`, { sequencesUsed,preparationStep,foreignKeys:failedForeignKeys,groups:groupResults,requestAudit:turnBudget.audit?.() });
     }
   }
 

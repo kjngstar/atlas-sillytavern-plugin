@@ -20,7 +20,7 @@ export { atlasPointRefOf, atlasKnownCoordinate, atlasPositionQuality, atlasSqlMa
  * - 任何失败都不破坏 SillyTavern 原聊天：静默降级为控制台警告。
  */
 
-export const ATLAS_EXTENSION_VERSION = "0.9.97";
+export const ATLAS_EXTENSION_VERSION = "0.9.99";
 export const ATLAS_DISPLAY_NAME = "阿特拉斯 / Atlas";
 export const ATLAS_PROTOCOL_VERSION = 1;
 export const ATLAS_EXTENSION_ID = "atlas-world-sim";
@@ -2455,6 +2455,16 @@ async function connectOnce() {
     };
     const runtimeApiKeys = new Map();
     const sqlSessionProvider = mod.createBrowserSqlHost({
+      onSaved: () => { void atlasRuntime.core?.refresh().catch(()=>emitAtlasDiagnostic({level:'warn',source:'ui',code:'WORLD_BUILD_VIEW_REFRESH_FAILED',operation:'state',phase:'response',outcome:'failed'})); },
+      readWorldBuildSources: async () => {
+        const captured=context(),chatId=String(captured?.chatId??''),metadata=captured?.chatMetadata;
+        const port=createReferenceLorePort(context,loadStWorldInfo,async()=>{try{return await globalThis.TavernHelper?.getCharWorldbookNames?.('current')??[];}catch{return [];}});
+        const entries=(await port.read()).filter(entry=>entry.enabled!==false&&entry.atlasReadable!==false);
+        if(String(context()?.chatId??'')!==chatId||context()?.chatMetadata!==metadata)throw Object.assign(Error('建设读取期间聊天已变化'),{code:'CHAT_CHANGED'});
+        const card=String(captured?.characters?.[captured?.characterId]?.description??'');
+        return [...(card?[{key:'card',kind:'lorebook',text:card,hash:mod.stableHexHash(card)}]:[]),
+          ...entries.map(entry=>({key:`lore:${entry.id}`,kind:'lorebook',text:entry.content,hash:mod.stableHexHash(entry.content)}))];
+      },
       modelPort: mod.createSqlModelPort({ readSettings: async () => {
         const saved = await engineStore.read("settings");
         if (!saved?.apiPresets) return saved;

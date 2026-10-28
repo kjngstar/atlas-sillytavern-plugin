@@ -78,6 +78,10 @@ const DETAIL_KEYS = new Set([
   "workClass", "callReason", "retryOfBatchRef",
   "requestRef", "batchRef", "pathRef", "modelRef", "model", "apiFormat", "method",
   "timeoutMs", "maxTokens", "promptChars", "requestChars", "messageCount", "headersMs", "bodyMs",
+  // P14 §20.3：响应长度的三个口径 + 「耗时覆盖了兼容重发」标记。
+  // rawResponseChars 与 reasoningTextChars 必须能进诊断，否则审计记录永远分不清
+  // 「可见正文」和「传输包装」，也永远没法诚实地说推理长度是未知。
+  "rawResponseChars", "reasoningTextChars", "durationIncludesCompatibilityRetry",
   "transportAttempt", "modelRequests", "retryKind", "failureStage", "cancelledBy", "errorName",
   "issueCount", "issueIndex", "baseRevision", "revision", "storageRevision", "changedRows", "groupCount",
   "rejectedGroups", "targetCount", "budgetUsed", "coreSaved", "sceneSaved", "saveConfirmed", "receiptStatus",
@@ -121,6 +125,11 @@ const REQUEST_NUMBER_KEYS = new Set([
   'transportAttempt', 'modelRequests', 'issueCount', 'issueIndex', 'baseRevision', 'revision',
   'storageRevision', 'changedRows', 'groupCount', 'rejectedGroups', 'targetCount', 'budgetUsed',
 ]);
+/**
+ * P14 §20.3：响应长度字段。允许显式 `null`（＝已探测但该字段不存在），
+ * 其余只接受 0..64Mi 的整数——负数与小数都是伪造的测量值。
+ */
+const RESPONSE_LENGTH_KEYS = new Set(['rawResponseChars', 'visibleTextChars', 'reasoningTextChars']);
 const CALL_HISTORY_CODES = new Set(['MODEL_REQUEST_STARTED','MODEL_REQUEST_COMPLETED','MODEL_REQUEST_FAILED','MODEL_REQUEST_DEFERRED',
   'TURN_STARTED','COMMIT_SUCCEEDED','COMMIT_PARTIAL','COMMIT_FAILED','TURN_DUPLICATE']);
 let nextId = 0;
@@ -492,6 +501,12 @@ export function sanitizeDiagnostic(raw: unknown, now: () => number = Date.now): 
         }
       } else if (key === "rowLine") {
         if (typeof detail === "number" && Number.isInteger(detail) && detail >= 0 && detail <= 100_000) {
+          details[key] = detail;
+        }
+      } else if (RESPONSE_LENGTH_KEYS.has(key)) {
+        // P14 §20.3：可见/推理长度可以是 null（＝已探测、无该字段），但绝不能是负数或小数。
+        if (detail === null) details[key] = null;
+        else if (typeof detail === 'number' && Number.isSafeInteger(detail) && detail >= 0 && detail <= 67_108_864) {
           details[key] = detail;
         }
       } else if (REQUEST_NUMBER_KEYS.has(key)) {

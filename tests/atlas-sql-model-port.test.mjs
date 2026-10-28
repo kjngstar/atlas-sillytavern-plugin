@@ -29,6 +29,18 @@ function request(sources = []) {
   req.sourceSnapshot = sources;
   return req;
 }
+test('T-J14 a frozen operation port retains its connection and policy until the next window', async () => {
+  const f = fixture();
+  const frozen = await f.port.freezeWindow();
+  f.settings.apiPresets[0].model = 'next-window-model';
+  f.settings.apiPresets[0].temperature = 0.9;
+  await frozen.request(request());
+  await frozen.withBudget((await import('../src/atlas-sql-generation-budget.ts')).createGenerationBudget({limit:1})).request(request());
+  const next = await f.port.freezeWindow();
+  await next.request(request());
+  assert.deepEqual(f.calls.map(call=>call.body.model), ['fixture-model','fixture-model','next-window-model']);
+  assert.deepEqual(f.calls.map(call=>call.body.temperature), [0.4,0.4,0.9]);
+});
 test('空间布局任务尊重原连接输出上限，不被阶段默认预算压低',async()=>{
  const f=fixture(),req=request();req.batchId='layout_fixture';req.phase='geography';
  f.settings.apiPresets[0].maxTokens=51200;

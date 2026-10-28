@@ -124,6 +124,15 @@ export function checkSceneDocument(doc){
     }
     if(plain(c)&&c.name!==undefined&&c.name!==null&&typeof c.name!=='string')issues.push(diagnostic('SCENE_CORRIDOR_INVALID','$.layout.corridor.name','命名走廊的名称必须是字符串'));
     collection('rooms',p=>rect(p)&&['north','south'].includes(p.side),LIMITS.rooms);
+    if(shape.areas!==undefined){
+      if(!Array.isArray(shape.areas))issues.push(diagnostic('SCENE_FUNCTIONAL_AREAS_INVALID','$.layout.areas','功能分区必须是数组'));
+      const hosts=[...shape.rooms,...(shape.hostArea?[shape.hostArea]:[])],ids=new Set();
+      collection('areas',p=>{
+        const host=hosts.find(r=>r.id===p?.roomId);
+        const valid=rect(p)&&p.version===1&&typeof p.id==='string'&&p.id.length>0&&typeof p.name==='string'&&!ids.has(p.id)&&!hosts.some(r=>r.id===p.id)&&['estimated','confirmed'].includes(p.quality)&&host&&p.x>=host.x-eps&&p.y>=host.y-eps&&p.x+p.w<=host.x+host.w+eps&&p.y+p.h<=host.y+host.h+eps;
+        ids.add(p?.id);return valid;
+      },LIMITS.zones);
+    }
     collection('groups',p=>rect(p)&&Array.isArray(p.bodies)&&p.bodies.every(rect),LIMITS.contents);collection('bodies',rect);
     collection('actors',point,LIMITS.actors);collection('items',point,LIMITS.items);collection('doors',p=>point(p)&&finite(p.width)&&p.width>0);collection('windows',point);collection('lamps',point);
   }else if(shape?.kind==='city'){

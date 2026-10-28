@@ -34,6 +34,7 @@ export type OccupantsInput = {
   /** Actual SQL container; a room with child rooms still has its own occupants. */
   container?: {id:unknown;kind:unknown} | null;
   locations?: SqlRow[];
+  functionalAreas?: readonly {id:unknown;parent_location_id:unknown}[];
   characters?: SqlRow[];
   items?: SqlRow[];
   /** 本轮结算出的有效位置（在途判定用）。 */
@@ -101,6 +102,10 @@ function warn(code: string, path: string, message: string, entityId?: string): I
  * - `near` / `on` 仍指向合法目标时保留旧值，避免每次重排。
  */
 export function reconcileOccupantsSpec(input: OccupantsInput): OccupantsResult {
+  const physicalRoom=(id:string)=>{
+    const area=input.functionalAreas?.find(area=>area.id===id);
+    return area?text(area.parent_location_id):id;
+  };
   const issues: Issue[] = [];
   const requestSpec = plain(input.requestSpec) ? input.requestSpec : {};
   const scene = input.scene ?? null;
@@ -239,7 +244,7 @@ export function reconcileOccupantsSpec(input: OccupantsInput): OccupantsResult {
 
   for (const raw of rows(requestSpec.actors as SqlRow[])) {
     const id = text(raw?.id);
-    const roomId = text(raw?.roomId);
+    const roomId = physicalRoom(text(raw?.roomId));
     if (!id) continue;
     if (!roomIds.has(roomId)) {
       issues.push(warn('ACTOR_ROOM_UNKNOWN', '$.actors.roomId', '名单里的房间不在本布局中，移除该锚点', id));
@@ -250,7 +255,7 @@ export function reconcileOccupantsSpec(input: OccupantsInput): OccupantsResult {
       issues.push(warn('ACTOR_REF_UNKNOWN', '$.actors.id', '人物不在当前分支的可用名单中，移除该锚点', id));
       continue;
     }
-    const actualRoom = text(row.location_id);
+    const actualRoom = physicalRoom(text(row.location_id));
     if (actualRoom && actualRoom !== roomId) {
       issues.push(warn('ACTOR_LOCATION_MISMATCH', '$.actors.roomId', '该人物当前不在名单指定的房间，按真实 SQL 归属处理', id));
       continue;
@@ -268,7 +273,7 @@ export function reconcileOccupantsSpec(input: OccupantsInput): OccupantsResult {
   // SQL 归属补齐：刚迁入这个房间的人物本轮就要有可点标点，不等下一轮。
   for (const row of characterRows) {
     const id = text(row?.id);
-    const roomId = text(row?.location_id);
+    const roomId = physicalRoom(text(row?.location_id));
     if (!id || !roomIds.has(roomId)) continue; // 在学校但不在具体教室 → 不下场
     if (seenActors.has(id) || transit.has(id)) continue;
     // location_id 已明确落在本图房间时，外层/旧地图上的坐标不能覆盖当前房间归属。
@@ -283,7 +288,7 @@ export function reconcileOccupantsSpec(input: OccupantsInput): OccupantsResult {
   const seenItems = new Set<string>();
   const groundInRoom = itemRows.filter((row) => {
     if (text(row?.holder_character_id) || text(row?.container_item_id)) return false;
-    return roomIds.has(text(row?.location_id));
+    return roomIds.has(physicalRoom(text(row?.location_id)));
   });
 
   for (const raw of rows(requestSpec.items as SqlRow[])) {
@@ -300,7 +305,7 @@ export function reconcileOccupantsSpec(input: OccupantsInput): OccupantsResult {
     }
     const on = text(raw?.on) || prevItems.get(id)?.on || ledgerBound.get(id) || '';
     const groupRoomId = on ? text(groupRoom.get(on)) : '';
-    const actualRoom = text(row.location_id);
+    const actualRoom = physicalRoom(text(row.location_id));
     if (on && groupIds.has(on) && groupRoomId && actualRoom && groupRoomId === actualRoom) {
       seenItems.add(id);
       items.push({ id, on });
@@ -318,7 +323,7 @@ export function reconcileOccupantsSpec(input: OccupantsInput): OccupantsResult {
   for (const row of groundInRoom) {
     const id = text(row?.id);
     if (!id || seenItems.has(id)) continue;
-    const actualRoom = text(row?.location_id);
+    const actualRoom = physicalRoom(text(row?.location_id));
     // §19.4：账本登记了支撑关系且陈设仍在本图同一房间 → 仍算「被支撑」，不做地面物品。
     const boundOn = ledgerBound.get(id) ?? '';
     if (boundOn && groupIds.has(boundOn) && text(groupRoom.get(boundOn)) === actualRoom) {

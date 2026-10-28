@@ -457,7 +457,8 @@ export function compileRoutePropose(op: ParsedOperation, ctx: CompileContext): C
       },
       { branchId: ctx.branchId, id: rowId, turnId, clockS: ctx.clockS, nowWallMs: Date.now(), rulesetVersion: 'atlas-1' },
     );
-    result.mutations.push(mutation('routes', rowId, null, row, op, basisOf(ctx, op)));
+    const mapIntent = !Object.prototype.hasOwnProperty.call(data, 'map_ref') ? 'omitted' : data.map_ref === null ? 'explicit-null' : 'explicit-map';
+    result.mutations.push(mutation('routes', rowId, null, row, op, { ...basisOf(ctx, op), routeIntent: { mapIntent, sourceOperationId: op.opId } }));
   }
   result.declaredRefs = ref?.startsWith('new:')
     ? [{ alias: ref, id: rowId, kind: 'route', rowRev: null, declaredByOpId: op.opId }]

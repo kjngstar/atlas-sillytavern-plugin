@@ -18,6 +18,7 @@ import { decodeRow } from './atlas-db-codec.ts';
 import { tableColumnNames } from './atlas-db-schema.ts';
 import { createRow } from './atlas-db-defaults.ts';
 import { MOVEMENT_SPEED_PRESETS, TERRAIN_MULTIPLIERS } from './atlas-sim-motion.ts';
+import { evaluateCondition } from './atlas-sim-actions.ts';
 import { collectOpportunities } from './atlas-sim-opportunities.ts';
 import type { SqlDatabase } from './atlas-db-runtime.ts';
 import type { Issue } from './atlas-ops-contract.ts';
@@ -186,6 +187,18 @@ function findRoute(world: { db: SqlDatabase; branchId: string }, fromId: string,
   return null;
 }
 
+/**
+ * §17.3：道路关闭/毁坏/访问条件变化时，**消息也不能穿过**。
+ *
+ * `openRoutesFrom` 只按 `status='open'` 过滤；访问条件（宵禁、关卡、断桥）是另一层，
+ * 必须按当前世界时刻求值。没有规则的路线视为不受新增限制。
+ */
+function routePassable(world: { db: SqlDatabase; branchId: string; clockS?: number }, route: Record<string, unknown>): boolean {
+  const condition = asObject(route.access_rules_json);
+  if (!condition) return true;
+  return evaluateCondition(world, condition, { clockS: num(world.clockS) ?? 0, actorId: null }).ok;
+}
+
 function frontIndex(world: { db: SqlDatabase; branchId: string }): Set<string> {
   const out = new Set<string>();
   for (const row of queryBound(world.db, 'SELECT information_id, location_id FROM rumor_fronts WHERE branch_id = ?', [world.branchId])) {
@@ -298,6 +311,12 @@ export function scheduleDeliveries(
 
         const route = findRoute(world, sourceLocation, recipientLocation);
         if (!route) continue;
+        if (!routePassable(world, route)) {
+          issues.push(
+            issue('PROPAGATION_ROUTE_CLOSED', 'routes.access_rules_json', `渠道 ${channelId} 经过的路段当前通行条件不成立：消息不穿过关闭/毁坏的路`, 'warning'),
+          );
+          continue;
+        }
         const speed = carrierSpeed(route, mode);
         const distance = routeDistanceM(route);
         if (speed === null || distance.value === null) {
@@ -332,6 +351,12 @@ export function scheduleDeliveries(
       const destination = otherEnd(route, locationId);
       if (!destination) continue;
       if (existing.has(`${informationId}|${destination}`) || scheduled.has(`${informationId}|${destination}`)) continue; // 去重
+      if (!routePassable(world, route)) {
+        issues.push(
+          issue('PROPAGATION_ROUTE_CLOSED', 'routes.access_rules_json', `到 ${destination} 的路段当前通行条件不成立：消息不穿过关闭/毁坏的路`, 'warning'),
+        );
+        continue;
+      }
       const mode = pickCarrier(route, null);
       const speed = carrierSpeed(route, mode);
       const distance = routeDistanceM(route);

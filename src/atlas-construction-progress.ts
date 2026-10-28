@@ -407,11 +407,17 @@ function payloadText(payload: Record<string, unknown>): string {
   return JSON.stringify(payload);
 }
 
-function mutation(
+/**
+ * 通用进度行变更构造：审计字段（row_rev / created_turn_id / updated_turn_id）只在这里算一次。
+ *
+ * 导出给 `atlas-world-build-state.ts` 等程序记账模块复用 —— 它们写的是同一张
+ * construction_progress，如果各自拼 after，审计字段迟早不一致。
+ */
+export function progressRowMutation(
   ctx: ProgressMutationContext,
   row: { id: string; scopeKey: string; kind: ProgressKind; subjectKey: string },
   before: Record<string, unknown> | null,
-  fields: { inputSignature: string; status: ProgressStatus; lastServedSeq?: number; payload?: Record<string, unknown> },
+  fields: { inputSignature: string; status: ProgressStatus; lastServedSeq?: number; payload?: Record<string, unknown>; basis?: Record<string, unknown> },
 ): RowMutation {
   const audit = {
     branch_id: ctx.branchId,
@@ -436,7 +442,8 @@ function mutation(
     before,
     after,
     sourceOpIds: [ctx.opId],
-    basis: { kind: 'simulation', reason: '建设进度/调度记账（程序内部行，不是世界业务变化）' },
+    // 记账/调度行默认记 simulation；剧情驱动的状态事实可以显式覆盖，不能把剧情说成推演。
+    basis: fields.basis ?? { kind: 'simulation', reason: '建设进度/调度记账（程序内部行，不是世界业务变化）' },
   };
 }
 
@@ -458,7 +465,7 @@ export function scopeRowMutation(
     allocationSeq: state.allocationSeq,
     schedulerSeq: state.schedulerSeq,
   };
-  return mutation(ctx, { id: progressId('scope', scopeKey, scopeKey), scopeKey, kind: 'scope', subjectKey: scopeKey }, before, {
+  return progressRowMutation(ctx, { id: progressId('scope', scopeKey, scopeKey), scopeKey, kind: 'scope', subjectKey: scopeKey }, before, {
     inputSignature: stableHexHash([scopeKey, `policy:${CONSTRUCTION_QUEUE_POLICY_VERSION}`, uniqueSorted(focusIds).join(',')].join('\u0000')),
     status: 'processed',
     payload,
@@ -475,7 +482,7 @@ export function targetRowMutation(
   payload: Record<string, unknown>,
   lastServedSeq?: number,
 ): RowMutation {
-  return mutation(
+  return progressRowMutation(
     ctx,
     { id: progressId('target', scopeKey, locationId), scopeKey, kind: 'target', subjectKey: locationId },
     before,
@@ -520,7 +527,7 @@ export function unitRowMutation(
     // 有界：只留前 256 条，别名与真实 ID 都截到合理长度（payload 有 64 KiB 单行上限）。
     payload.bindings = Object.fromEntries(bindings.slice(0, 256).map(([alias, id]) => [alias.slice(0, 128), String(id).slice(0, 128)]));
   }
-  return mutation(
+  return progressRowMutation(
     ctx,
     { id, scopeKey, kind: 'unit', subjectKey: id },
     before,

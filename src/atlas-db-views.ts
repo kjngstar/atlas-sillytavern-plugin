@@ -14,6 +14,7 @@ import { buildPositionCache, resolveEffectivePosition } from './atlas-sim-positi
 import { computeViewportScaleBar } from './atlas-scale.ts';
 import { scenePositions } from './atlas-scene-layout.ts';
 import { sqlVisibility } from './atlas-sql-visibility.ts';
+import { seesInternalMonologue, seesRecordedAction, stripScopeFields } from './atlas-player-view-scope.ts';
 import { resolveMapTopology } from './atlas-map-topology.ts';
 import { ATLAS_RUNTIME_LIMITS } from './atlas-runtime-limits.ts';
 import { publicMapFrame, publicSpaceCanonical, collectMapLocations } from '../vendor/atlas-spatial/index.mjs';
@@ -85,8 +86,13 @@ export type ViewContext = {
   revision: number;
   /** §7.1 第 6 条：随存档带来的底图资产清单；用于明确提示底图缺失（缺底图不丢实体）。 */
   assets?: AtlasAssetRef[];
-  /** 视角过滤：pov 只返回主角已知内容；author 返回作者视图。 */
-  viewMode?: 'pov' | 'author';
+  /**
+   * 视角过滤，三个作用域（P08 §14）：
+   * - `pov`：只返回主角已知内容（模型输入与角色决策用）；
+   * - `player`：完整**已记录**世界，去掉内部独白与供应商正文；
+   * - `author`：完整世界 + 机器内部字段。
+   */
+  viewMode?: 'pov' | 'author' | 'player';
   povId?: string | null;
   /** M4/Q03：空间适配器作用域需要 chatId；读口无宿主会话时用分支兜底。 */
   chatId?: string;
@@ -528,7 +534,8 @@ export function queryMapView(ctx: ViewContext, query: ViewQuery): ViewResult {
         const containerId = map.container_location_id ? String(map.container_location_id) : null;
         if (!containerId) return null;
         const read = readSpaceCanonical(map.frame_json, containerId);
-        return read.canonical ? publicSpaceCanonical(read.canonical, { viewMode: ctx.viewMode ?? 'author' }) : null;
+        // vendor 只认 pov / author：玩家与作者同档看完整空间，差别在字段披露（P08 §14.1）。
+        return read.canonical ? publicSpaceCanonical(read.canonical, { viewMode: ctx.viewMode === 'pov' ? 'pov' : 'author' }) : null;
       })(),
       /**
        * P13/R03 §20：本图的绘图档案裁决（布局 kind 的来源、导航名、责任范围、partial 说明）。
@@ -547,6 +554,7 @@ export function queryMapView(ctx: ViewContext, query: ViewQuery): ViewResult {
           && (String(row.from_location_id ?? '') === containerId || String(row.to_location_id ?? '') === containerId));
         const resolution = resolveSpatialProfile({
           map,
+          maps:displayMaps,
           container: container ?? null,
           parentContainer: visibleLocations.find(row=>row.id===container?.parent_location_id) ?? null,
           corridorEntityId: boundCorridorIdOf(map),
@@ -684,7 +692,10 @@ export function queryNearby(ctx: ViewContext, query: ViewQuery): ViewResult {
     const locationId=directLocation(id,position);
     if(targetLocation && locationId===targetLocation) {
       results.push({entityId:id,name:String(ch.name??''),relevance:'same_location',positionQuality:position.kind==='at_grid'?position.precision:'coarse',
-        locationId,locationName:String(cache.locations?.get(locationId)?.name??''),thought:ctx.viewMode==='author'?ch.thought:undefined,actionTendency:ctx.viewMode==='author'?ch.action_tendency:undefined});
+        locationId,locationName:String(cache.locations?.get(locationId)?.name??''),
+        // P08 §14.6：已记录行动对玩家可见；后台想法只有作者可见。
+        thought:seesInternalMonologue(ctx.viewMode)?ch.thought:undefined,
+        actionTendency:seesRecordedAction(ctx.viewMode)?ch.action_tendency:undefined});
     } else if (target.kind === 'at_grid' && position.kind === 'at_grid' && position.mapId === here && !targetLocation && !locationId) {
       const dx = position.x - target.x;
       const dy = position.y - target.y;
@@ -745,7 +756,8 @@ export function queryEntityDetail(ctx: ViewContext, query: ViewQuery): ViewResul
     return {
       branchId: ctx.branchId,
       revision: ctx.revision,
-      items: [{ kind, character, relations, actions, journeys, heldItems, knowledge, position }],
+      // P08 §14.6/§14.7：玩家能看这名人物的完整记录，但不含后台想法与作者账本字段。
+      items: [{ kind, character: stripScopeFields(character, ctx.viewMode, 'characters'), relations, actions, journeys, heldItems, knowledge, position }],
       metadata: { counts: { relations: relations.length, actions: actions.length, journeys: journeys.length, heldItems: heldItems.length, knowledge: knowledge.length } },
     };
   }

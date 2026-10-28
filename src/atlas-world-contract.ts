@@ -357,3 +357,68 @@ export type JournalSnapshot = {
   operationIds: string[];
   groupIds: string[];
 };
+
+// ───────────────────── 全局建设覆盖与回执（v2 §5.4） ─────────────────────
+
+/**
+ * 建设覆盖摘要。
+ *
+ * 纪律：
+ * - `requiredTargets = requiredDone + requiredPending + requiredFailed + requiredBlocked`
+ *   必须成立，否则进度条会凭空多出或少掉目标。
+ * - `deferredInteriors` **单列**：仅常识补出的设施内部，等剧情进入才建，不计失败、
+ *   也不进开局必建分母。
+ * - `sourceScanComplete` 与 `scopeSealed` 都成立之后才允许报告最终完成率；
+ *   前期只能说「已扫描 8/12 条来源，已完成 20 项」，不能因为分母还在长就宣称 100%。
+ * - `registeredMaps` 与 `readyMaps` 必须分开：登记了地图行 ≠ 布局已画出来（F05）。
+ */
+export type WorldBuildCoverageV1 = {
+  version: 1;
+  sourceScanComplete: boolean;
+  scopeSealed: boolean;
+  requiredTargets: number;
+  requiredDone: number;
+  requiredPending: number;
+  requiredFailed: number;
+  requiredBlocked: number;
+  deferredInteriors: number;
+  registeredMaps: number;
+  readyMaps: number;
+  cumulativeTransports: number;
+  completedWithIssues: boolean;
+};
+
+/** 覆盖率不变式是否成立；返回 null 表示通过。 */
+export function checkCoverageInvariant(coverage: WorldBuildCoverageV1): string | null {
+  const sum = coverage.requiredDone + coverage.requiredPending
+    + coverage.requiredFailed + coverage.requiredBlocked;
+  if (sum !== coverage.requiredTargets) {
+    return `requiredTargets(${coverage.requiredTargets}) ≠ done+pending+failed+blocked(${sum})`;
+  }
+  if (coverage.readyMaps > coverage.registeredMaps) {
+    return `readyMaps(${coverage.readyMaps}) 不能大于 registeredMaps(${coverage.registeredMaps})`;
+  }
+  return null;
+}
+
+/**
+ * 是否允许报告「最终完成率」。
+ * 扫描没读完或范围没封口时分母还在长，此时报百分比是骗人。
+ */
+export function canReportFinalCompletion(coverage: WorldBuildCoverageV1): boolean {
+  return coverage.sourceScanComplete && coverage.scopeSealed;
+}
+
+/**
+ * 回合回执里的建设摘要。
+ *
+ * 只放「这一轮让玩家/作者看到什么」：任务、状态、覆盖、停止原因。
+ * 目标的完整清单不进回执——它按 construction_progress 分页读。
+ */
+export type WorldBuildReceiptV1 = {
+  version: 1;
+  jobId: string;
+  status: string;
+  coverage: WorldBuildCoverageV1;
+  stopReason: string | null;
+};

@@ -31,6 +31,7 @@ import {
   type SpatialScope,
 } from './atlas-spatial-frame.ts';
 import { resolveMapSpaceSize, readSpaceCanonical, locationSpaceSize } from './atlas-space-canonical.ts';
+import { functionalAreaMembers } from './atlas-spatial-profile.ts';
 import {completeLayoutClosure,supportedCorridor,normalizePlannedFrame} from './atlas-layout-closure.ts';
 
 type SqlRow = Record<string, unknown>;
@@ -745,6 +746,7 @@ export function applyPendingSpatialRequests(input: ApplyPendingInput): ApplyPend
       requestSpec: spec,
       container:(()=>{const row=locations.find(l=>l.id===mapRow!.container_location_id);return row?{id:row.id,kind:row.kind}:null;})(),
       locations,
+      functionalAreas:functionalAreaMembers(locations.find(row=>row.id===mapRow!.container_location_id)??null,locations.filter(row=>row.map_id===job.mapId),maps).map(area=>({id:area.id,parent_location_id:area.parent_location_id})),
       characters,
       items,
       spaceCanonical: ledgerForOccupants.canonical,

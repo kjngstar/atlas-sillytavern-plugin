@@ -24,6 +24,8 @@ import { SPATIAL_SCENE_KEY } from './atlas-spatial-frame.ts';
 import type { TableReadPort } from './atlas-ops-compile-types.ts';
 import type { ModelBatchRequest, Issue, ModelOperation, RequiredRef } from './atlas-ops-contract.ts';
 import { buildStagePrompt } from './atlas-ops-prompts.ts';
+import { budgetUsage, classifyOperation, constructionBudget } from './atlas-construction-budget.ts';
+import { buildSourceCatalogue } from './atlas-source-catalogue.ts';
 import { stable } from '../vendor/atlas-spatial/index.mjs';
 import type { CompletionPolicy, GenerationTask, PlanIssue, TaskCatalogue, WorldCompletionMode, WorldFillState } from './atlas-world-contract.ts';
 
@@ -37,6 +39,8 @@ export const WORLD_CONSTRUCTION_OPS: readonly string[] = ['location.upsert', 'ro
 export const WORLD_CONSTRUCTION_POLICY_VERSION = 1;
 
 export type SqlWorldCompletionInput = {
+  /** A global source scan can discover the first real entity without a fabricated focus. */
+  sourceScan?: boolean;
   mode: WorldCompletionMode;
   focusLocationIds: readonly string[];
   policy?: Partial<CompletionPolicy>;
@@ -354,22 +358,47 @@ function buildConstructionRequest(
     '不要从名称后缀（「…区」「…楼」「…路」）反推父子关系；只按已给父链与真实资料判断。',
     '未获已注册事实支持的新地点必须写 existence_quality=inferred，不要自称 confirmed。',
     '禁止输出 event / character / item / time 相关操作：本阶段只做空间结构。',
+    // P02 §8 第 1 条：共同总额必须写在模型看得见的地方，不能只靠报错教育它。
+    '本批所有非 noop 操作共用一个总额（见【当前范围与预算】的 totalOperations）：新增地点、新增路线、地点更新、尺度估计一起占用这个额度。newLocations / newRoutes 是总额之内更细的分类上限，**不是额外通道**——不要以为「地点 64、路线 64」就能输出 128 条。超出的部分会被延后到下一批，本批视为未完成。',
     '没有需要修改的数据时输出 {"op":"noop"}。',
   ].join('\n');
 
+  const totalBudget = constructionBudget({
+    maxNewLocations: policy.maxNewLocations,
+    maxNewRoutes: policy.maxNewRoutes,
+  });
   const budgetLine = [
     `mode=${input.mode}`,
     `focus=${focusIds.join('、') || '（无）'}`,
     `maxNewLocations=${policy.maxNewLocations}`,
     `maxNewRoutes=${policy.maxNewRoutes}`,
     `maxAdditionalDepth=${policy.maxAdditionalDepth}`,
+    // 共同总额放在行尾：`focus=…、maxNewLocations=…` 的前缀形状是既有下游解析依赖，不要插到中间。
+    `totalOperations=${totalBudget.totalOperations}`,
   ].join('、');
+
+  /**
+   * 来源别名（P02 §8 第 5–6 条）。
+   *
+   * 目录由 sourceKey 集合确定性生成（按 key 字典序分配 SRC1…），编译侧用同一批快照
+   * 重建会得到完全相同的别名 —— 所以提示词里可以安全地只显示 SRC1，而不必把目录对象
+   * 一路透传到编译器。kind 只参与目录 hash，不参与别名分配。
+   */
+  const sourceCatalogue = buildSourceCatalogue(
+    sources.chunks
+      .map((chunk) => chunk.sourceKey)
+      .filter((key) => typeof key === 'string' && key.length > 0)
+      .filter((key, index, all) => all.indexOf(key) === index)
+      .map((key) => ({ key, contentHash: '', kind: '' })),
+  );
+  const aliasOfSource = new Map(sourceCatalogue.entries.map((entry) => [entry.key, entry.alias]));
 
   const sourceLines = sources.chunks.length === 0
     ? ['（无可用来源）']
     : sources.chunks.map((chunk) => {
+        const alias = aliasOfSource.get(chunk.sourceKey) ?? '';
         const boundary = chunk.total > 1 ? `（第 ${chunk.index + 1}/${chunk.total} 块，原文偏移 ${chunk.start}-${chunk.end}）` : '';
-        return `【${chunk.sourceKey}｜${chunk.contentHash}】${boundary}\n${chunk.text}`;
+        return `【${alias || 'SRC?'}｜${chunk.sourceKey}｜${chunk.contentHash}】${boundary}\n${chunk.text}`;
       });
 
   const catalogueRows = new Map(Object.values(catalogue.rows).flat().map(row => [String(row.id), row]));
@@ -388,6 +417,7 @@ function buildConstructionRequest(
   const user = [
     `【当前范围与预算】${budgetLine}`,
     `【世界观相关来源】`, ...sourceLines,
+    '（来源块方括号内依次是别名｜完整 key｜内容哈希。操作顶层 source 字段可写别名 SRC1 或完整 key；不要写块编号或哈希。）',
     `【本次实体目录】${refLines.join('、') || '（空）'}（已存在对象用目录 ref；新对象用 new:。按名称、类别、父关系核对后复用已有对象，不重复新增走廊等已有空间；局部内部空间必须明确 parent_ref）`,
     `【已存在结构】`, ...memberLines, ...lockLines,
     `【缺项】`, ...missingLines,
@@ -447,11 +477,11 @@ export function buildSqlWorldCompletionTask(
     }
     requested = uniqueSorted(requested);
   }
-  if (requested.length === 0) return null;
+  if (requested.length === 0 && !input.sourceScan) return null;
 
   const policy = normalizeCompletionPolicy(input.policy);
   const plan = planCandidates(tables, branchId, { ...input, focusLocationIds: requested }, policy);
-  if (plan.focusIds.length === 0) return null;
+  if (plan.focusIds.length === 0 && !input.sourceScan) return null;
 
   const sources = input.sourceSelection ?? selectWorldConstructionSources({
     snapshot: input.sourceSnapshot ?? [],
@@ -461,6 +491,7 @@ export function buildSqlWorldCompletionTask(
     maxChars: input.sourceMaxChars ?? WORLD_SOURCE_MAX_CHARS,
     cache: input.worldSourceCache,
   });
+  if (input.sourceScan && !sources.chunks.length) return null;
 
   // 完成状态所属图（P07/R04）：由地点**唯一的 active 容器图**持有。
   // 地点在外部图上的 marker 归属只作目录上下文，绝不参与完成状态的读或写——
@@ -718,5 +749,40 @@ export function normalizeConstructionOps(input: NormalizeConstructionInput): Nor
     issues.push({ code: 'WORLD_CONSTRUCTION_DEFERRED', path: `$.operations.${op.op}.${str(op.ref)}`, message: `${str(op.ref) || op.op} 超出本批地点/路线/深度预算或依赖待处理地点，留待下一批建设。`, severity: 'warning', retryable: true });
     return false;
   });
-  return { operations: bounded, issues, downgraded, protectedDrops };
+
+  // ── P02 §8 第 1/4 条：共同总额（F03 的生成侧修复）──
+  //
+  // 旧实现只分别检查「新地点数 / 新路线数 / 展开深度」，没有检查**非 noop 操作总数**：
+  // 于是「地点 64 条」能通过 normalize，却在解析器被 TOO_MANY_OPERATIONS 截掉，
+  // 模型以为自己交完了，差额静默消失。
+  // 这里把共同额度提前到生成侧：超出的操作明确延后并报出，解析器那边不会再掉操作。
+  const totalBudget = constructionBudget({
+    maxNewLocations: policy.maxNewLocations,
+    maxNewRoutes: policy.maxNewRoutes,
+  });
+  const totalUsage = budgetUsage(bounded, known);
+  const withinTotal: ModelOperation[] = [];
+  let usedTotal = 0;
+  for (const op of bounded) {
+    const cls = classifyOperation(op, known);
+    if (cls === 'noop') {
+      withinTotal.push(op);
+      continue;
+    }
+    if (usedTotal + 1 > totalBudget.totalOperations) {
+      issues.push({
+        code: 'WORLD_CONSTRUCTION_BUDGET_EXCEEDED',
+        path: `$.operations.${op.op}.${str(op.ref)}`,
+        message: `${str(op.ref) || op.op} 超出本批共同预算 ${totalBudget.totalOperations} 条非 noop 操作`
+          + `（本批共 ${totalUsage.total} 条；地点与路线共用同一总额，不是各 64 条）；留待下一批建设。`,
+        severity: 'warning',
+        retryable: true,
+      });
+      continue;
+    }
+    usedTotal += 1;
+    withinTotal.push(op);
+  }
+
+  return { operations: withinTotal, issues, downgraded, protectedDrops };
 }

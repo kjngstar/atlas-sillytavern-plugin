@@ -96,6 +96,22 @@ function applyMutation(db: SqlDatabase, m: RowMutation, branchId: string): void 
  * E05 applyGroups。
  * 完成定义：验证失败回滚本组，依赖组不执行；成功/失败独立记账。
  */
+/**
+ * 进度表上的「业务事实」写入：只认世界事实层 payload。
+ * 解析失败或 payloadKind 不是 world-fact/v1，一律按程序表处理（拒绝）。
+ */
+function isWorldFactOnlyMutation(m: RowMutation): boolean {
+  const raw = m?.after?.['payload_json'];
+  if (typeof raw !== 'string' || raw.trim() === '') return false;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return !!parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      && (parsed as Record<string, unknown>)['payloadKind'] === 'world-fact/v1';
+  } catch {
+    return false;
+  }
+}
+
 export function applyGroups(
   db: SqlDatabase,
   orderedGroups: AtomicGroup[],
@@ -135,8 +151,13 @@ export function applyGroups(
 
     // P09A/§15.4 第 4 条：进度/调度表只有程序（显式 bookkeeping 组）能写。
     // 模型语义操作编译出来的组默认是业务组，想写这些表直接整组 rejected，不给表级写入口。
+    //
+    // §5.7/§18.4 的唯一例外：**世界事实层**（payloadKind=world-fact/v1）是业务事实，
+    // 由语义操作 `space.state.patch` 在业务组里写入。闸门仍然有效——
+    // job/target/unit/scope/settlement-plan 这些队列行照旧只能由 bookkeeping 组写，
+    // 模型既不能借道写队列，也不能把状态事件伪装成任务进度。
     const forbiddenWrite = group.mutations.find(
-      (m) => PROGRAM_ONLY_WRITE_TABLES.includes(m.table) && group.purpose !== 'bookkeeping',
+      (m) => PROGRAM_ONLY_WRITE_TABLES.includes(m.table) && group.purpose !== 'bookkeeping' && !isWorldFactOnlyMutation(m),
     );
     if (forbiddenWrite) {
       blockedGroups.add(gid);

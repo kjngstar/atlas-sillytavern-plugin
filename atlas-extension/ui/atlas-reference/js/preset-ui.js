@@ -11,8 +11,8 @@ function create({root,store,esc,toast,diagnostic,modal,renderPage,download,fetch
   */
  function engineStrip(){
   const caps=Array.isArray(engine.capabilities)?engine.capabilities:[];
-  const suggested=engine.suggested;
-  return `<div class="engine-strip"><span class="engine-cell">分层：固定协议 → 用户策略 → 程序任务上下文</span><span class="engine-cell">策略版本：${esc(engine.policyVersion||'未知（宿主未上报）')}</span><span class="engine-cell">程序能力：${caps.length?caps.map(esc).join('、'):'（本版本未声明空间能力）'}</span>${suggested?`<button class="text-btn" data-adopt-suggested>另存内置建议策略（${esc(suggested.version)}）</button>`:''}</div>`;
+  const suggested=engine.suggested,notice=engine.compatibilityNotice;
+  return `<div class="engine-strip"><span class="engine-cell">分层：固定协议 → 用户策略 → 程序任务上下文</span><span class="engine-cell">策略版本：${esc(engine.policyVersion||'未知（宿主未上报）')}</span><span class="engine-cell">程序能力：${caps.length?caps.map(esc).join('、'):'（本版本未声明空间能力）'}</span>${notice?.needsAttention?`<span class="scope-note" data-preset-compatibility>${esc(notice.message)} · 当前预设保持原样。</span>`:''}${suggested?`<button class="text-btn" data-adopt-suggested>另存内置建议策略（${esc(suggested.version)}）</button>`:''}</div>`;
  }
  function options(type,selected){const list=type==='connection'?store.document.connections:store.document.promptPresets;return list.map(p=>`<option value="${esc(p.id)}" ${p.id===selected?'selected':''}>${esc(p.name)}</option>`).join('');}
  function status(type){

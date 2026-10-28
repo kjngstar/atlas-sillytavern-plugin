@@ -22,7 +22,8 @@ export function mountReferenceUi({root,core,api,getContext,settingsPort,lorePort
   const frame=root.ownerDocument.createElement('iframe');frame.title='ATLAS 世界工作台';
   frame.setAttribute('aria-label','原版 ATLAS 世界工作台');
   Object.assign(frame.style,{display:'block',width:'100%',height:'100%',border:'0',background:'transparent'});
-  let disposed=false,ready=false,viewMode='author',epoch=0,lastKey='',scopeId='',lastReadFailure='',latest=emptyReferenceData(),sqlMod=null,loading=null;
+  // P08 §14：默认玩家视图（完整已记录世界）；作者后台必须显式切换。
+  let disposed=false,ready=false,viewMode='player',epoch=0,lastKey='',scopeId='',lastReadFailure='',latest=emptyReferenceData(),sqlMod=null,loading=null;
   let settings={},prefs={},presetDoc=null,presetQueue=Promise.resolve(),actionBusy=false,actionError=null,actionScope='';
   let preferencesQueue=Promise.resolve(),skinStorage=null,skinOpening=null,ownerOpening=null;
   function writeUiPreferences(patch){const copy=JSON.parse(JSON.stringify(patch));const pending=preferencesQueue.then(async()=>{if(disposed)throw Error('UI_DISPOSED');if(typeof settingsPort?.write!=='function')throw Error('UI_STORAGE_UNAVAILABLE');const next={...prefs,...copy};await settingsPort.write('referenceUiPreferences',next);prefs=next;return true;});preferencesQueue=pending.catch(()=>{});return pending;}
@@ -135,6 +136,7 @@ export function mountReferenceUi({root,core,api,getContext,settingsPort,lorePort
         policyVersion:typeof settings.promptPolicyVersion==='string'?settings.promptPolicyVersion:null,
         capabilities:Array.isArray(settings.spatialCapabilities)?[...settings.spatialCapabilities]:[],
         activePromptPresetId:settings.activePromptPresetId??null,
+        compatibilityNotice:settings.promptCompatibility??null,
         suggested:typeof settings.promptPolicyVersion==='string'&&Array.isArray(settings.builtInSqlPrompt?.segments)
           ?{version:settings.promptPolicyVersion,name:settings.builtInSqlPrompt.name??'内置建议策略',
             segments:settings.builtInSqlPrompt.segments.map((s,index)=>({role:s.role,name:s.name??`第 ${index+1} 段`,content:s.content,enabled:true}))}:null,
@@ -220,6 +222,12 @@ export function mountReferenceUi({root,core,api,getContext,settingsPort,lorePort
   }
   function findNode(node,id){if(node.id===id)return node;for(const child of node.children??[]){const found=findNode(child,id);if(found)return found;}return null;}
   async function readLore(){const ticket={...scope(),epoch};const rows=viewMode==='author'?await lorePort?.read?.()??[]:[];if(!live(ticket))return;latest.LORE=rows.map(l=>({...l,target:[...latest.LOCATIONS,...latest.CAST].find(x=>l.keys.some(k=>k===x.name))?.id??null}));deliver(latest);}
+  async function haltBuild(){
+    const captured=scope(),job=latest?.buildStatus?.job;
+    if(!job?.id||!['pending','running'].includes(job.status))return;
+    const result=await request('POST','/sql/world-build/control',{chatUid:captured.state.chatId,branchId:captured.state.binding?.branchId??'main',jobId:job.id,action:'stop'});
+    if(result.coreSaved!==true)throw Error('建设停止尚未保存，读取设置未修改');
+  }
   async function persistPresets(doc,action={kind:'selection'}){
     if(actionBusy)throw Error('当前推演正在执行，请结束后再保存预设');
     const task=async()=>{
@@ -267,7 +275,7 @@ export function mountReferenceUi({root,core,api,getContext,settingsPort,lorePort
     async toggleLore(id){
       if(viewMode!=='author')throw Error('请切换世界后台后修改世界书条目');
       if(!lorePort?.toggle)throw Error('世界书启停端口不可用');
-      await lorePort.toggle(id);await readLore();
+      await haltBuild();await lorePort.toggle(id);await readLore();
     },
     downloadFile(filename,content,type='application/json'){
       // Own the Blob in the top document: embedded browsers cannot download
@@ -298,12 +306,48 @@ export function mountReferenceUi({root,core,api,getContext,settingsPort,lorePort
       const captured=scope();
       await refresh(true);
       if(disposed||captured.key!==scope().key||captured.metadata!==context()?.chatMetadata||mapExportViews?.key!==scope().key)throw Error('世界或视角已变化，请重新导出地图');
-      return buildMapAnalysisExport({data:latest,...mapExportViews,mapId,pluginVersion,layoutPolicyVersion:sqlMod?.LAYOUT_SIGNATURE_POLICY_VERSION??null});
+      // P14 §20.4：把工作台的建图覆盖摘要一起带进分析文件（只读派生，不新增请求）。
+      const status=latest?.buildStatus??null;
+      const buildCoverage=status?{
+        sourceScanComplete:status.sourceScan?.complete===true,
+        scopeSealed:status.sourceScan?.scopeSealed===true,
+        requiredTargets:status.totals.required.total,
+        requiredDone:status.totals.required.done,
+        requiredPending:status.totals.required.pending,
+        requiredFailed:status.totals.required.failed,
+        requiredBlocked:status.totals.required.blocked,
+        deferredInteriors:status.totals.deferredInteriors,
+        registeredMaps:status.mapLayouts.registered,
+        readyMaps:status.mapLayouts.laidOut,
+        cumulativeTransports:status.windows.cumulativeTransports,
+        completedWithIssues:status.totals.required.pending===0
+          &&(status.totals.required.failed>0||status.totals.required.blocked>0),
+      }:null;
+      return buildMapAnalysisExport({data:latest,...mapExportViews,mapId,pluginVersion,buildCoverage,
+        layoutPolicyVersion:sqlMod?.LAYOUT_SIGNATURE_POLICY_VERSION??null});
     },
-    async setViewMode(mode){viewMode=mode==='author'?'author':'pov';await refresh(true);if(frame.contentWindow?.AtlasPreview?.state.page==='lore')await bridge.onPage('lore');},
-    async setLoreRead(id,enabled){if(viewMode!=='author')throw Error('请切换世界后台后修改 ATLAS 读取设置');if(!lorePort?.setAtlasRead)throw Error('ATLAS 读取设置不可用');await lorePort.setAtlasRead(id,enabled);await readLore();},
+    /**
+     * P08 §14：三个作用域各自独立，**不做二值折叠**。
+     * `author` 世界后台 / `player` 玩家可见全量 / `pov` 单个角色认知。
+     * 折成两档会让 `pov` 从界面上彻底消失，而模型输入、世界书投影都按 pov 计算。
+     */
+    async setViewMode(mode){
+      viewMode=mode==='author'?'author':mode==='pov'?'pov':'player';
+      await refresh(true);
+      if(frame.contentWindow?.AtlasPreview?.state.page==='lore')await bridge.onPage('lore');
+    },
+    async setLoreRead(id,enabled){if(viewMode!=='author')throw Error('请切换世界后台后修改 ATLAS 读取设置');if(!lorePort?.setAtlasRead)throw Error('ATLAS 读取设置不可用');if(!enabled)await haltBuild();await lorePort.setAtlasRead(id,enabled);await readLore();},
     close(){core.setPanelOpen(false);},
-    async setEnabled(enabled){if(actionBusy||core.getState().pendingTurn)throw Error('有回合正在处理，请稍后再试');if(!core.getState().binding)throw Error('请先建立当前聊天的世界');await core.setEnabled(enabled);await refresh(true);const s=core.getState();if(s.binding?.enabled!==enabled)throw Error(s.lastError??'推演开关未保存');},
+    async buildControl(action){
+      if(action!=='stop'&&action!=='retry-failed')throw Error('未知建设控制操作');
+      const captured=scope(),job=latest?.buildStatus?.job;
+      if(!job?.id)throw Error('当前没有建设任务');
+      const result=await request('POST','/sql/world-build/control',{chatUid:captured.state.chatId,branchId:captured.state.binding?.branchId??'main',jobId:job.id,action,
+        ...(action==='retry-failed'?await sourceText(captured):{})});
+      if(result.coreSaved!==true)throw Error('宿主尚未确认建设控制请求');
+      if(sameWorld(captured)){await core.refresh();await refresh(true);}
+    },
+    async setEnabled(enabled){if(actionBusy||core.getState().pendingTurn)throw Error('有回合正在处理，请稍后再试');if(!core.getState().binding)throw Error('请先建立当前聊天的世界');if(!enabled)await haltBuild();await core.setEnabled(enabled);await refresh(true);const s=core.getState();if(s.binding?.enabled!==enabled)throw Error(s.lastError??'推演开关未保存');},
     async advance(){return withTask(core.getState().binding?'advance':'initialize',async()=>{if(core.getState().binding)return core.manualAdvance();const result=await core.initializeWorld();if(result!==true)throw Error(core.getState().lastError??'当前聊天的世界初始化未完成');return result;});},
     async retry(){return withTask('repair',()=>core.retryLastCommit());},
     async layout(mapId){return withTask('initialize',async()=>{
@@ -360,20 +404,22 @@ export function mountReferenceUi({root,core,api,getContext,settingsPort,lorePort
       if(typeof diagnosticTools.sanitizeDiagnostic!=='function'||typeof diagnosticTools.atlasDiagnosticContext!=='function')throw Error('逐轮分析模块尚未就绪，请更新完整插件');
       const ticket={...scope(),epoch};
       if(!ticket.state.chatId)throw Error('请先打开一个酒馆聊天');
-      const turns=[],seenCursors=new Set();let cursor,revision,totalTurns;
+      const turns=[],seenCursors=new Set(),projection=[];let cursor,revision,totalTurns;
       do{
         if(cursor){if(seenCursors.has(cursor))throw Error('逐轮分析分页未前进，请重新导出');seenCursors.add(cursor);}
         const page=await query(ticket,'turn-analysis',{cursor,...(revision===undefined?{}:{revision})});
         if(!page||!live(ticket))throw Error('导出期间聊天、视角或存档已变化，请重新导出');
         if(revision===undefined){revision=page.revision;totalTurns=page.metadata?.totalCount;}
         if(page.revision!==revision||page.metadata?.totalCount!==totalTurns)throw Error('导出期间回合记录已变化，请重新导出');
+        // P14 §20.2：每页的汇总原样收下，由导出模块按「全页确定才求和」的规则合并。
+        if(page.summary)projection.push(page.summary);
         turns.push(...page.items);cursor=page.nextCursor;
       }while(cursor);
       if(turns.length!==totalTurns)throw Error('逐轮分析未读完全部回合，请重新导出');
       const identity=diagnosticTools.atlasDiagnosticContext({chatUid:ticket.state.chatId,branchId:ticket.state.binding?.branchId??'main'});
       const runtimeExport=exportDiagnostics();
       const safe=runtimeExport.events.map(event=>diagnosticTools.sanitizeDiagnostic(event)).filter(Boolean);
-      const file=buildTurnAnalysisExport({turns,diagnostics:safe,totalTurns,pluginVersion,build:diagnosticTools.ATLAS_BUILD_INFO??null,runtimeCoverage:runtimeExport.coverage,
+      const file=buildTurnAnalysisExport({turns,diagnostics:safe,totalTurns,projection,pluginVersion,build:diagnosticTools.ATLAS_BUILD_INFO??null,runtimeCoverage:runtimeExport.coverage,
         scope:{chatFingerprint:identity.chatFingerprint,branchRef:identity.details?.branchRef,revision,viewMode:'author'}});
       return {file,filename:`atlas-turn-analysis-${file.exportedAt.replace(/[:.]/g,'-')}.json`};
     },

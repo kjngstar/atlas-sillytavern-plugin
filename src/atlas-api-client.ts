@@ -19,6 +19,8 @@ import {
 import { TABLE_DELTA_DISCIPLINE_CONTENT } from "./atlas-prompt-discipline.ts";
 import { newDiagnosticRequestRef, observeDiagnostic, setDiagnosticSignalContext, type DiagnosticObserver, type DiagnosticContext } from './atlas-request-diagnostics.ts';
 import { atlasRefFingerprint } from './atlas-diagnostics.ts';
+// P14 §20.3：响应长度/耗时口径分离（raw / visible / reasoning、headersMs / bodyMs）。
+import { measureResponseLengths } from './atlas-response-metrics.ts';
 
 /** A host adapter that ignores AbortSignal must still release the turn at the deadline. */
 function awaitResponse<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
@@ -479,6 +481,9 @@ export async function callAtlasWorldTurnApi(
     Object.assign(diagnosticDetails, { requestChars: payload.body.length,
       retryKind: retryKind === 'compatibility' ? 'compatibility' : context.details?.retryKind ?? 'normal' });
     setDiagnosticSignalContext(controller.signal, { ...context, requestRef, details: { ...diagnosticDetails, transportAttempt } });
+    // P14 §20.3：第二次及以后的真实 fetch 让整通耗时覆盖了多次传输。
+    // 这个标记跟着诊断进审计记录，汇总时不许再把它当单次请求耗时累加。
+    if (transportAttempt > 1) diagnosticDetails.durationIncludesCompatibilityRetry = true;
     const transportStartedAt = now();
     diagnostic('MODEL_REQUEST_STARTED');
     const response = await awaitResponse(fetchFn(payload.url, {
@@ -521,6 +526,7 @@ export async function callAtlasWorldTurnApi(
         rawText = "";
       }
       diagnosticDetails.bodyMs = now() - bodyStartedAt;
+      // 旧口径保留：responseChars 仍等于原始传输正文长度。
       diagnosticDetails.responseChars = rawText.length;
       if (!controller.signal.aborted && !bodyReadFailed) failureStage = 'parse';
       let payload: unknown = null;
@@ -529,6 +535,15 @@ export async function callAtlasWorldTurnApi(
       } catch {
         payload = firstSsePayload(rawText);
       }
+      /**
+       * P14 §20.3：三个长度口径分开记。
+       *
+       * `rawResponseChars` 是传输长度（含 JSON/SSE 包装），`visibleTextChars` 是助手可见正文，
+       * `reasoningTextChars` 只在响应**存在明确推理字段**时才有值。
+       * 可见/推理长度算不出来就是 null —— 绝不拿 raw-visible 的差值当推理长度。
+       */
+      const lengthMetrics = measureResponseLengths(payload, rawText);
+      Object.assign(diagnosticDetails, lengthMetrics);
       // 0.9.54 A6：长度截断判定只认 finish_reason 恰好等于 "length"。
       // stop / 缺失 / null 一律 false——不猜测其他厂商停止码，也不因为「正文里刚好
       // 有完整 JSON」就当成没截断（截断优先，见下面的检查顺序）。

@@ -50,7 +50,8 @@ export type FloorSpec={
 export type FloorCorridor={id:string;entityId?:string;name?:string;x:number;y:number;w:number;h:number;quality?:SceneQuality};
 /** 门拓扑：真实房间直连时指向另一房间，否则指向通道。 */
 export type FloorEdge={from:string;to:string;via:string;toEntityId?:string;routeId?:string};
-export type FloorLayout={kind:'floor';id:string;name:string;bounds:Bounds;corridor:FloorCorridor;rooms:Array<{id:string;name:string;side:'north'|'south';role?:'indoor'|'outdoor'|'garden';x:number;y:number;w:number;h:number}>;doors:Array<{id:string;roomId:string;x:number;y:number;width:number;wall?:'north'|'south'|'east'|'west';routeId?:string;toRoomId?:string;sourceContentIds?:string[]}>;edges:FloorEdge[];issues?:Array<{id:string;code:string}>};
+export type FloorArea=Bounds&{version:1;id:string;name:string;roomId:string;quality:'estimated'|'confirmed'};
+export type FloorLayout={kind:'floor';id:string;name:string;bounds:Bounds;corridor:FloorCorridor;areas?:FloorArea[];rooms:Array<{id:string;name:string;side:'north'|'south';role?:'indoor'|'outdoor'|'garden';x:number;y:number;w:number;h:number}>;doors:Array<{id:string;roomId:string;x:number;y:number;width:number;wall?:'north'|'south'|'east'|'west';routeId?:string;toRoomId?:string;sourceContentIds?:string[]}>;edges:FloorEdge[];issues?:Array<{id:string;code:string}>};
 
 /** 上下文锁：室内矩形（米）、确认点、任意确认多边形、确认路线几何；空间由 map.metersPerCell 决定。 */
 export type LayoutLocks={

@@ -218,3 +218,4 @@ export {
 } from "./atlas-diagnostics.ts";
 
 export { projectSqlMapAreas } from "./atlas-sql-map-areas.ts";
+export { stableHexHash } from './atlas-hash.ts';

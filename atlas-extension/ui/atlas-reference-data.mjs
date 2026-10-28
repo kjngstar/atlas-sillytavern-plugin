@@ -58,7 +58,7 @@ const placementOf = value => {
 const LEGACY_FURN_CLASS = {bench:'table', chair:'table', stairs:'desk'};
 
 export function emptyReferenceData(meta = {}) {
-  return {meta:{worldName:'尚未建立世界',turn:0,revision:0,timeMinutes:0,viewMode:'pov',initialNodeId:'world',...meta},
+  return {meta:{worldName:'尚未建立世界',turn:0,revision:0,timeMinutes:0,viewMode:'player',initialNodeId:'world',...meta},
     LEVELS:REFERENCE_LEVELS,ROOT:{id:'world',name:meta.worldName||'尚未建立世界',kind:'world',code:'L0',children:[],geo:{},marks:[],host:true},
     LOCATIONS:[],CAST:[],ITEMS:[],MESSAGES:[],TASKS:[],EVENTS:[],RECEIPTS:[],LORE:[],DIAGNOSTICS:[],FLOWS:{},JOURNEYS:{},PROMPTS:[]};
 }
@@ -176,6 +176,7 @@ export function referenceGeometry(map, document, {viewMode='author',visibleLocat
   const rawPins = layout ? [
     ...pins, ...(layout.actors??[]).map(p=>({...p,isProtagonist:p.isProtagonist===true||protagonistIds.has(p.id),type:'person'})), ...(layout.items??[]).map(p=>({...p,type:'item'})),
     ...(layout.rooms??[]).map(r=>({...r,type:'location',silent:true,x:r.x+r.w/2,y:r.y+r.h/2})),
+    ...(layout.areas??[]).map(r=>({...r,type:'location',silent:true,x:r.x+r.w/2,y:r.y+r.h/2})),
     /**
      * P11/R03 §18.2 第 9 条：绑定的命名走廊与房间共用同一个地点 ID ——
      * 它是可点击的（点进去就是该地点已有的子图），但和房间一样 `silent`，不额外画一个 POI 图标。
@@ -300,7 +301,8 @@ export function referenceGeometry(map, document, {viewMode='author',visibleLocat
       })};
   } else if(layout?.kind==='floor') {
     kind='floor';const corridor=rect(layout.corridor);
-    const hostArea=layout.hostArea??(map.containerLocationKind==='room'&&!(layout.rooms??[]).some(r=>r.id===map.containerLocationId)?{...b,id:map.containerLocationId,name:map.name}:null);
+    const functionalAreas=layout.areas??[];
+    const hostArea=layout.hostArea??(functionalAreas.length?(layout.rooms??[]).find(r=>r.id===map.containerLocationId):null)??(map.containerLocationKind==='room'&&!(layout.rooms??[]).some(r=>r.id===map.containerLocationId)?{...b,id:map.containerLocationId,name:map.name}:null);
     /**
      * M6-03②：家具保留**真实 local id / type / roomId**。
      *
@@ -320,10 +322,10 @@ export function referenceGeometry(map, document, {viewMode='author',visibleLocat
       entityId:layout.corridor?.entityId??null,name:text(layout.corridor?.name)||null,
       y:corridor.y+corridor.h/2},
       hostArea:hostArea?{...rect(hostArea),id:hostArea.id,name:hostArea.name}:null,
-      rooms:(layout.rooms??[]).map((r,i)=>({...rect(r),id:r.id,name:r.name,kind:r.id===map.containerLocationId&&map.containerLocationKind==='vehicle'?'vehicle':'room',
+      rooms:[...functionalAreas.map(r=>({...rect(r),id:r.id,name:r.name,kind:'other',status:r.quality==='confirmed'?'功能分区':'功能分区 · 估计',tint:'57,224,160',live:false})),...(layout.rooms??[]).filter(r=>r.id!==hostArea?.id).map((r,i)=>({...rect(r),id:r.id,name:r.name,kind:r.id===map.containerLocationId&&map.containerLocationKind==='vehicle'?'vehicle':'room',
         role:r.role??'indoor',
         status:text(r.status)||null,
-        tint:r.role==='garden'?'57,224,160':r.role==='outdoor'?'255,194,71':['67,224,255','155,107,255','57,224,160','127,212,255'][i%4],live:activeRooms.has(r.id)})),
+        tint:r.role==='garden'?'57,224,160':r.role==='outdoor'?'255,194,71':['67,224,255','155,107,255','57,224,160','127,212,255'][i%4],live:activeRooms.has(r.id)}))],
       doors:(layout.doors??[]).map((d,i)=>{const [x,y]=xy(d);return {id:text(d.id)||`door:${text(d.roomId)||i}`,roomId:text(d.roomId)||null,x,y,w:d.width*scale,wall:d.wall??null,routeId:d.routeId??null};}),
       windows:(layout.windows??[]).map((w,i)=>{const [x,y]=xy(w);return {id:text(w.id)||`window:${i}`,roomId:text(w.roomId)||null,x,y,w:(Number.isFinite(w.width)?w.width:1.2)*scale};}),
       lamps:(layout.lamps??[]).map((l,i)=>{const [x,y]=xy(l);return {id:text(l.id)||`light:${i}`,roomId:text(l.roomId)||null,x,y,
@@ -362,7 +364,7 @@ export function referenceEntity(detail, catalog = {}) {
   return {id:text(row.id),name:text(row.name),description:text(row.description??catalog.summary),childMapIds:(detail.childMaps??[]).map(x=>x.mapId),children:detail.children??[]};
 }
 
-export function projectReferenceData({state={},mapView,sceneView,catalogView,taskView,flowView,changesView,worldFeedView,logsView,details=[],diagnostics=[],viewMode='pov',scopeKey='',projectOverview,protagonistId=null}) {
+export function projectReferenceData({state={},mapView,sceneView,catalogView,taskView,flowView,changesView,worldFeedView,logsView,details=[],diagnostics=[],viewMode='player',scopeKey='',projectOverview,protagonistId=null}) {
   const d=state.stateData??{};
   const out=emptyReferenceData({worldName:text(d.worldName??d.world?.name??state.binding?.worldId??'尚未建立世界'),revision:mapView?.revision??d.revision??0,
     timeMinutes:Number(d.currentTime??d.clockS??0)/60,viewMode,scopeKey,canUndo:state.receipts?.some(r=>r.receipt?.status==='committed'||r.ok===true)??false});
@@ -498,6 +500,12 @@ export function projectReferenceData({state={},mapView,sceneView,catalogView,tas
   out.meta.initialNodeId=out.CAST.find(c=>c.id===out.meta.protagonistId)?.mapNodeId??out.ROOT.id;
   for(const node of nodes.values())for(const mark of node.marks)if(mark.type==='char'){const c=out.CAST.find(c=>c.id===mark.id);if(c){mark.c=c.c;mark.initial=c.initial;mark.hero=mark.id===out.meta.protagonistId;}}
   out.RECEIPTS=referenceReceipts(state,items(logsView));
+  /**
+   * P14 §20.1：建图状态直接取服务端 `buildStatus`（已由 SQL 只读派生）。
+   * 这里**不做二次汇总**：五桶、地图布局数与窗口账都是唯一来源的搬运，
+   * 缺就保持 null —— 界面据此显示「未知」而不是 0。
+   */
+  out.buildStatus=d?.buildStatus&&typeof d.buildStatus==='object'?d.buildStatus:null;
   out.DIAGNOSTICS=referenceDiagnostics([...items(logsView),...diagnostics,...(state.lastError?[typeof state.lastError==='string'?{message:state.lastError,code:'WORLD_ACTION_FAILED',level:'error',source:'ui'}:{...state.lastError,level:'error'}]:[])]);
   for(const node of nodes.values()){
     const projected=projectReferenceFlows(flowView,node);

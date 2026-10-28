@@ -721,3 +721,66 @@ test('T09-06 mergeRepair：同票据 noop → REPAIR_DECLINED 警告，原失败
     seed.close();
   }
 });
+
+// ---------------------------------------------------------------------------
+// P02 · 来源目录别名接进依据绑定
+// ---------------------------------------------------------------------------
+
+/** 快照按 key 字典序排好的 key 列表：`buildSourceCatalogue` 按这个顺序发 SRC1…n。 */
+function catalogueKeys(snapshot) {
+  return [...new Set(snapshot.map((entry) => String(entry.key).trim()).filter((key) => key.length > 0))].sort();
+}
+
+test('P02: 顶层 source 写 SRC1 别名，basis 里保存的是真实 key 与真实 hash', () => {
+  const keys = catalogueKeys(SOURCE_SNAPSHOT);
+  // 先钉死顺序本身，避免下面两条别名断言变成「用生产逻辑复算生产逻辑」。
+  assert.deepEqual(keys, ['S1', 'W1'], 'SRC1 必须分给字典序第一个 key');
+
+  for (const [index, expectedKey] of keys.entries()) {
+    const alias = `SRC${index + 1}`;
+    const expected = SOURCE_SNAPSHOT.find((entry) => entry.key === expectedKey);
+    const { basis, issues } = bindSources(
+      { op: 'character.upsert', ref: 'new:anon', data: { name: '匿名' }, source: alias },
+      { phase: 'observe', snapshot: SOURCE_SNAPSHOT, clockS: 0 },
+    );
+
+    assert.deepEqual(issues, [], `${alias} 必须能解析，不能报 SOURCE_UNKNOWN`);
+    assert.equal(basis.sources.length, 1, `${alias} 只产出一条依据`);
+    assert.equal(basis.sources[0].source_key, expectedKey, `${alias} 的 basis 存真实 key，不存别名`);
+    assert.equal(basis.sources[0].content_hash, expected.hash, `${alias} 的 basis 存真实 hash`);
+    assert.notEqual(basis.sources[0].source_key, alias, 'basis 里不允许出现别名');
+    assert.equal(basis.kind, expected.kind, `${alias} 的 basis.kind 取真实来源的 kind`);
+  }
+});
+
+test('P02: 完整 key 仍按原路径绑定（加入别名解析没有破坏旧写法）', () => {
+  const { basis, issues } = bindSources(
+    { op: 'character.upsert', ref: 'new:anon', data: { name: '匿名' }, source: 'W1' },
+    { phase: 'observe', snapshot: SOURCE_SNAPSHOT, clockS: 0 },
+  );
+  assert.deepEqual(issues, []);
+  assert.equal(basis.sources[0].source_key, 'W1');
+});
+
+test('P02: 块键/哈希/段号被明确拒绝，且不再叠加一条 SOURCE_UNKNOWN', () => {
+  const shapes = ['W1@hash_W1@2#3', 'a'.repeat(40), '7'];
+  for (const shape of shapes) {
+    const { issues } = bindSources(
+      { op: 'character.upsert', ref: 'new:anon', data: { name: '匿名' }, source: shape },
+      { phase: 'observe', snapshot: SOURCE_SNAPSHOT, clockS: 0 },
+    );
+    assert.equal(issues.length, 1, `${shape} 应只报一条具体错误`);
+    assert.equal(issues[0].code, 'SOURCE_REF_SHAPE_INVALID');
+    assert.equal(issues[0].retryable, true);
+  }
+});
+
+test('P02: 真正未知的来源仍然报 SOURCE_UNKNOWN，不被形状检查吞掉', () => {
+  const { basis, issues } = bindSources(
+    { op: 'character.upsert', ref: 'new:anon', data: { name: '匿名' }, source: 'NOT_A_REAL_KEY' },
+    { phase: 'observe', snapshot: SOURCE_SNAPSHOT, clockS: 0 },
+  );
+  assert.equal(issues.length, 1);
+  assert.equal(issues[0].code, 'SOURCE_UNKNOWN');
+  assert.deepEqual(basis.sources, [], '未知来源不伪造引文');
+});

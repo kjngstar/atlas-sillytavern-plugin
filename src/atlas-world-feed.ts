@@ -215,7 +215,8 @@ function informationSnapshots(history: HistoricalSnapshotResult): Record<string,
 export function queryWorldFeed(ctx: ViewContext, query: ViewQuery): ViewResult {
   const branchId = ctx.branchId;
   const revision = ctx.revision;
-  const viewMode: 'pov' | 'author' = ctx.viewMode ?? 'pov';
+  // P08 §14：事件流只有「主角是否已知」这一个过滤轴，玩家看全量 → 与 author 同档；缺省仍是 pov。
+  const viewMode: 'pov' | 'author' = ctx.viewMode === 'author' || ctx.viewMode === 'player' ? 'author' : 'pov';
   const povId = ctx.povId ?? null;
   const filter = query.feedFilter ?? {};
   const filterHash = feedFilterHash(filter);

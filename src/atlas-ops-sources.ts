@@ -13,6 +13,7 @@
 
 import { WHY_MAX_CHARS } from './atlas-runtime-limits.ts';
 import type { Issue, ModelOperation, Phase, SourceSnapshotEntry } from './atlas-ops-contract.ts';
+import { buildSourceCatalogue, lookupSource, sourceReferenceIssues } from './atlas-source-catalogue.ts';
 
 export type BasisObject = {
   kind: 'story' | 'lorebook' | 'user' | 'simulation' | 'estimate' | 'migration';
@@ -268,9 +269,55 @@ function resolveCertainty(op: ModelOperation, ctx: SourceBindContext, boundCount
 /* ───────────────────────── C07：bindSources ───────────────────────── */
 
 export function bindSources(op: ModelOperation, ctx: SourceBindContext): { basis: BasisObject; issues: Issue[] } {
-  const issues: Issue[] = [];
-  const keys = requestedSourceKeys(op?.source);
+  const issues: Issue[] = sourceReferenceIssues(op?.source);
   const snapshot = Array.isArray(ctx?.snapshot) ? ctx.snapshot : [];
+
+  /**
+   * P02：把请求里的来源引用解析成快照里的真实 key。
+   *
+   * 模型看到的是短别名（SRC1…），程序手里是完整 key。目录由本次快照**确定性**生成
+   * （按 key 排序分配），所以提示词侧和编译侧各自重建也必然是同一份——
+   * 这才是「冻结」的含义，而不是把一个可变别名表在调用链上层层透传。
+   *
+   * 完整 key 精确匹配优先于别名（见 lookupSource），因此旧的直接写 key 的请求不受影响。
+   */
+  const resolveRequestedKeys = (requested: readonly string[]): string[] => {
+    if (requested.length === 0) return [];
+    const catalogue = buildSourceCatalogue(
+      snapshot
+        .filter((entry) => entry && typeof entry.key === 'string' && entry.key.trim().length > 0)
+        .map((entry) => ({
+          key: entry.key.trim(),
+          contentHash: typeof entry.hash === 'string' ? entry.hash : '',
+          kind: typeof entry.kind === 'string' ? entry.kind : '',
+        })),
+    );
+    const out: string[] = [];
+    for (const ref of requested) {
+      const lookup = lookupSource(catalogue, ref);
+      if (lookup.ok) {
+        if (!out.includes(lookup.entry.key)) out.push(lookup.entry.key);
+        continue;
+      }
+      // 形状错误（块键 / 内容哈希 / 纯段号）已经说清楚了，不再叠一条 SOURCE_UNKNOWN
+      if (lookup.code === 'SOURCE_REF_SHAPE_INVALID') {
+        issues.push(makeIssue(
+          lookup.code,
+          '$.source',
+          lookup.message,
+          'error',
+          true,
+          typeof op?.op === 'string' ? op.op : undefined,
+        ));
+        continue;
+      }
+      // 真正未知的引用原样留下，交给下面的 unknown 分支统一报 SOURCE_UNKNOWN
+      out.push(ref);
+    }
+    return out;
+  };
+
+  const keys = resolveRequestedKeys(requestedSourceKeys(op?.source));
   const byKey = new Map<string, SourceSnapshotEntry>();
   for (const entry of snapshot) {
     if (!entry || typeof entry.key !== 'string') continue;

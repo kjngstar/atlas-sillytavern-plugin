@@ -19,6 +19,7 @@
  */
 
 import { normalizeFrame } from './atlas-spatial-frame.ts';
+import { estimateSpaceFromType } from './atlas-space-estimate.ts';
 import {
   FRAME_SPACE_CANONICAL_KEY,
   SPACE_CANONICAL_MAX_FURNISHING as KIT_MAX_FURNISHING,
@@ -300,6 +301,14 @@ export function resolveSpaceSize(input: {
   canonical?: SpaceCanonicalV1 | null;
   parentFootprint?: { widthM: number; heightM: number; mapId: string } | null;
   firstEstimate?: { widthM: number; heightM: number } | null;
+  /**
+   * P06 §12.2：类型默认估计（目前只有载具档）。
+   *
+   * 它排在「新首次估计」**之前**：首次估计是从网格幅面反推出来的（100×100 格 → 24 m），
+   * 属于「没办法时的办法」；类型默认至少说得出「这是一辆马车，约 6×3 m」。
+   * 但它仍然是 estimated —— 回执里以 `first-estimate` 口径出现，不能被当成权威尺寸。
+   */
+  typeDefault?: { widthM: number; heightM: number; referenceId: string | null; note: string } | null;
 }): SpaceSizeResolution | null {
   const sources: SpaceSizeCandidate[] = [];
   const issues: PlanIssue[] = [];
@@ -309,11 +318,14 @@ export function resolveSpaceSize(input: {
     ? input.canonical.size : null;
   const parent = input.parentFootprint && validSide(input.parentFootprint.widthM) && validSide(input.parentFootprint.heightM)
     ? input.parentFootprint : null;
+  const typeDefault = input.typeDefault && validSide(input.typeDefault.widthM) && validSide(input.typeDefault.heightM)
+    ? input.typeDefault : null;
   const estimate = input.firstEstimate && validSide(input.firstEstimate.widthM) && validSide(input.firstEstimate.heightM)
     ? input.firstEstimate : null;
   if (author) sources.push({ source: 'author', widthM: author.widthM, heightM: author.heightM, quality: 'confirmed', referenceId: author.referenceId });
   if (canonicalSize) sources.push({ source: 'canonical', widthM: canonicalSize.widthM, heightM: canonicalSize.heightM, quality: canonicalSize.quality, referenceId: input.canonical?.locationId ?? null });
   if (parent) sources.push({ source: 'parent-footprint', widthM: parent.widthM, heightM: parent.heightM, quality: 'estimated', referenceId: parent.mapId });
+  if (typeDefault) sources.push({ source: 'first-estimate', widthM: typeDefault.widthM, heightM: typeDefault.heightM, quality: 'estimated', referenceId: typeDefault.referenceId });
   if (estimate) sources.push({ source: 'first-estimate', widthM: estimate.widthM, heightM: estimate.heightM, quality: 'estimated', referenceId: null });
 
   const authorLocked = !!author;
@@ -348,6 +360,13 @@ export function resolveSpaceSize(input: {
     return {
       widthM: parent.widthM, heightM: parent.heightM, quality: 'estimated', source: 'parent-footprint', conflict,
       basis: { kind: 'parent-footprint', referenceId: parent.mapId, note: '由父图空间轮廓投影得到' },
+      sources, issues,
+    };
+  }
+  if (typeDefault) {
+    return {
+      widthM: typeDefault.widthM, heightM: typeDefault.heightM, quality: 'estimated', source: 'first-estimate', conflict,
+      basis: { kind: 'first-estimate', referenceId: typeDefault.referenceId, note: typeDefault.note },
       sources, issues,
     };
   }
@@ -535,12 +554,38 @@ export function resolveMapSpaceSize(input: MapSpaceSizeInput): MapSpaceSizeResul
     }
   }
 
+  /**
+   * P06 §12.2：类型默认估计。
+   *
+   * 只有「作者 / canonical / 父图足迹」全部缺席、且这个地点是载具时才用得上 ——
+   * 之前这条路径直接落到 `measure()` 的「整层 24 m」兜底，于是 100×100 格的马车
+   * 被画成 24×24 m 的方盒子。类型默认至少给出 6×3 m 的合理量级，且明确标 estimated。
+   */
+  const typeEstimate = estimateSpaceFromType({
+    containerKind: locationRow?.kind,
+    locationId: containerId,
+    name: locationRow?.name,
+    description: locationRow?.description,
+    vehicleProfile: locationRow?.vehicle_profile_json,
+  });
+  const typeDefault = typeEstimate && typeEstimate.source === 'type-default'
+    ? {
+        widthM: typeEstimate.widthM,
+        heightM: typeEstimate.heightM,
+        referenceId: containerId,
+        note: typeEstimate.assumption,
+      }
+    : null;
+  if (typeEstimate) issues.push(...typeEstimate.issues);
+
   const resolution = resolveSpaceSize({
     locationId: containerId,
     author,
     canonical,
     parentFootprint,
-    firstEstimate: input.firstEstimate ?? null,
+    // 类型默认可用时，丢掉「从网格反推」的首次估计：那是没办法时的办法，量级还不如类型默认。
+    firstEstimate: typeDefault ? null : (input.firstEstimate ?? null),
+    typeDefault,
   });
   if (!resolution) return null;
   return { locationId: containerId, holder: holder.holder, canonical, resolution, issues };

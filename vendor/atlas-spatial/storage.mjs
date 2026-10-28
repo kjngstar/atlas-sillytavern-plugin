@@ -126,7 +126,7 @@ export function sceneLocationGeometry(scene){
   // 纯辅助通道（没有实体身份）和自身示意一样**不回写**，绝不凭空造一个 SQL 地点。
   const corridorBound=layout.kind==='floor'&&layout.corridor&&typeof layout.corridor.entityId==='string'&&layout.corridor.entityId
     ? [{...layout.corridor,id:layout.corridor.entityId}]:[];
-  const parts=layout.kind==='floor'?[...layout.rooms,...corridorBound]
+  const parts=layout.kind==='floor'?[...layout.rooms,...(layout.areas??[]),...corridorBound]
     :layout.kind==='city'?[...layout.districts,...layout.buildings.filter(b=>!b.decorative)]
       :(layout.shapes??[]).filter(s=>s&&s.placement!=='proxy');
   const centroid=polygon=>{let x=0,y=0;for(const q of polygon){x+=q.x;y+=q.y;}return {x:x/polygon.length,y:y/polygon.length};};

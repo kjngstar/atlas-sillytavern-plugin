@@ -27,6 +27,9 @@ import { ATLAS_RUNTIME_LIMITS } from './atlas-runtime-limits.ts';
 import { workBatchSize } from './atlas-work-batching.ts';
 import { normalizeModelBatching, planningOutputTokens } from './atlas-model-batching.ts';
 import { stableHexHash } from './atlas-hash.ts';
+import { resolveLocationDetailTier } from './atlas-world-build-plan.ts';
+import { readWorldFacts } from './atlas-world-build-state.ts';
+import { readProgressRows } from './atlas-construction-progress.ts';
 import {
   canonicalAuthoredArea,
   canonicalFlag,
@@ -49,6 +52,7 @@ import {
 } from './atlas-space-canonical.ts';
 import {
   boundCorridorIdOf,
+  functionalAreaMembers,
   resolveSpatialProfile,
   type SpatialProfileMode,
   type SpatialProfileResolution,
@@ -429,6 +433,7 @@ export function deriveLayoutSites(tables: TableReadPort, branchId: string): Deri
     const ownForProfile = collectMapLocations({ mapRow: map, maps, locations }).filter((row) => row.mobility !== 'mobile');
     const profile = resolveSpatialProfile({
       map,
+      maps,
       container,
       parentContainer: container ? locationById.get(String(container.parent_location_id)) ?? null : null,
       corridorEntityId: boundCorridorIdOf(map),
@@ -460,7 +465,8 @@ export function deriveLayoutSites(tables: TableReadPort, branchId: string): Deri
     const own = ownForProfile;
     const containerKind = String(container?.kind ?? '');
     const standalone = kind === 'floor' && (own.length === 0 || containerKind==='room'&&own.every(row=>row.kind==='other'))
-      && (containerKind === 'room' || containerKind === 'vehicle' || containerKind === 'floor' || containerKind === 'building');
+      && (containerKind === 'room' || containerKind === 'vehicle' || containerKind === 'floor' || containerKind === 'building'
+        || containerKind === 'other' && profile.profile.mode === 'interior');
     entries.push({
       map,
       mapId,
@@ -508,22 +514,39 @@ export function deriveLayoutSites(tables: TableReadPort, branchId: string): Deri
     }
     return seen.size;
   };
-  // Only fresh, uncalibrated estimates may grow to fit their registered child
+  // Unlocked estimates without a saved scene may grow to fit registered child
   // spaces. A nested floor must not inherit an arbitrary 8 m footprint while
   // containing a confirmed 12 m hall. Saved/authoritative geometry stays fixed.
   const expandable = (entry: Entry) => entry.kind === 'floor'
     && entry.spaceSize?.resolution.source === 'first-estimate'
-    && !(finite(entry.map.meters_per_cell) && entry.map.meters_per_cell > 0)
+    && entry.map.scale_quality !== 'confirmed'
     && !entry.map.scale_locked && !hasScene(entry.map);
   for (const entry of [...entries].sort((a,b)=>entryDepth(b)-entryDepth(a)||byId(a.mapId,b.mapId))) {
     if (!expandable(entry) || entry.own.length === 0) continue;
-    const sizes = entry.own.filter(row=>row.kind!=='floor').sort((a,b)=>byId(String(a.id),String(b.id))).map(row => {
+    const members=entry.own.filter(row=>row.kind!=='floor').sort((a,b)=>byId(String(a.id),String(b.id)));
+    const sizes = members.map(row => {
       const known = locationSpaceSize({maps, locations, locationId:String(row.id), branchId});
       const child = entries.find(child => child.kind === 'floor' && child.container?.id === row.id && child.own.length > 0);
       return known ? [known.widthM, known.heightM] : child ? [child.extent.width, child.extent.height] : [8, 8];
     });
     if(!sizes.length)continue;
-    const minW = Math.max(...[0,1].map(side=>sizes.reduce((sum,size,i)=>sum+(i%2===side?size[0]:0),0))) + 1;
+    // A directly connected component must share walls on one side of the
+    // corridor. Alternating-room capacity alone can leave it impossible to fit.
+    const remaining=new Set(members.map(row=>String(row.id)));
+    let connectedWidth=0;
+    while(remaining.size){
+      const queue=[remaining.values().next().value!];remaining.delete(queue[0]);let width=0;
+      for(let i=0;i<queue.length;i++){
+        const id=queue[i];width+=sizes[members.findIndex(row=>String(row.id)===id)][0];
+        for(const route of routes){
+          if(route.status==='closed'||route.map_id!==entry.mapId)continue;
+          const other=route.from_location_id===id?route.to_location_id:route.to_location_id===id?route.from_location_id:null;
+          if(typeof other==='string'&&remaining.delete(other))queue.push(other);
+        }
+      }
+      connectedWidth=Math.max(connectedWidth,width);
+    }
+    const minW = Math.max(connectedWidth,...[0,1].map(side=>sizes.reduce((sum,size,i)=>sum+(i%2===side?size[0]:0),0))) + 1;
     const minH = Math.max(...sizes.map(size=>size[1])) * 2 + 3;
     entry.extent = {...entry.extent, width:Math.max(entry.extent.width,minW), height:Math.max(entry.extent.height,minH)};
     entry.spaceSize = resolveMapSpaceSize({maps,locations,mapRow:entry.map,branchId,firstEstimate:{widthM:entry.extent.width,heightM:entry.extent.height}});
@@ -580,6 +603,8 @@ export function buildSqlLayoutTask(
   const derived = deriveLayoutSites(tables, branchId);
   const issues = derived.issues;
   const { characters, items, parentOf } = derived;
+  const worldFacts=readWorldFacts(readProgressRows(tables,branchId)).values;
+  const detailFor=(location:SqlRow)=>resolveLocationDetailTier({location,facts:worldFacts,knownCharacters:characters,plotLinks:[]});
   const entries = derived.entries;
   if (entries.length === 0) return null;
 
@@ -733,6 +758,9 @@ export function buildSqlLayoutTask(
       }) : [];
     const local = entry.standalone && container ? [container] : container?.kind==='room'?[container,...entry.own]:entry.own;
     const localIds = new Set(local.map((row) => String(row.id)));
+    const functionalAreas=entry.kind==='floor'?functionalAreaMembers(container,entry.own,derived.maps):[];
+    for(const area of functionalAreas)localIds.add(String(area.id));
+    const physicalRoom=(id:unknown)=>functionalAreas.some(area=>area.id===id)?container?.id:id;
     // P12/R03 §19.3：父图轮廓是子空间权威尺寸在**父坐标系**里的投影；这里把已知尺寸随 scope 下发，
     // 但坐标仍由本图自己的布局决定（局部坐标允许不同，物理宽高必须一致）。
     const childSpaces = entry.own
@@ -769,8 +797,9 @@ export function buildSqlLayoutTask(
       map: ref(entry.mapId),
       name: entry.map.name,
       kind: entry.kind,
+      functionalAreas:functionalAreas.map(area=>({ref:ref(area.id),name:area.name,roomId:ref(area.parent_location_id)})),
       units: entry.extent.units,
-      container: container ? { ref: ref(container.id), kind: container.kind, name: container.name } : null,
+      container: container ? { ref: ref(container.id), kind: container.kind, name: container.name,detail:detailFor(container) } : null,
       /**
        * P13/R03 §20：本图的绘图档案。`kind` 就是由这份档案裁决出来的；`navigationName` 说明
        * 「这一类空间叫什么」；`forbidden` 是这套模板的禁区；`partial` 为真时说明有登记成员
@@ -825,6 +854,7 @@ export function buildSqlLayoutTask(
         name: row.name,
         kind: row.kind,
         description: row.description,
+        detail:detailFor(row),
         parent: ref(row.parent_location_id),
         placement: row.map_id === entry.mapId ? 'local' : 'proxy',
       })),
@@ -839,10 +869,10 @@ export function buildSqlLayoutTask(
           return priority(a) - priority(b) || byId(String(a.id), String(b.id));
         })
         .slice(0, LIMITS.actors)
-        .map((row) => ({ ref: ref(row.id), name: row.name, roomId: ref(row.location_id) })),
+        .map((row) => ({ ref: ref(row.id), name: row.name, roomId: ref(physicalRoom(row.location_id)) })),
       items: items.filter(row=>localIds.has(String(row.location_id??'')) && !row.holder_character_id && !row.container_item_id && ref(row.id) && ref(row.location_id))
         .slice(0, LIMITS.items)
-        .map(row=>({ref:ref(row.id),name:row.name,kind:row.kind,description:row.description,roomId:ref(row.location_id)})),
+        .map(row=>({ref:ref(row.id),name:row.name,kind:row.kind,description:row.description,roomId:ref(physicalRoom(row.location_id))})),
       savedConstraints: aliasLayoutRefs(retainedConstraints, catalogue.knownRefs),
       constraintStatus: savedRequest?(savedRequest.status??'pending'):'saved',
       layoutIssues: aliasLayoutRefs([...(Array.isArray(sceneLayout?.issues)?sceneLayout.issues:[]),...(Array.isArray(savedRequest?.issues)?savedRequest.issues:[])], catalogue.knownRefs),
@@ -870,6 +900,7 @@ export function buildSqlLayoutTask(
     mapLayoutLocks: [
       '保留 savedConstraints 的既有结构与稳定局部 ID；省略字段表示保持，不表示删除。',
       '已确认/锁定的几何与作者确认的事实不得改写。',
+      'functionalAreas 是已有房间内的开放功能分区，由程序投影范围；不输出为 rooms，不为其新增墙、门或陈设实体。人物和物品按所列 roomId 放在同一个实际房间内。',
       '资料支持的事实优先于用途估计；估计不升级为作者确认，不为填满画面添加实体或装饰。',
     ].join('\n'),
   });
@@ -883,6 +914,7 @@ export function buildSqlLayoutTask(
     + '\n不要输出其他操作。';
   request.messages[1].content += '\n父图中的本地点轮廓是下钻边界；子图用于细化同一个空间，不重画成一座无关的城市。相邻街区维持父图的相对方位，不能把外城区、内城区、中心区都复制成同一幅城市模板。size=large/medium/small 必须维持相对面积顺序；没有实体依据的 road_texture 不输出，真实道路仅使用已登记 links。';
   request.anchor = input.anchor;
+  request.messages[1].content+='\n细节责任：detail.tier=important 的已登记地点按角色锚点、明确剧情或来源事实补齐细节；ordinary 使用有限、够用的细节。重要性不改变已有尺寸、作者锁，也不把推测设施的延后内部自动升级为开局必建。';
   request.promptInput = {
     injectionText: request.messages[1].content,
     userText: '',

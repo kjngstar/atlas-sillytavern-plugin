@@ -21,7 +21,7 @@ import {
   DEFAULT_WORLD_TURN_SYSTEM_PROMPT,
   type AtlasApiPreset,
 } from "./atlas-api-client.ts";
-import { DEFAULT_SQL_PROMPT_SEGMENTS, buildSqlCompatiblePrompt } from './atlas-sql-prompts.ts';
+import { DEFAULT_SQL_PROMPT_SEGMENTS, buildSqlCompatiblePrompt, sqlPromptPresetNotice } from './atlas-sql-prompts.ts';
 import { PROMPT_POLICY_VERSION } from './atlas-prompt-layers.ts';
 import { SPATIAL_CAPABILITIES } from './atlas-world-contract.ts';
 import { DEFAULT_WORK_BATCHING, normalizeWorkBatching, validWorkBatching, type WorkBatchingSettings } from './atlas-work-batching.ts';
@@ -1281,6 +1281,7 @@ export interface AtlasSettingsView {
    * P14/§21.5：策略层版本号。用户据此判断自己的预设是不是旧策略；升级**不会**改写已另存的预设。
    */
   promptPolicyVersion: string;
+  promptCompatibility: ReturnType<typeof sqlPromptPresetNotice>;
   /**
    * P14/§21.5：本版本**真实声明**的空间程序能力（只有全部打通的能力才在这里）。
    * 界面必须照实展示，不能把未实现的能力写成已支持。
@@ -1374,6 +1375,7 @@ export function settingsViewV2(settings: AtlasServerSettingsV2): AtlasSettingsVi
     },
     // P14/§21.5：策略版本与已声明能力——照实报，不把未实现的能力写进来。
     promptPolicyVersion: PROMPT_POLICY_VERSION,
+    promptCompatibility: sqlPromptPresetNotice(activePrompt?settings.promptPresets.find(p=>p.id===activePrompt)?.segments:DEFAULT_SQL_PROMPT_SEGMENTS),
     spatialCapabilities: [...SPATIAL_CAPABILITIES],
     autoCommit: settings.autoCommit,
     loreSupplementEnabled: settings.loreSupplementEnabled ?? true,
