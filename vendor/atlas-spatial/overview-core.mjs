@@ -166,17 +166,26 @@ export function overview(spec,previous=null){
     const ratio=SIZE_RATIO[SIZE_SET.has(z.size)?z.size:'medium'];
     baseRadius.set(z.id,z.physicalSize?Math.max(z.physicalSize.w,z.physicalSize.h)/2:S*ratio);
   }
+  // Keep drawing sizes separate from collision envelopes: rectangle corners
+  // and the jitter in natural outlines extend beyond the nominal radius.
+  const footprintRadius=new Map(zonesIn.map(z=>[z.id,z.lockedPolygon?.length>=3
+    ?Math.max(...z.lockedPolygon.map(p=>distance(p,z.locked??centroid(z.lockedPolygon))))
+    :z.physicalSize?Math.hypot(z.physicalSize.w,z.physicalSize.h)/2
+      :Math.max(...zonePolygon(z,0,0,baseRadius.get(z.id),seed).map(p=>Math.hypot(p.x,p.y)))]));
   const structureKeyOf=z=>stable({role:z.role??null,size:z.size??null,...(z.physicalSize?{physicalSize:z.physicalSize}:{}),sector:z.sector??null,near:z.near??null,locked:z.locked??null,lockedPolygon:z.lockedPolygon??null,placementPolicy:3});
   const occupied=[],sites=new Map(),reasons=new Map();
   for(const z of zonesIn){
     const old=prevShapes.get(z.id),pin=prevPins.get(z.id);
     const locked=finite(z.locked?.x)&&finite(z.locked.y)?z.locked:null;
     const saved=old?.structureKey===structureKeyOf(z)&&old.polygon?.length>=3&&finite(pin?.x)&&finite(pin.y)?pin:null;
-    const fixed=locked??saved;
+    const fixed=locked??(z.lockedPolygon?.length>=3?centroid(z.lockedPolygon):saved);
     if(fixed){
       const point=pt(fixed.x,fixed.y);sites.set(z.id,point);
       reasons.set(z.id,locked?'locked':'saved');
-      occupied.push({id:z.id,point,radius:baseRadius.get(z.id)});
+      const polygon=z.lockedPolygon??(saved?old.polygon:null);
+      const radius=polygon?.length>=3?Math.max(...polygon.map(p=>distance(p,point))):footprintRadius.get(z.id);
+      footprintRadius.set(z.id,radius);
+      occupied.push({id:z.id,point,radius});
     }
   }
   const obstacles=[];
@@ -186,13 +195,18 @@ export function overview(spec,previous=null){
   const minGap=S/12;
   const pending=zonesIn.filter(z=>!sites.has(z.id));
   while(pending.length){
-    // Resolve proximity anchors first, regardless of entity-ID ordering. A
-    // mutual near relation can start at either stable first member.
-    const ready=pending.findIndex(z=>!z.near||sites.has(z.near)||!baseRadius.has(z.near));
-    const z=pending.splice(ready<0?0:ready,1)[0];
-    const r=baseRadius.get(z.id);
+    // Resolve anchors first. When all remaining nodes depend on each other,
+    // start inside the actual cycle, not at an external dependent sorted first.
+    let ready=pending.findIndex(z=>!z.near||!pending.some(other=>other.id===z.near));
+    if(ready<0){
+      let anchor=pending[0];const visited=new Set();
+      while(!visited.has(anchor.id)){visited.add(anchor.id);anchor=pending.find(z=>z.id===anchor.near);}
+      ready=pending.indexOf(anchor);
+    }
+    const z=pending.splice(ready,1)[0];
+    const r=footprintRadius.get(z.id);
     const near=z.near?sites.get(z.near):null;
-    const nearRadius=near?baseRadius.get(z.near)??r:0;
+    const nearRadius=near?footprintRadius.get(z.near)??r:0;
     // Nearby footprints need spacing based on their sizes, not on the entire
     // world's width. A direction with near is relative to that anchor.
     const spacing=near?Math.max(r,nearRadius):z.physicalSize?r:minGap;

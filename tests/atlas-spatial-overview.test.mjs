@@ -54,6 +54,30 @@ function context(input = {}) {
 const generate = (spec, ctx, previousScene = null) =>
   Kit.generateOverview(spec, { ...ctx, previousScene, currentScope: SCOPE });
 
+test('邻近建筑保留完整矩形轮廓，不能出现四角重叠', () => {
+  const ctx=context({locations:['A-house','Z-shop'].map(id=>location(id)),mapRow:mapRow({id:'proximity-map',frame_json:{cols:10000,rows:10000},meters_per_cell:1})});
+  ctx.childSpaces=Object.fromEntries(['A-house','Z-shop'].map(id=>[id,{widthM:12,heightM:8}]));
+  const result=generate({surface:'urban',zones:[{id:'A-house',sector:'east'},{id:'Z-shop',near:'A-house'}]},ctx);
+  assert.equal(result.ok,true,JSON.stringify(result.issues));
+  assert.equal(result.scene.layout.shapes.length,2);
+  const boxes=result.scene.layout.shapes.map(s=>({x0:Math.min(...s.polygon.map(p=>p.x)),x1:Math.max(...s.polygon.map(p=>p.x)),y0:Math.min(...s.polygon.map(p=>p.y)),y1:Math.max(...s.polygon.map(p=>p.y))}));
+  const [a,b]=boxes;
+  for(const box of boxes){assert.equal(box.x1-box.x0,12);assert.equal(box.y1-box.y0,8);}
+  assert.ok(Math.min(a.x1,b.x1)<=Math.max(a.x0,b.x0)||Math.min(a.y1,b.y1)<=Math.max(a.y0,b.y0),'真实建筑矩形不得重叠');
+});
+
+test('循环 near 从环内地点起排，排序更早的外部依赖仍保持局部间距', () => {
+  const ids=['A','B','Z'],ctx=context({locations:ids.map(id=>location(id)),mapRow:mapRow({id:'cycle-proximity',frame_json:{cols:10000,rows:10000},meters_per_cell:1})});
+  ctx.childSpaces=Object.fromEntries(ids.map(id=>[id,{widthM:12,heightM:8}]));
+  const spec={surface:'urban',zones:[{id:'A',near:'B',sector:'west'},{id:'B',near:'Z',sector:'east'},{id:'Z',near:'B',sector:'west'}]};
+  const result=generate(spec,ctx);
+  assert.equal(result.ok,true,JSON.stringify(result.issues));
+  assert.equal(result.scene.layout.pins.length,3);
+  const pin=id=>result.scene.layout.pins.find(p=>p.id===id);
+  for(const [a,b]of [['A','B'],['B','Z']])assert.ok(Math.hypot(pin(a).x-pin(b).x,pin(a).y-pin(b).y)<40,`${a} near ${b} 应留在同一簇`);
+  assert.deepEqual(generate({...spec,zones:[...spec.zones].reverse()},ctx).scene.layout,result.scene.layout);
+});
+
 function assertAllFiniteInside(scene) {
   const b = scene.layout.bounds;
   const inside = (p) => Number.isFinite(p.x) && Number.isFinite(p.y)
