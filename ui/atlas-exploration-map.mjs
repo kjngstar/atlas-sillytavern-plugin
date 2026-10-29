@@ -35,7 +35,9 @@ export function projectExplorationMaps(nodes,locations,{maps=[],viewMode='player
   const g=n.geo??{};
   // Existing local geometry remains authoritative. Never re-layout a real floor,
   // terrain map, measured footprint, or locations that already have positions.
-  if(n.unclassified||n.renderKind==='floor'||g.hostArea||g.rooms?.length||g.overviewShapes?.length||g.districts?.length||g.overviewFeatures?.length||g.selfArea||g.river?.length||n.marks?.some(m=>['poi','vehicle'].includes(m.type)&&!m.proxy&&!m.silent))continue;
+  const outlines=[...(g.overviewShapes??[]),...(g.districts??[])];
+  if(n.metric>0&&!['layout','estimated','uncalibrated'].includes(n.transform?.metricQuality??n.transform?.scaleQuality))continue;
+  if(n.unclassified||n.renderKind==='floor'||g.hostArea||g.rooms?.length||outlines.some(s=>n.hasLayout!==false||['confirmed','exact'].includes(s.quality))||g.overviewFeatures?.length||g.selfArea||g.river?.length)continue;
   const children=(n.children??[]).filter(c=>c.known!==false&&!c.unclassified&&c.containerLocationKind!=='floor').sort(sort);
   const local=new Map(children.map(c=>[c.id,c]));
   const owner=id=>{
@@ -69,9 +71,24 @@ export function projectExplorationMaps(nodes,locations,{maps=[],viewMode='player
   }
   const cols=Math.min(3,Math.max(1,Math.ceil(Math.sqrt(areas.length)))),rows=Math.ceil(areas.length/cols);
   for(const a of areas){const i=ordered.indexOf(a.nodeId);a.x=(i%cols-(cols-1)/2)*290;a.y=(Math.floor(i/cols)-(rows-1)/2)*215;}
-  const positions=new Map(areas.map(a=>[a.nodeId,[a.x,a.y]]));
   const selfEdges=edges.filter(e=>e.from===n.id||e.to===n.id);
-  const hub=[0,rows*215/2+35];positions.set(n.id,hub);
+  const hub=[0,0];
+  if(selfEdges.length){
+   const exits=areas.filter(a=>selfEdges.some(e=>e.from===a.nodeId||e.to===a.nodeId));
+   exits.forEach((a,i)=>{a.x=exits.length===1?280:(i%2?310:-310);a.y=Math.floor(i/2)*200;});
+   const within=areas.filter(a=>!exits.includes(a));
+   within.forEach((a,i)=>{a.x=(i-(within.length-1)/2)*260;a.y=-165;});
+  }
+  const anchors=new Map((n.marks??[]).filter(m=>['poi','vehicle'].includes(m.type)&&!m.proxy&&Number.isFinite(m.x)&&Number.isFinite(m.y)).map(m=>[m.id,m]));
+  // Preserve every recorded anchor, even when its geometry is still missing.
+  // Only the drawn thumbnail size adapts to prevent adjacent outlines colliding.
+  const anchored=areas.filter(a=>anchors.has(a.id));
+  let spacing=Infinity;
+  for(let i=0;i<anchored.length;i++)for(let j=0;j<i;j++){const a=anchors.get(anchored[i].id),b=anchors.get(anchored[j].id);spacing=Math.min(spacing,Math.hypot(a.x-b.x,a.y-b.y));}
+  const thumbnailScale=Math.min(1,Math.max(.2,spacing/290));
+  for(const a of anchored){const p=anchors.get(a.id);a.x=p.x;a.y=p.y;a.parts=a.parts.map(poly=>poly.map(([x,y])=>[x*thumbnailScale,y*thumbnailScale]));}
+  const positions=new Map(areas.map(a=>[a.nodeId,[a.x,a.y]]));
+  positions.set(n.id,hub);
   const passages=edges.map(e=>{const a=positions.get(e.from),b=positions.get(e.to);return {...e,points:[a,[(a[0]+b[0])/2,a[1]],[(a[0]+b[0])/2,b[1]],b]};});
   const all=[...areas.flatMap(a=>a.parts.flat().map(([x,y])=>[x+a.x,y+a.y])),...passages.flatMap(e=>e.points)];
   const xs=all.map(p=>p[0]),ys=all.map(p=>p[1]);

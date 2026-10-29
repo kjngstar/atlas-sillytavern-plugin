@@ -22,6 +22,12 @@ test('没有道路依据时不把归属连成可通行路线，空白区域采�
  const s=f.parent.geo.exploration;assert.deepEqual(s.passages,[]);assert.equal(s.areas.find(a=>a.nodeId==='tool').recorded,false);
  assert.ok(s.areas.find(a=>a.nodeId==='tool').parts[0].length>4);
 });
+test('已有落点保持原位，略图只调整预览大小；实测地图继续使用米制地图',()=>{
+ const f=fixture();f.parent.marks=[{id:'hall-place',type:'poi',x:180,y:260},{id:'tool-place',type:'poi',x:320,y:260}];
+ projectExplorationMaps(f.nodes,f.locations,{maps:f.maps});
+ assert.deepEqual(f.parent.geo.exploration.areas.map(a=>[a.x,a.y]),[[180,260],[320,260]]);
+ const g=fixture();g.parent.metric=2;g.parent.transform={scaleQuality:'confirmed'};projectExplorationMaps(g.nodes,g.locations,{maps:g.maps});assert.equal(g.parent.geo.exploration,undefined);
+});
 test('可见性过滤不泄露隐藏路线或邻图；输入顺序变化不改变略图',()=>{
  const a=fixture(),b=fixture();b.parent.children.reverse();b.nodes=new Map([...b.nodes].reverse());
  projectExplorationMaps(a.nodes,a.locations,{maps:a.maps});projectExplorationMaps(b.nodes,b.locations,{maps:b.maps});
