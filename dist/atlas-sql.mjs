@@ -3719,16 +3719,17 @@ function splitWater(a, b, river) {
   return out;
 }
 function city(spec, previous = null) {
-  if (!Number.isFinite(spec.width) || !Number.isFinite(spec.height) || spec.width < 900 || spec.height < 700 || !Number.isFinite(spec.riverWidth) || spec.riverWidth < 0 || spec.riverWidth > spec.width * 0.15 || !Array.isArray(spec.districts) || !spec.districts.length || new Set(spec.districts.map((d) => d.id)).size !== spec.districts.length || spec.districts.some((d) => !["west", "east"].includes(d.bank) || !Number.isFinite(d.order))) return { ok: false, issues: [{ id: spec.id, code: "CITY_INPUT_INVALID" }] };
+  if (!Number.isFinite(spec.width) || !Number.isFinite(spec.height) || spec.width <= 0 || spec.height <= 0 || !Number.isFinite(spec.riverWidth) || spec.riverWidth < 0 || spec.riverWidth > spec.width * 0.15 || !Array.isArray(spec.districts) || !spec.districts.length || new Set(spec.districts.map((d) => d.id)).size !== spec.districts.length || spec.districts.some((d) => !["west", "east"].includes(d.bank) || !Number.isFinite(d.order))) return { ok: false, issues: [{ id: spec.id, code: "CITY_INPUT_INVALID" }] };
   const structure = (v) => JSON.stringify({ width: v.width, height: v.height, riverWidth: v.riverWidth, seed: v.seed, districts: ordered2(v.districts || []).map((d) => [d.id, d.bank, d.order]) });
   if (previous?.structureKey && previous.structureKey !== structure(spec)) return { ok: false, issues: [{ id: spec.id, code: "CITY_STRUCTURE_CHANGE_REQUIRES_REBUILD" }], kept: clone3(previous) };
   const w = spec.width, h = spec.height, rng = rand(spec.seed || spec.id), origin = pt(w * 0.46, h * 0.5), raw = [];
+  const detailScale = Math.min(1, w / 900, h / 700), lane = 12 * detailScale, pad = 6 * detailScale;
   for (let i = 0; i < 14; i++) {
     const a = i * Math.PI / 7, rr = 0.95 + rng() * 0.05;
     raw.push(pt(origin.x + Math.cos(a) * w * 0.405 * rr, origin.y + Math.sin(a) * h * 0.405 * rr));
   }
   const open = spec.enclosure === "open", hullOutline = hull(raw), land0 = open ? [pt(0, 0), pt(w, 0), pt(w, h), pt(0, h)] : hullOutline;
-  const wall = open ? [] : hullOutline, river = { cx: w * 0.62, amplitude: w * 0.035, width: spec.riverWidth, height: h }, bankGap = river.width / 2 + 18;
+  const wall = open ? [] : hullOutline, river = { cx: w * 0.62, amplitude: w * 0.035, width: spec.riverWidth, height: h }, bankGap = river.width / 2 + 18 * detailScale;
   const wet = river.width > 0;
   const left = wet ? clip(land0, 1, 0, river.cx - river.amplitude - bankGap) : clip(land0, 1, 0, w * 0.55), right = wet ? clip(land0, -1, 0, -(river.cx + river.amplitude + bankGap)) : clip(land0, -1, 0, -w * 0.55), districts = [];
   for (const bank of ["west", "east"]) {
@@ -3754,9 +3755,9 @@ function city(spec, previous = null) {
   const gates = open ? [] : [{ id: "gate-west", name: "西城门", x: horizontalIntersections[0], y: centerY }, { id: "gate-east", name: "东城门", x: horizontalIntersections.at(-1), y: centerY }];
   const hubs = [pt(w * 0.31, centerY), pt(w * 0.77, centerY)], roads = [], segments = [], buildings = [], issues = [];
   const addRoad = (id, a, b) => {
-    const road = { id, a, b, width: 12 };
+    const road = { id, a, b, width: lane };
     roads.push(road);
-    segments.push(...(wet ? splitWater(a, b, river) : [{ a, b, kind: "road" }]).map((s, i) => ({ ...s, id: id + ":" + i, roadId: id, width: 12 })));
+    segments.push(...(wet ? splitWater(a, b, river) : [{ a, b, kind: "road" }]).map((s, i) => ({ ...s, id: id + ":" + i, roadId: id, width: lane })));
   };
   addRoad("avenue", open ? hubs[0] : pt(gates[0].x, centerY), open ? hubs[1] : pt(gates[1].x, centerY));
   for (const d of districts) addRoad("road:" + d.id, hubs[d.bank === "west" ? 0 : 1], d.site);
@@ -3768,15 +3769,15 @@ function city(spec, previous = null) {
   }
   const roadClear = (q) => !roads.some((r) => {
     const min = Math.min(...corners(q).map((p) => segmentDistance(p, r.a, r.b)), segmentDistance(center(q), r.a, r.b));
-    return min < r.width / 2 + 12 || segmentIntersectsRect(r.a, r.b, inflate(q, 12));
+    return min < r.width / 2 + lane || segmentIntersectsRect(r.a, r.b, inflate(q, lane));
   });
   function placeBuilding(f, decorative = false) {
     const d = districts.find((d2) => d2.id === f.districtId);
     if (!d || !Number.isFinite(f.w) || !Number.isFinite(f.h) || f.w <= 0 || f.h <= 0) return null;
-    const xs = d.polygon.map((p) => p.x), ys = d.polygon.map((p) => p.y), candidates = [], step = Math.max(decorative ? 22 : 10, Math.max(w, h) / 240);
-    for (let y = Math.min(...ys) + 12; y + f.h < Math.max(...ys); y += step) for (let x = Math.min(...xs) + 12; x + f.w < Math.max(...xs); x += step) {
+    const xs = d.polygon.map((p) => p.x), ys = d.polygon.map((p) => p.y), candidates = [], step = Math.max((decorative ? 22 : 10) * detailScale, Math.max(w, h) / 240);
+    for (let y = Math.min(...ys) + lane; y + f.h < Math.max(...ys); y += step) for (let x = Math.min(...xs) + lane; x + f.w < Math.max(...xs); x += step) {
       const q2 = { x, y, w: f.w, h: f.h };
-      if (corners(inflate(q2, 6)).every((p) => polygonContains(d.polygon, p)) && roadClear(q2) && !buildings.some((b2) => intersects(inflate(b2, decorative ? 6 : 12), q2))) {
+      if (corners(inflate(q2, pad)).every((p) => polygonContains(d.polygon, p)) && roadClear(q2) && !buildings.some((b2) => intersects(inflate(b2, decorative ? pad : lane), q2))) {
         const score = Math.min(...roads.map((r) => segmentDistance(center(q2), r.a, r.b))) + distance(center(q2), d.site) * 0.035 + (decorative ? rng() * 30 : 0);
         candidates.push({ q: q2, score });
       }
@@ -3789,7 +3790,7 @@ function city(spec, previous = null) {
   }
   const validBuilding = (q) => {
     const d = districts.find((d2) => d2.id === q.districtId);
-    return d && corners(inflate(q, 6)).every((p) => polygonContains(d.polygon, p)) && roadClear(q) && !buildings.some((b) => intersects(inflate(b, 12), q));
+    return d && corners(inflate(q, pad)).every((p) => polygonContains(d.polygon, p)) && roadClear(q) && !buildings.some((b) => intersects(inflate(b, lane), q));
   };
   for (const f of ordered2(spec.buildings || []).filter((f2) => f2.locked)) {
     const q = { ...f, ...f.locked };
@@ -3802,7 +3803,7 @@ function city(spec, previous = null) {
     else if (old?.quality === "confirmed") return { ok: false, issues: [{ id: f.id, code: "BUILDING_LOCK_CONFLICT" }], kept: clone3(previous) };
   }
   for (const f of ordered2(spec.buildings || []).filter((f2) => !buildings.some((b) => b.id === f2.id))) if (!placeBuilding(f)) issues.push({ id: f.id, code: "BUILDING_NO_SPACE" });
-  for (const d of districts) for (let i = 0; i < (spec.blocksPerDistrict ?? 8); i++) placeBuilding({ id: "texture:" + d.id + ":" + i, districtId: d.id, name: "街区轮廓", w: 28 + rng() * 24, h: 25 + rng() * 25 }, true);
+  for (const d of districts) for (let i = 0; i < (spec.blocksPerDistrict ?? 8); i++) placeBuilding({ id: "texture:" + d.id + ":" + i, districtId: d.id, name: "街区轮廓", w: (28 + rng() * 24) * detailScale, h: (25 + rng() * 25) * detailScale }, true);
   const rline = Array.from({ length: 81 }, (_, i) => pt(riverX(river, h * i / 80), h * i / 80)), riverPolygon = rline.map((p) => pt(p.x - river.width / 2, p.y)).concat([...rline].reverse().map((p) => pt(p.x + river.width / 2, p.y)));
   const dock = { id: "dock", name: "河岸码头", type: "dock", x: riverX(river, h * 0.68) - river.width / 2, y: h * 0.68, bank: "west", width: river.width * 0.38 };
   return { ok: true, structureKey: structure(spec), id: spec.id, name: spec.name, kind: "city", enclosure: open ? "open" : "wall", bounds: { x: 0, y: 0, w, h }, wall, origin, river: wet ? river : null, riverPolygon: wet ? riverPolygon : [], districts, roads, segments, gates, buildings, dock: wet ? dock : null, issues };
