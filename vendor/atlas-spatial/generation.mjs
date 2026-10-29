@@ -265,7 +265,15 @@ export function generateCity(value,context){
         s.issues.push(diagnostic('BUILDING_DISTRICT_RECONCILED','$.buildings','建筑分区与已登记归属不符，已保留真实归属，不把示意排位当作包含关系',{severity:'warning',entityId:r.id}));
       }
       if(!districtIds.has(districtId))throw new Error('DISTRICT_REF_UNKNOWN');
-      return {...(ctx.locks?.buildings?.[r.id]?.w>0?dimensions(ctx.locks.buildings[r.id]):dimensions(r)),districtId,...(locked?{locked}:{}),...proxyPlacement(ctx,r.id)};
+      let proximity={};
+      if(r.near!==undefined){
+        if(typeof r.near!=='string'||!s.known.locations.has(r.near)||r.near===r.id)throw new Error('BUILDING_NEAR_REF_INVALID');
+        if(r.sector!==undefined&&!['north','east','south','west'].includes(r.sector))throw new Error('BUILDING_NEAR_SECTOR_INVALID');
+        if(r.gapM!==undefined&&(!finite(r.gapM)||r.gapM<0))throw new Error('BUILDING_GAP_INVALID');
+        proximity={near:r.near,...(r.sector?{sector:r.sector}:{}),...(r.gapM!==undefined?{gapM:r.gapM}:{})};
+      }else if(r.gapM!==undefined)throw new Error('BUILDING_NEAR_REF_REQUIRED');
+      const authority=ctx.childSpaces?.[r.id];
+      return {...(ctx.locks?.buildings?.[r.id]?.w>0?dimensions(ctx.locks.buildings[r.id]):authority?dimensions({w:authority.widthM,h:authority.heightM}):dimensions(r)),districtId,...proximity,...(locked?{locked}:{}),...proxyPlacement(ctx,r.id)};
     });
     return finish(s,ctx,E.city);
   }catch(e){return failure(String(e.message),'$','生成请求不可用；保留已保存布局',{kept:context?.previousScene?clone(context.previousScene):null});}

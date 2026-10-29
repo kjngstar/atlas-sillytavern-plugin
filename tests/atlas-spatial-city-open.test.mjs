@@ -40,6 +40,33 @@ for(const [width,height]of [[500,300],[80,60]])test(`小场所 ${width}×${heigh
   assert.ok(a.x+a.w<=b.x||b.x+b.w<=a.x||a.y+a.h<=b.y||b.y+b.h<=a.y);
 });
 
+test('城市建筑明确正东4米墙距可覆盖模板留白，保存重开后保持同一约束',()=>{
+  const ctx=cityCtx({map:{metersPerCell:1,frame:{cols:500,rows:300}}});
+  const spec={enclosure:'open',riverWidth:0,blocksPerDistrict:0,districts:[{id:'d1',bank:'west',order:0}],buildings:[{id:'b1',districtId:'d1',w:12,h:8},{id:'b2',districtId:'d1',w:12,h:8}]};
+  const first=Kit.generateCity(spec,ctx);assert.equal(first.ok,true);
+  const result=Kit.generateCity({...spec,buildings:[{...spec.buildings[1],w:24,h:20,near:'b1',sector:'east',gapM:4}]},{...ctx,childSpaces:{b2:{widthM:12,heightM:8}},previousScene:first.scene});
+  assert.equal(result.ok,true,JSON.stringify(result.issues));
+  const a=result.scene.layout.buildings.find(b=>b.id==='b1'),b=result.scene.layout.buildings.find(b=>b.id==='b2');
+  assert.ok(Math.abs(b.x-a.x-a.w-4)<1e-7);
+  assert.equal(b.y,a.y);
+  assert.equal(a.w,12);assert.equal(b.w,12);
+  assert.equal(result.scene.constraints.buildings.find(b=>b.id==='b2').gapM,4);
+  const again=Kit.generateCity({buildings:[]},{...ctx,previousScene:result.scene});
+  assert.equal(again.ok,true,JSON.stringify(again.issues));
+  assert.deepEqual(again.scene.layout.buildings,result.scene.layout.buildings);
+});
+
+test('明确邻近关系不能搬动确认建筑来凑墙距',()=>{
+  const ctx=cityCtx({map:{metersPerCell:1,frame:{cols:500,rows:300}}});
+  const spec={enclosure:'open',riverWidth:0,districts:[{id:'d1',bank:'west',order:0}],buildings:[{id:'b1',districtId:'d1',w:12,h:8},{id:'b2',districtId:'d1',w:12,h:8}]};
+  const first=Kit.generateCity(spec,ctx);assert.equal(first.ok,true);
+  const old=first.scene.layout.buildings.find(b=>b.id==='b2');old.quality='confirmed';
+  const result=Kit.generateCity({buildings:[{...spec.buildings[1],near:'b1',sector:'west',gapM:4}]},{...ctx,previousScene:first.scene});
+  assert.equal(result.ok,false);
+  assert.ok(result.issues.some(i=>i.code==='BUILDING_PROXIMITY_CONFLICT'));
+  assert.deepEqual(result.kept,first.scene);
+});
+
 // ───────────────────────── G07-A · 新城市默认开放：不画假城墙 ─────────────────────────
 
 test('G07：enclosure=open + riverWidth=0 → 无假城墙、无城门、无环城墙道路', () => {

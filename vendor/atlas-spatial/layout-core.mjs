@@ -337,14 +337,14 @@ import * as B from './foundation.mjs';
       const d=districts.find(d=>d.id===f.districtId);if(!d||!Number.isFinite(f.w)||!Number.isFinite(f.h)||f.w<=0||f.h<=0)return null;
       const xs=d.polygon.map(p=>p.x),ys=d.polygon.map(p=>p.y),candidates=[],step=Math.max((decorative?22:10)*detailScale,Math.max(w,h)/240);
       for(let y=Math.min(...ys)+lane;y+f.h<Math.max(...ys);y+=step)for(let x=Math.min(...xs)+lane;x+f.w<Math.max(...xs);x+=step){const q={x,y,w:f.w,h:f.h};
-        if(corners(inflate(q,pad)).every(p=>polygonContains(d.polygon,p))&&roadClear(q)&&!buildings.some(b=>B.intersects(inflate(b,decorative?pad:lane),q))){
+        if(corners(inflate(q,pad)).every(p=>polygonContains(d.polygon,p))&&roadClear(q)&&!buildings.some(b=>B.intersects(inflate(b,f.near===b.id||b.near===f.id?0:decorative?pad:lane),q))){
           const score=Math.min(...roads.map(r=>segmentDistance(center(q),r.a,r.b)))+distance(center(q),d.site)*.035+(decorative?rng()*30:0);candidates.push({q,score});
         }
       }
       const q=candidates.sort((a,b)=>a.score-b.score||a.q.y-b.q.y||a.q.x-b.q.x)[0]?.q;
       if(!q)return null;const b={...f,...q,type:decorative?'block':'building',decorative,quality:'layout',mapId:spec.id};buildings.push(b);return b;
     }
-    const validBuilding=q=>{const d=districts.find(d=>d.id===q.districtId);return d&&corners(inflate(q,pad)).every(p=>polygonContains(d.polygon,p))&&roadClear(q)&&!buildings.some(b=>B.intersects(inflate(b,lane),q));};
+    const validBuilding=q=>{const d=districts.find(d=>d.id===q.districtId);return d&&corners(inflate(q,pad)).every(p=>polygonContains(d.polygon,p))&&roadClear(q)&&!buildings.some(b=>b.id!==q.id&&B.intersects(inflate(b,q.near===b.id||b.near===q.id?0:lane),q));};
     for(const f of ordered(spec.buildings||[]).filter(f=>f.locked)){
       const q={...f,...f.locked};if(validBuilding(q))buildings.push({...q,type:'building',decorative:false,quality:'confirmed',mapId:spec.id});else return {ok:false,issues:[{id:f.id,code:'BUILDING_LOCK_CONFLICT'}],kept:previous?clone(previous):null};
     }
@@ -354,6 +354,30 @@ import * as B from './foundation.mjs';
       else if(old?.quality==='confirmed')return {ok:false,issues:[{id:f.id,code:'BUILDING_LOCK_CONFLICT'}],kept:clone(previous)};
     }
     for(const f of ordered(spec.buildings||[]).filter(f=>!buildings.some(b=>b.id===f.id)))if(!placeBuilding(f))issues.push({id:f.id,code:'BUILDING_NO_SPACE'});
+    // Explicit wall gaps take precedence over the template's generic spacing.
+    // Only move estimated buildings; never relocate a confirmed footprint.
+    const nearby=ordered(spec.buildings||[]).filter(f=>f.near),nearIds=new Set(nearby.map(f=>f.id)),settled=new Set(buildings.filter(b=>!nearIds.has(b.id)).map(b=>b.id)),pending=[...nearby];
+    const adjacent=(f,a,sector)=>{
+      const gap=f.gapM??lane,q={...buildings.find(b=>b.id===f.id),...f};
+      if(sector==='east'){q.x=a.x+a.w+gap;q.y=a.y+(a.h-q.h)/2;}
+      if(sector==='west'){q.x=a.x-q.w-gap;q.y=a.y+(a.h-q.h)/2;}
+      if(sector==='north'){q.x=a.x+(a.w-q.w)/2;q.y=a.y-q.h-gap;}
+      if(sector==='south'){q.x=a.x+(a.w-q.w)/2;q.y=a.y+a.h+gap;}
+      return q;
+    };
+    while(pending.length){
+      const index=pending.findIndex(f=>settled.has(f.near)),f=pending.splice(index<0?0:index,1)[0],a=buildings.find(b=>b.id===f.near),b=buildings.find(b=>b.id===f.id);
+      if(!a||!b)return {ok:false,issues:[{id:f.id,code:'BUILDING_PROXIMITY_CONFLICT'}],kept:previous?clone(previous):null};
+      const fixed=f.locked||b.quality==='confirmed';
+      const options=(f.sector?[f.sector]:['east','south','west','north']).map(sector=>adjacent(f,a,sector));
+      const q=options.find(q=>validBuilding(q)&&(!fixed||Math.abs(q.x-b.x)<EPS&&Math.abs(q.y-b.y)<EPS));
+      if(!q)return {ok:false,issues:[{id:f.id,code:'BUILDING_PROXIMITY_CONFLICT'}],kept:previous?clone(previous):null};
+      Object.assign(b,q);settled.add(f.id);
+    }
+    for(const f of nearby){
+      const a=buildings.find(b=>b.id===f.near),b=buildings.find(b=>b.id===f.id);
+      if(!(f.sector?[f.sector]:['east','south','west','north']).some(sector=>{const q=adjacent(f,a,sector);return Math.abs(q.x-b.x)<EPS&&Math.abs(q.y-b.y)<EPS;}))return {ok:false,issues:[{id:f.id,code:'BUILDING_PROXIMITY_CONFLICT'}],kept:previous?clone(previous):null};
+    }
     for(const d of districts)for(let i=0;i<(spec.blocksPerDistrict??8);i++)placeBuilding({id:'texture:'+d.id+':'+i,districtId:d.id,name:'街区轮廓',w:(28+rng()*24)*detailScale,h:(25+rng()*25)*detailScale},true);
     const rline=Array.from({length:81},(_,i)=>pt(riverX(river,h*i/80),h*i/80)),riverPolygon=rline.map(p=>pt(p.x-river.width/2,p.y)).concat([...rline].reverse().map(p=>pt(p.x+river.width/2,p.y)));
     const dock={id:'dock',name:'河岸码头',type:'dock',x:riverX(river,h*.68)-river.width/2,y:h*.68,bank:'west',width:river.width*.38};

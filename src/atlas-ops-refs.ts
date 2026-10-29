@@ -282,7 +282,7 @@ export const LAYOUT_SPEC_REF_FIELDS: Readonly<Record<string, Readonly<Record<str
   actors: { id: 'character', roomId: 'location' },
   items: { id: 'item' },
   districts: { id: 'location' },
-  buildings: { id: 'location', districtId: 'location' },
+  buildings: { id: 'location', districtId: 'location', near: 'location' },
   // M4-02：概览集合（02 §10 / 契约 OverviewSpec）。
   // zones.id 与 zones.near 是**地点**引用（命名河流作为已登记自然地点参与互动）；
   // links.id 是**路线**引用（不得凭空造路）；features.zoneId 是地点引用，

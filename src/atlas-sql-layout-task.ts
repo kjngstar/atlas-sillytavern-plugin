@@ -162,7 +162,7 @@ export function unknownLayoutEntityRefs(operations:readonly ModelOperation[],ref
     // Local IDs (contents.id/features.id/actors.near/items.on) are intentionally excluded.
     const entityFields: Record<string, readonly string[]> = {
       zones: ['id', 'near'], links: ['id'], features: ['zoneId'],
-      districts: ['id'], buildings: ['id', 'districtId'], rooms: ['id'],
+      districts: ['id'], buildings: ['id', 'districtId', 'near'], rooms: ['id'],
       contents: ['roomId'], actors: ['id', 'roomId'], items: ['id'],
     };
     check((spec as Record<string, unknown>).corridorLocationRef);
@@ -912,6 +912,7 @@ export function buildSqlLayoutTask(
     + '\n布局阶段不新建 SQL 实体：所有可交互地点必须已经在目录里。但建设阶段允许新增地点，两者不冲突——不要因为布局不新建实体就停止补全世界。actors/items 是本批有目录引用且在生成器额度内的相关者，不是整张人物表；未发送者仍保存在 SQL，由程序维护位置和地点名单，不能创建替身来凑数。'
     + '\n不要输出其他操作。';
   request.messages[1].content += '\n父图中的本地点轮廓是下钻边界；子图用于细化同一个空间，不重画成一座无关的城市。相邻街区维持父图的相对方位，不能把外城区、内城区、中心区都复制成同一幅城市模板。size=large/medium/small 必须维持相对面积顺序；没有实体依据的 road_texture 不输出，真实道路仅使用已登记 links。';
+  if(hasCity)request.messages[1].content+='\ncity 建筑有明确邻近关系时，在该 buildings 项写 near=参照建筑引用、sector=north/east/south/west；资料给出两建筑外墙间距时写 gapM=实际米数。gapM 是墙到墙的净距，不是中心距离，也不是全图最小留白。没有明确间距时省略 gapM，不自行精确化。';
   request.anchor = input.anchor;
   request.messages[1].content+='\n细节责任：detail.tier=important 的已登记地点按角色锚点、明确剧情或来源事实补齐细节；ordinary 使用有限、够用的细节。重要性不改变已有尺寸、作者锁，也不把推测设施的延后内部自动升级为开局必建。';
   request.promptInput = {
