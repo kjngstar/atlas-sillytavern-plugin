@@ -110,20 +110,3 @@
 #atlasDemo .pl-summary:focus-visible{outline:2px solid var(--cyan);outline-offset:-3px;border-radius:inherit;}
 #atlasDemo .pl-body{padding:0 12px 12px;pointer-events:auto;}
 #atlasDemo .pl-body>.pl-path{margin-top:0;}
-/* Missing geographic placement is a navigable place overview, not a fake parcel. */
-#atlasDemo .place-structure{position:absolute;inset:74px 26px 54px;z-index:6;overflow:auto;display:flex;align-items:center;justify-content:center;color:var(--txt);}
-#atlasDemo .place-structure[hidden],#atlasDemo .viewport.page-open .place-structure{display:none;}
-#atlasDemo .viewport.structure-view{background:var(--win-1);}
-#atlasDemo .structure-content{width:min(100%,480px);padding:24px;box-sizing:border-box;}
-#atlasDemo .structure-content h3{font-size:22px;font-weight:600;margin:10px 0 12px;}
-#atlasDemo .structure-content section{margin-top:22px;}
-#atlasDemo .structure-entries{display:grid;gap:5px;margin-top:9px;}
-#atlasDemo .structure-entries button{display:flex;align-items:center;gap:13px;text-align:left;padding:13px 9px;background:transparent;border:0;border-radius:8px;color:var(--txt);cursor:pointer;}
-#atlasDemo .structure-entries button:hover,#atlasDemo .structure-entries button:focus-visible{background:var(--panel-1);outline:1px solid var(--line-2);}
-#atlasDemo .structure-entries button i{width:10px;height:10px;border-radius:50%;border:2px solid var(--cyan);flex:none;}
-#atlasDemo .structure-entries button span{flex:1;min-width:0;}
-#atlasDemo .structure-entries strong{display:block;font-size:15px;font-weight:600;}
-#atlasDemo .structure-entries small{display:block;margin-top:5px;color:var(--txt-2);font-size:12px;}
-#atlasDemo .structure-entries svg{width:16px;height:16px;color:var(--txt-2);}
-#atlasDemo .structure-parent{margin-top:20px;}
-#atlasDemo .viewport.structure-view #map,#atlasDemo .viewport.structure-view .map-hud-widgets,#atlasDemo .viewport.structure-view .map-widget-toggle{visibility:hidden;}

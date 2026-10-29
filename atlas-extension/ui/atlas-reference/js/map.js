@@ -358,6 +358,7 @@ function create(canvas, mini, hooks){
     return [x0,x1,y0,y1];
   }
   function fitExtent(){
+    if(st.geo.exploration)return st.geo.exploration.bounds;
     const host=st.geo.hostArea;
     if(host&&[host.x,host.y,host.w,host.h].every(Number.isFinite)&&host.w>0&&host.h>0)return [host.x,host.x+host.w,host.y,host.y+host.h];
     // Fit any standalone room to its actual geometry, without changing map units.
@@ -381,6 +382,7 @@ function create(canvas, mini, hooks){
   function fitPad(){ return contentExtent()?1.12:1.16; }
   function compactOverviewScale(base){
     const g=st.geo||{};
+    if(g.exploration)return base;
     if(!st.node?.host||!['world','region'].includes(st.kind)||g.parentContext||g.selfArea)return base;
     if(!contentExtent())return base; // Out-of-frame outliers must not redefine this map's view.
     // Detailed terrain needs its full geographic view, even with few POIs.
@@ -461,7 +463,8 @@ function create(canvas, mini, hooks){
     ctx.restore();
 
     ctx.save();
-    if(st.node.host&&st.node.sceneStatus!=='ready') overviewMap(g);
+    if(g.exploration) explorationMap(g.exploration);
+    else if(st.node.host&&st.node.sceneStatus!=='ready') overviewMap(g);
     else if(g.overviewShapes||g.overviewRoutes) overviewMap(g);
     else if(st.kind==='world') worldMap(g);
     else if(st.kind==='region')regionMap(g);
@@ -484,6 +487,36 @@ function create(canvas, mini, hooks){
    * M6-05③：装饰只有材质。这里**不产生**任何可点击/可查询的实体 ——
    * 无名装饰不是地点，缺 shape 时也绝不补一个新地点出来。
    */
+  function explorationMap(sketch){
+    const cam=st.cam.s,ink=canvasStyle?.labelColor||'#a7c5d7';
+    const trace=pts=>{ctx.beginPath();pts.forEach((p,i)=>i?ctx.lineTo(...p):ctx.moveTo(...p));};
+    ctx.save();ctx.lineJoin='round';ctx.lineCap='round';
+    // Wide passage ribbons express recorded connectivity. Their drawn bends
+    // are schematic; they are never used for routing, distance, or movement.
+    for(const e of sketch.passages){
+      trace(e.points);ctx.strokeStyle=hexA(ink,.13);ctx.lineWidth=19/cam;ctx.stroke();
+      ctx.strokeStyle=hexA(ink,.65);ctx.lineWidth=1.2/cam;ctx.setLineDash([5/cam,4/cam]);ctx.stroke();ctx.setLineDash([]);
+      if(e.status==='blocked'||e.status==='closed'){const p=e.points[1];ctx.beginPath();ctx.moveTo(p[0]-5/cam,p[1]-5/cam);ctx.lineTo(p[0]+5/cam,p[1]+5/cam);ctx.moveTo(p[0]+5/cam,p[1]-5/cam);ctx.lineTo(p[0]-5/cam,p[1]+5/cam);ctx.stroke();}
+    }
+    for(const a of sketch.areas){
+      const active=st.hover?.id===a.id||st.sel?.id===a.id;
+      ctx.save();ctx.translate(a.x,a.y);
+      for(const poly of a.parts){
+        trace(poly);ctx.closePath();ctx.fillStyle=hexA(a.c,active?.26:.14);ctx.fill();
+        ctx.strokeStyle=hexA(a.c,active?1:.8);ctx.lineWidth=(active?2.2:1.5)/cam;
+        ctx.setLineDash(a.recorded&&!a.external?[]:[5/cam,4/cam]);ctx.stroke();ctx.setLineDash([]);
+        // Offset wall strokes read as mapped space rather than a UI card.
+        if(a.recorded){ctx.save();ctx.clip();ctx.strokeStyle=hexA(a.c,.28);ctx.lineWidth=7/cam;ctx.stroke();ctx.restore();}
+      }
+      ctx.restore();
+      const maxY=Math.max(...a.parts.flat().map(p=>p[1]));
+      if(st.showLabels){pushLabel(a.x,a.y+maxY+10/cam,a.name+(a.external?' ↗':''),a.c,'live',true);
+        pushLabel(a.x,a.y+maxY+33/cam,a.external?'相邻区域':a.recorded?'双击展开内部':'内部未探明',ink,'sub',true);}
+    }
+    if(sketch.hub){const [x,y]=sketch.hub;ctx.beginPath();ctx.arc(x,y,4/cam,0,Math.PI*2);ctx.fillStyle=ink;ctx.fill();}
+    ctx.restore();
+  }
+
   function overviewMap(g){
     const r=worldViewRect(st.cam,st.vw,st.vh,1.12), cam=st.cam.s;
     // 建成区 role 是 schema 枚举；没声明 role 就不加质感，不猜这块地是不是城市。
@@ -1420,7 +1453,7 @@ function create(canvas, mini, hooks){
    * 坐标对齐设备像素网格，单帧线数硬上限 2000。
    */
   function grid(){
-    if(!st.showGrid) return;
+    if(!st.showGrid||st.geo.exploration) return;
     const cam=st.cam;
     // NaN / 零缩放防护：算不出可信步长就不画网格，绝不进死循环。
     if(!Number.isFinite(cam.s)||cam.s<=0||!Number.isFinite(cam.x)||!Number.isFinite(cam.y)
@@ -1811,7 +1844,8 @@ function create(canvas, mini, hooks){
     }
     mctx.setLineDash([]);
     // 标记
-    st.marks.forEach(m=>{ const q=T(m.x,m.y); mctx.beginPath(); mctx.arc(q[0],q[1],2.2,0,7);
+    for(const a of st.geo.exploration?.areas??[])for(const poly of a.parts){mctx.beginPath();poly.forEach(([x,y],i)=>{const q=T(x+a.x,y+a.y);i?mctx.lineTo(...q):mctx.moveTo(...q);});mctx.closePath();mctx.strokeStyle=a.c;mctx.stroke();}
+    (st.geo.exploration?[]:st.marks).forEach(m=>{ const q=T(m.x,m.y); mctx.beginPath(); mctx.arc(q[0],q[1],2.2,0,7);
       mctx.fillStyle=canvasStyle?.markerColors[m.type]||m.c||({char:C.cyan,item:C.amber,poi:C.violet,sig:C.green,exit:C.blue}[m.type]||C.cyan); mctx.fill(); });
     // 视口框
     const [ax,ay]=S2W(0,0), [bx,by]=S2W(st.vw,st.vh);
@@ -1850,7 +1884,11 @@ function create(canvas, mini, hooks){
     grid();
     drawUtilities();
 
-    if(st.showMarks){
+    if(st.geo.exploration){
+      drawLabels();edgeFade();ctx.save();ctx.font='400 11px '+F.sans;ctx.textAlign='left';ctx.textBaseline='bottom';ctx.fillStyle=canvasStyle?.labelColor||'#a7c5d7';ctx.globalAlpha=.75;
+      ctx.fillText(st.geo.exploration.note,18,st.vh-18);ctx.restore();
+    }
+    else if(st.showMarks){
       if(st.showLinks)relationLayer();
       if(st.mode==='heat') heatLayer();
       if(st.mode==='flow') flowLayer(st.t);
@@ -1871,7 +1909,7 @@ function create(canvas, mini, hooks){
     let best=null, bd=1e9;
     // M6-10①：命中用**和绘制同一个** markScreenPos（含同样的视口裁剪），
     // 保证"画出来的点点得中、点得中的一定画着"。
-    const markHits=st.showMarks?visibleMarkHits():[];
+    const markHits=st.showMarks&&!st.geo.exploration?visibleMarkHits():[];
     markHits.concat(st.edgeHits).forEach(h=>{
       const d=Math.hypot(h.x-mx,h.y-my);
       if(d<h.r+7 && d<bd){ bd=d; best=h.m; }
@@ -1879,6 +1917,7 @@ function create(canvas, mini, hooks){
     if(best)return best;
     const [wx,wy]=S2W(mx,my),g=st.geo;
     const inside=(pts)=>{let yes=false;for(let i=0,j=pts.length-1;i<pts.length;j=i++){const a=pts[i],b=pts[j];if((a[1]>wy)!==(b[1]>wy)&&wx<(b[0]-a[0])*(wy-a[1])/(b[1]-a[1])+a[0])yes=!yes;}return yes;};
+    for(const a of g.exploration?.areas??[]){if(a.parts.some(poly=>inside(poly.map(([x,y])=>[x+a.x,y+a.y]))))return {type:'poi',id:a.id,placeId:a.nodeId,name:a.name,node:{id:a.nodeId,known:true},sub:a.recorded?'区域略图':'内部未探明'};}
     let target=null;
     if(st.kind==='city')target=(g.districts||[]).find(d=>inside(d.pts));
     else if(st.kind==='floor')target=(g.rooms||[]).find(r=>wx>=r.x&&wx<=r.x+r.w&&wy>=r.y&&wy<=r.y+r.h);
@@ -1929,6 +1968,7 @@ function create(canvas, mini, hooks){
       st.sel = m;
       if(hooks.onSelect) hooks.onSelect(m);
     });
+    listen(canvas,'dblclick',e=>{const r=canvas.getBoundingClientRect(),m=hitTest(e.clientX-r.left,e.clientY-r.top);if(m?.node&&hooks.onEnter)hooks.onEnter(m);});
     listen(canvas,'wheel',e=>{
       e.preventDefault();
       const r=canvas.getBoundingClientRect();
@@ -2010,6 +2050,7 @@ function create(canvas, mini, hooks){
      * 这里只提供它算不出来的部分：相机尺度与尺度质量。
      */
     scaleQuality(){
+      if(st.geo.exploration)return {schematic:true,calibrated:false,quality:'layout',estimated:true,cssPixelsPerUnit:null,metersPerUnit:null};
       const camS=st.cam.s, metric=st.node?.metric;
       const calibrated=Number.isFinite(metric)&&metric>0;
       const quality=st.node?.transform?.metricQuality??st.node?.transform?.scaleQuality??null;

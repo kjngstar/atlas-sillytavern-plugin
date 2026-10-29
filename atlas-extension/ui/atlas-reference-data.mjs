@@ -3,6 +3,7 @@ import { visibleWorkbenchMaps } from './atlas-workbench-data.mjs';
 import { projectReferenceFlows } from './atlas-reference-flows.mjs';
 import { projectMapContext } from './atlas-map-context.mjs';
 import { projectSpaceNavigation } from './atlas-space-navigation.mjs';
+import { projectExplorationMaps } from './atlas-exploration-map.mjs';
 
 /** Descriptive categories, independent of the actual parent/child map tree. */
 const MAP_CATEGORY_NAMES = {
@@ -448,6 +449,7 @@ export function projectReferenceData({state={},mapView,sceneView,catalogView,tas
   }
   projectMapContext(nodes,out.LOCATIONS,{inTransit});
   projectSpaceNavigation(nodes,out.LOCATIONS,{scenes});
+  projectExplorationMaps(nodes,out.LOCATIONS,{maps,viewMode});
   const mapAt=id=>locationMap.get(id)?.childMapIds[0]??locationMap.get(id)?.mapId??null;
   out.CAST=catalog.filter(c=>c.entityKind==='character').map((c,i)=>{const p=pointIndex.get(c.entityId);return {id:c.entityId,name:c.name,initial:Array.from(c.name??'人').at(-1)||'人',role:p?.isProtagonist?'主角':'人物',c:COLORS[i%COLORS.length],
     state:c.locationId?'present':'unknown',tag:'已记录',locationId:c.locationId,mapNodeId:p?.mapId??mapAt(c.locationId)??c.mapId,description:c.summary??'',doing:'尚无行动记录',mind:'尚无后台想法记录',carry:[],known:true,
