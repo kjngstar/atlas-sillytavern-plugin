@@ -30,6 +30,16 @@ const BASE = {
   ],
 };
 
+for(const [width,height]of [[500,300],[80,60]])test(`小场所 ${width}×${height} 米保留原幅面与建筑尺寸，不被城市模板下限拒绝`,()=>{
+  const result=Kit.generateCity({enclosure:'open',riverWidth:0,blocksPerDistrict:0,districts:[{id:'d1',bank:'west',order:0}],buildings:[{id:'b1',districtId:'d1',w:12,h:8},{id:'b2',districtId:'d1',w:12,h:8}]},cityCtx({map:{metersPerCell:1,frame:{cols:width,rows:height}}}));
+  assert.equal(result.ok,true,JSON.stringify(result.issues));
+  assert.deepEqual(result.scene.layout.bounds,{x:0,y:0,w:width,h:height});
+  assert.equal(result.scene.layout.buildings.length,2,JSON.stringify(result.issues));
+  for(const b of result.scene.layout.buildings){assert.equal(b.w,12);assert.equal(b.h,8);assert.ok(b.x>=0&&b.y>=0&&b.x+b.w<=width&&b.y+b.h<=height);}
+  const [a,b]=result.scene.layout.buildings;
+  assert.ok(a.x+a.w<=b.x||b.x+b.w<=a.x||a.y+a.h<=b.y||b.y+b.h<=a.y);
+});
+
 // ───────────────────────── G07-A · 新城市默认开放：不画假城墙 ─────────────────────────
 
 test('G07：enclosure=open + riverWidth=0 → 无假城墙、无城门、无环城墙道路', () => {

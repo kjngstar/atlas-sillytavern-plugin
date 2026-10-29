@@ -295,14 +295,17 @@ import * as B from './foundation.mjs';
     for(let i=1;i<sorted.length;i++){const t0=sorted[i-1],t1=sorted[i];if(t1-t0>1e-6)out.push({a:point(t0),b:point(t1),kind:water(river,point((t0+t1)/2))?'bridge':'road'});}return out;
   }
   function city(spec,previous=null){
-    if(!Number.isFinite(spec.width)||!Number.isFinite(spec.height)||spec.width<900||spec.height<700||!Number.isFinite(spec.riverWidth)||spec.riverWidth<0||spec.riverWidth>spec.width*.15||!Array.isArray(spec.districts)||!spec.districts.length||new Set(spec.districts.map(d=>d.id)).size!==spec.districts.length||spec.districts.some(d=>!['west','east'].includes(d.bank)||!Number.isFinite(d.order)))return {ok:false,issues:[{id:spec.id,code:'CITY_INPUT_INVALID'}]};
+    if(!Number.isFinite(spec.width)||!Number.isFinite(spec.height)||spec.width<=0||spec.height<=0||!Number.isFinite(spec.riverWidth)||spec.riverWidth<0||spec.riverWidth>spec.width*.15||!Array.isArray(spec.districts)||!spec.districts.length||new Set(spec.districts.map(d=>d.id)).size!==spec.districts.length||spec.districts.some(d=>!['west','east'].includes(d.bank)||!Number.isFinite(d.order)))return {ok:false,issues:[{id:spec.id,code:'CITY_INPUT_INVALID'}]};
     const structure = v => JSON.stringify({width:v.width,height:v.height,riverWidth:v.riverWidth,seed:v.seed,districts:ordered(v.districts||[]).map(d=>[d.id,d.bank,d.order])});
     if(previous?.structureKey && previous.structureKey!==structure(spec))return {ok:false,issues:[{id:spec.id,code:'CITY_STRUCTURE_CHANGE_REQUIRES_REBUILD'}],kept:clone(previous)};
     const w=spec.width,h=spec.height,rng=rand(spec.seed||spec.id),origin=pt(w*.46,h*.5),raw=[];
+    // Template streets and clearances follow the local frame. Registered
+    // building footprints keep their physical dimensions even in a small site.
+    const detailScale=Math.min(1,w/900,h/700),lane=12*detailScale,pad=6*detailScale;
     for(let i=0;i<14;i++){const a=i*Math.PI/7,rr=.95+rng()*.05;raw.push(pt(origin.x+Math.cos(a)*w*.405*rr,origin.y+Math.sin(a)*h*.405*rr));}
     // G07：open 城市不生成假城墙/城门/墙附属环路；旧档（无 enclosure）继续走 hull 老路径。
     const open=spec.enclosure==='open',hullOutline=hull(raw),land0=open?[pt(0,0),pt(w,0),pt(w,h),pt(0,h)]:hullOutline;
-    const wall=open?[]:hullOutline,river={cx:w*.62,amplitude:w*.035,width:spec.riverWidth,height:h},bankGap=river.width/2+18;
+    const wall=open?[]:hullOutline,river={cx:w*.62,amplitude:w*.035,width:spec.riverWidth,height:h},bankGap=river.width/2+18*detailScale;
     const wet=river.width>0;
     const left=wet?clip(land0,1,0,river.cx-river.amplitude-bankGap):clip(land0,1,0,w*.55),right=wet?clip(land0,-1,0,-(river.cx+river.amplitude+bankGap)):clip(land0,-1,0,-w*.55),districts=[];
     for(const bank of ['west','east']){
@@ -318,7 +321,7 @@ import * as B from './foundation.mjs';
     const horizontalIntersections=wall.map((a,i)=>{const b=wall[(i+1)%wall.length];if((a.y-centerY)*(b.y-centerY)<=0&&a.y!==b.y)return a.x+(b.x-a.x)*(centerY-a.y)/(b.y-a.y);return null;}).filter(x=>x!==null).sort((a,b)=>a-b);
     const gates=open?[]:[{id:'gate-west',name:'西城门',x:horizontalIntersections[0],y:centerY},{id:'gate-east',name:'东城门',x:horizontalIntersections.at(-1),y:centerY}];
     const hubs=[pt(w*.31,centerY),pt(w*.77,centerY)],roads=[],segments=[],buildings=[],issues=[];
-    const addRoad=(id,a,b)=>{const road={id,a,b,width:12};roads.push(road);segments.push(...(wet?splitWater(a,b,river):[{a,b,kind:'road'}]).map((s,i)=>({...s,id:id+':'+i,roadId:id,width:12})));};
+    const addRoad=(id,a,b)=>{const road={id,a,b,width:lane};roads.push(road);segments.push(...(wet?splitWater(a,b,river):[{a,b,kind:'road'}]).map((s,i)=>({...s,id:id+':'+i,roadId:id,width:lane})));};
     // 主轴：有墙时连两座城门；开放城市不依赖不存在的 gate.x，直接连两个功能枢纽。
     addRoad('avenue',open?hubs[0]:pt(gates[0].x,centerY),open?hubs[1]:pt(gates[1].x,centerY));
     for(const d of districts)addRoad('road:'+d.id,hubs[d.bank==='west'?0:1],d.site);
@@ -329,19 +332,19 @@ import * as B from './foundation.mjs';
       addRoad('ring-access-west',hubs[0],ring.reduce((a,b)=>distance(a,hubs[0])<distance(b,hubs[0])?a:b));
       addRoad('ring-access-east',hubs[1],ring.reduce((a,b)=>distance(a,hubs[1])<distance(b,hubs[1])?a:b));
     }
-    const roadClear=q=>!roads.some(r=>{const min=Math.min(...corners(q).map(p=>segmentDistance(p,r.a,r.b)),segmentDistance(center(q),r.a,r.b));return min<r.width/2+12||segmentIntersectsRect(r.a,r.b,inflate(q,12));});
+    const roadClear=q=>!roads.some(r=>{const min=Math.min(...corners(q).map(p=>segmentDistance(p,r.a,r.b)),segmentDistance(center(q),r.a,r.b));return min<r.width/2+lane||segmentIntersectsRect(r.a,r.b,inflate(q,lane));});
     function placeBuilding(f,decorative=false){
       const d=districts.find(d=>d.id===f.districtId);if(!d||!Number.isFinite(f.w)||!Number.isFinite(f.h)||f.w<=0||f.h<=0)return null;
-      const xs=d.polygon.map(p=>p.x),ys=d.polygon.map(p=>p.y),candidates=[],step=Math.max(decorative?22:10,Math.max(w,h)/240);
-      for(let y=Math.min(...ys)+12;y+f.h<Math.max(...ys);y+=step)for(let x=Math.min(...xs)+12;x+f.w<Math.max(...xs);x+=step){const q={x,y,w:f.w,h:f.h};
-        if(corners(inflate(q,6)).every(p=>polygonContains(d.polygon,p))&&roadClear(q)&&!buildings.some(b=>B.intersects(inflate(b,decorative?6:12),q))){
+      const xs=d.polygon.map(p=>p.x),ys=d.polygon.map(p=>p.y),candidates=[],step=Math.max((decorative?22:10)*detailScale,Math.max(w,h)/240);
+      for(let y=Math.min(...ys)+lane;y+f.h<Math.max(...ys);y+=step)for(let x=Math.min(...xs)+lane;x+f.w<Math.max(...xs);x+=step){const q={x,y,w:f.w,h:f.h};
+        if(corners(inflate(q,pad)).every(p=>polygonContains(d.polygon,p))&&roadClear(q)&&!buildings.some(b=>B.intersects(inflate(b,decorative?pad:lane),q))){
           const score=Math.min(...roads.map(r=>segmentDistance(center(q),r.a,r.b)))+distance(center(q),d.site)*.035+(decorative?rng()*30:0);candidates.push({q,score});
         }
       }
       const q=candidates.sort((a,b)=>a.score-b.score||a.q.y-b.q.y||a.q.x-b.q.x)[0]?.q;
       if(!q)return null;const b={...f,...q,type:decorative?'block':'building',decorative,quality:'layout',mapId:spec.id};buildings.push(b);return b;
     }
-    const validBuilding=q=>{const d=districts.find(d=>d.id===q.districtId);return d&&corners(inflate(q,6)).every(p=>polygonContains(d.polygon,p))&&roadClear(q)&&!buildings.some(b=>B.intersects(inflate(b,12),q));};
+    const validBuilding=q=>{const d=districts.find(d=>d.id===q.districtId);return d&&corners(inflate(q,pad)).every(p=>polygonContains(d.polygon,p))&&roadClear(q)&&!buildings.some(b=>B.intersects(inflate(b,lane),q));};
     for(const f of ordered(spec.buildings||[]).filter(f=>f.locked)){
       const q={...f,...f.locked};if(validBuilding(q))buildings.push({...q,type:'building',decorative:false,quality:'confirmed',mapId:spec.id});else return {ok:false,issues:[{id:f.id,code:'BUILDING_LOCK_CONFLICT'}],kept:previous?clone(previous):null};
     }
@@ -351,7 +354,7 @@ import * as B from './foundation.mjs';
       else if(old?.quality==='confirmed')return {ok:false,issues:[{id:f.id,code:'BUILDING_LOCK_CONFLICT'}],kept:clone(previous)};
     }
     for(const f of ordered(spec.buildings||[]).filter(f=>!buildings.some(b=>b.id===f.id)))if(!placeBuilding(f))issues.push({id:f.id,code:'BUILDING_NO_SPACE'});
-    for(const d of districts)for(let i=0;i<(spec.blocksPerDistrict??8);i++)placeBuilding({id:'texture:'+d.id+':'+i,districtId:d.id,name:'街区轮廓',w:28+rng()*24,h:25+rng()*25},true);
+    for(const d of districts)for(let i=0;i<(spec.blocksPerDistrict??8);i++)placeBuilding({id:'texture:'+d.id+':'+i,districtId:d.id,name:'街区轮廓',w:(28+rng()*24)*detailScale,h:(25+rng()*25)*detailScale},true);
     const rline=Array.from({length:81},(_,i)=>pt(riverX(river,h*i/80),h*i/80)),riverPolygon=rline.map(p=>pt(p.x-river.width/2,p.y)).concat([...rline].reverse().map(p=>pt(p.x+river.width/2,p.y)));
     const dock={id:'dock',name:'河岸码头',type:'dock',x:riverX(river,h*.68)-river.width/2,y:h*.68,bank:'west',width:river.width*.38};
     return {ok:true,structureKey:structure(spec),id:spec.id,name:spec.name,kind:'city',enclosure:open?'open':'wall',bounds:{x:0,y:0,w,h},wall,origin,river:wet?river:null,riverPolygon:wet?riverPolygon:[],districts,roads,segments,gates,buildings,dock:wet?dock:null,issues};
