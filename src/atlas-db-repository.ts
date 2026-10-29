@@ -3,6 +3,7 @@ import {buildSqlForegroundRequest} from './atlas-sql-model-context.ts';
 import {LAYOUT_CONTEXT_FRAME_KEY, buildSqlLayoutTask, computeMapLayoutSignature, unknownLayoutEntityRefs} from './atlas-sql-layout-task.ts';
 import { planFunctionalAreaProjections } from './atlas-functional-areas.ts';
 import { planLayoutEvidence, parseLayoutEvidence, attachLayoutEvidence, type LayoutExcerpt, type LayoutEvidenceRejection } from './atlas-layout-evidence.ts';
+import { combineSpatialRequest, materializeSpatialDrafts, withOriginalSpatialSources } from './atlas-spatial-planning.ts';
 import {applySqlLegacyImport} from './atlas-sql-legacy-import.ts';
 /**
  * atlas-db-repository.ts — 业务存储唯一入口（B05–B09 / B17–B19 / E06 / E09）。
@@ -1725,6 +1726,20 @@ export function createSqlRepository(options: RepositoryOptions) {
       // 建设与布局不得吃掉它；没有到期工作不保留，未使用必须显式释放。
       const dueBackgroundWork = input.manual || input.sceneOnly ? 0 : countDueBackgroundActions(tables, branchId, clockBefore);
       const backgroundReserved = dueBackgroundWork > 0 ? turnBudget.reserveBackground(`bg_due_${turnId}`) : false;
+      const combinedSpatial=generationOptions.spatialPipeline==='combined';
+      let combinedPlanningSent=false;
+      let combinedDrafts:ParsedOperation['value'][]=[];
+      let combinedRefs:import('./atlas-ops-contract.ts').RefEntry[]=[];
+      const combinedPlannedMapIds=new Set<string>();
+      // Observe has already registered actual facts. Make their maps available
+      // to the one geography/layout request without publishing the candidate.
+      if(combinedSpatial&&input.sceneMaps){
+        const earlyMaps=compileSqlSceneMaps({db:candidateDb,branchId,turnId,clockS:clockBefore,makeId,ensureScenes:true,povName:input.povName});
+        if(earlyMaps){const applied=applyGroups(candidateDb,[earlyMaps],{branchId,turnId,attemptId:'planning-maps',validate:true});
+          groupResults.push(...applied.groups);
+          if(applied.journalIssues.length||applied.groups.some(g=>g.status==='rejected'||g.status==='blocked'))throw new AtlasDbError('SCENE_MAP_WRITE_FAILED','共同规划的地图目录未通过校验',{});
+        }
+      }
       const construction = {
         attempted: false,
         deferred: false,
@@ -1812,6 +1827,7 @@ export function createSqlRepository(options: RepositoryOptions) {
           }
         }
         const task = queuePlan && queuePlan.focusIds.length === 0 && !worldBuildWindow ? null : buildSqlWorldCompletionTask(tables, branchId, {
+          combinedSpatial,
           sourceScan: Boolean(worldBuildWindow),
           mode: input.worldCompletion.mode,
           focusLocationIds: queuePlan ? queuePlan.focusIds : input.worldCompletion.focusLocationIds,
@@ -1859,6 +1875,11 @@ export function createSqlRepository(options: RepositoryOptions) {
             construction.reasonCode = 'MODEL_BUDGET_EXHAUSTED';
             allIssues.push({ code: 'MODEL_BUDGET_EXHAUSTED', path: '$.worldCompletion', message: `空间建设未执行：${claim.reason}。已登记的世界数据保留，下一轮继续。`, severity: 'warning', retryable: true });
           } else {
+            if(combinedSpatial){
+              const planningLayout=input.layoutMaps?buildSqlLayoutTask(candidateDb,branchId,input,turnId,constructionReport,{canonicalRefs:true,combinedSpatial:true}):null;
+              for(const id of planningLayout?.mapIds??[])combinedPlannedMapIds.add(id);
+              task.request=combineSpatialRequest(task.request,planningLayout);
+            }
             construction.attempted = true;
             construction.task = task;
             preparationStep = 'before-construction';
@@ -1876,6 +1897,7 @@ export function createSqlRepository(options: RepositoryOptions) {
               let response: ModelBatchResponse;
               try {
                 response = await modelPort!.request(task.request);
+                if(combinedSpatial)combinedPlanningSent=true;
               } catch (requestError) {
                 // 失败 / 取消 / 超时同样要有真实起止与失败类型；没有响应就不写 http_status。
                 writeConstructionAttempt({ failure_kind: failureKindOf(requestError), error: (requestError as Error).message });
@@ -1894,6 +1916,11 @@ export function createSqlRepository(options: RepositoryOptions) {
               // 解析必须使用**原始冻结目录**（task.catalogue）：不重新收集、不重新编号 alias。
               const extracted = extractPayload(response.text ?? '');
               const parsedConstruction = parseOperations(extracted.payload, { phase: 'geography' });
+              if(combinedSpatial){
+                combinedDrafts=parsedConstruction.operations.filter(op=>op.value.op==='map.layout.request').map(op=>op.value);
+                parsedConstruction.operations=parsedConstruction.operations.filter(op=>op.value.op!=='map.layout.request');
+                combinedRefs=task.catalogue.knownRefs.map(ref=>({...ref,declaredByOpId:null}));
+              }
               allIssues.push(...extracted.issues, ...parsedConstruction.issues);
               const readPort = createTableReadPort(candidateDb);
               const aliases = new Map(task.catalogue.knownRefs.map(ref => [ref.alias, ref.id]));
@@ -1949,7 +1976,7 @@ export function createSqlRepository(options: RepositoryOptions) {
                 && !parsedConstruction.issues.some(issue=>issue.severity==='error')
                 && normalized.protectedDrops.length===0
                 && normalized.operations.every(op=>op.op==='noop')
-                && (normalized.operations.length>0 || parsedConstruction.explicitNoop);
+                && (normalized.operations.length>0 || parsedConstruction.explicitNoop || combinedDrafts.length>0);
               const constructionParsed: ParsedOperation[] = normalized.operations.filter(op=>op.op!=='noop').map((value, index) => {
                 const raw = JSON.stringify(value);
                 return { opId: `cons_${index}_${sha256HexSync(raw).slice(0, 8)}`, line: index + 1, rawHash: sha256HexSync(raw), value };
@@ -1981,6 +2008,9 @@ export function createSqlRepository(options: RepositoryOptions) {
                   allIssues.push({ code: 'JOURNAL_WRITE_FAILED', path: '$.worldCompletion', message, severity: 'error', retryable: false });
                 }
                 const appliedGroupIds = new Set(appliedConstruction.groups.filter((g) => g.status === 'applied').map((g) => g.groupId));
+                if(combinedSpatial)combinedRefs=[...compiledConstruction.scope.all(),
+                  ...deduped.reusedIds.map(reused=>({alias:reused.ref,id:reused.id,kind:'location' as const,rowRev:Number(existingLocations.find(row=>row.id===reused.id)?.row_rev??1),declaredByOpId:null})),
+                  ...Object.entries(reusedBindings).filter(([,id])=>readPort.selectOne('locations',branchId,id)).map(([alias,id])=>({alias,id,kind:'location' as const,rowRev:null,declaredByOpId:null}))];
                 for (const group of orderedConstruction.order) {
                   if (!appliedGroupIds.has(group.id)) continue;
                   for (const mutation of group.mutations) {
@@ -2191,8 +2221,27 @@ export function createSqlRepository(options: RepositoryOptions) {
       // Freeze the target set, then combine compatible maps inside its capacity.
       const pendingLayoutIds=layoutTask?[...layoutTask.mapIds,...layoutTask.remainingLocationIds]:[];
       const layoutParents=layoutTask?.parentMapIds??{};
+      let combinedPlanAvailable=false;
+      let preparedCombinedOperations:ParsedOperation['value'][]=[];
+      if(combinedSpatial&&combinedPlanningSent&&layoutTask){
+        const refs=[...combinedRefs,...layoutTask.catalogue.knownRefs.map(ref=>({...ref,alias:ref.id,declaredByOpId:null}))];
+        const prepared=materializeSpatialDrafts({drafts:combinedDrafts,refs,tables:createTableReadPort(candidateDb),branchId,mapIds:pendingLayoutIds});
+        preparedCombinedOperations=prepared.operations;
+        allIssues.push(...prepared.issues);
+        for(const op of prepared.operations)if(op.ref)combinedPlannedMapIds.add(op.ref);
+        // The first request only covered its selected map batch, plus any new
+        // containers it explicitly planned. Later user-selected batches still
+        // need their own normal request; they are not failed cached replies.
+        const cachedIds=pendingLayoutIds.filter(id=>combinedPlannedMapIds.has(id));
+        if(cachedIds.length){
+          const cached=buildSqlLayoutTask(candidateDb,branchId,{...input,layoutMaps:cachedIds,generationOptions:{...generationOptions,...(generationOptions.workBatching?{workBatching:{...generationOptions.workBatching,mapBatches:1}}:{})}},turnId,layoutReport);
+          if(cached){layoutTask=cached;combinedPlanAvailable=true;}
+        }
+      }
       const evidenceMapRefs=pendingLayoutIds.map((id,index)=>({id,alias:`M${index+1}`,name:String(createTableReadPort(candidateDb).selectOne('maps',branchId,id)?.name??id)}));
-      let layoutEvidenceCache:LayoutExcerpt[]|null=null;
+      // Original source spans travel with observation/planning. No paid excerpt
+      // selector is needed in the combined protocol.
+      let layoutEvidenceCache:LayoutExcerpt[]|null=combinedSpatial?[]:null;
       const evidenceBlockedMaps=new Set<string>();
       const deferredLayoutIds=new Set<string>();
       const retriedLayoutIds=new Set<string>();
@@ -2352,7 +2401,7 @@ export function createSqlRepository(options: RepositoryOptions) {
         }
 
       };
-      while(layoutTask&&layoutModelPort&&layoutBudget.remaining()>0&&(mapBatchesRemaining>0||layoutTask.mapIds.some(id=>retriedLayoutIds.has(id)))){
+      while(layoutTask&&layoutModelPort&&(layoutBudget.remaining()>0||combinedPlanAvailable)&&(mapBatchesRemaining>0||layoutTask.mapIds.some(id=>retriedLayoutIds.has(id)))){
         let currentLayoutTask=layoutTask;
         const attemptedMapIds=[...layoutTask.mapIds];
         const returnedMapIds=new Set<string>();
@@ -2422,14 +2471,23 @@ export function createSqlRepository(options: RepositoryOptions) {
             if(!narrowed)throw new Error('本批位置依据未通过校验；其他地图继续，本批等待重试');
             currentLayoutTask=layoutTask=narrowed;layoutTasks[layoutTasks.length-1]=narrowed;
           }
-          const layoutRequest=attachLayoutEvidence(currentLayoutTask.request,layoutEvidenceCache,currentLayoutTask.mapIds);
+          const layoutRequest=combinedSpatial?withOriginalSpatialSources(currentLayoutTask.request,sourceSnapshot):attachLayoutEvidence(currentLayoutTask.request,layoutEvidenceCache,currentLayoutTask.mapIds);
           const isSupplement=currentLayoutTask.mapIds.some(id=>retriedLayoutIds.has(id));
           if(isSupplement){layoutRequest.retryOf=layoutTasks[0].request.batchId;layoutRequest.diagnosticCause=currentLayoutTask.mapIds.some(id=>smallerLayoutBatches.has(id))?'batch_split':'missing_map_reply';}
           else mapBatchesRemaining--;
           // Every real transport still claims the finite spatial plan's allowance.
-          layoutStarted=now();
-          let response=await requestSpatialWithTransportRetry(layoutRequest,'layout');
-          writeLayoutAttempt({input_chars:layoutRequest.messages.reduce((sum,message)=>sum+message.content.length,0),http_status:response.httpStatus,response_chars:response.text?.length??0,response_hash:sha256HexSync(response.text??''),finish_reason:response.finishReason});
+          let response:ModelBatchResponse;
+          if(combinedPlanAvailable&&!isSupplement){
+            combinedPlanAvailable=false;
+            response={batchId:layoutRequest.batchId,text:preparedCombinedOperations.filter(op=>currentLayoutTask.mapIds.includes(op.ref??'')).map(op=>JSON.stringify(op)).join('\n'),finishReason:'stop',httpStatus:null,durationMs:0};
+            // Applying a previously returned plan is local work, not a model
+            // request/attempt. Missing maps remain pending or use one explicit repair.
+          }else{
+            if(combinedSpatial&&combinedPlanningSent&&isSupplement){layoutRequest.retryOf=construction.task?.request.batchId;layoutRequest.diagnosticCause='missing_map_reply';}
+            layoutStarted=now();
+            response=await requestSpatialWithTransportRetry(layoutRequest,'layout');
+            writeLayoutAttempt({input_chars:layoutRequest.messages.reduce((sum,message)=>sum+message.content.length,0),http_status:response.httpStatus,response_chars:response.text?.length??0,response_hash:sha256HexSync(response.text??''),finish_reason:response.finishReason});
+          }
           if(input.isCurrent&&!input.isCurrent()||currentRevision()!==anchor.baseRevision)throw new AtlasDbError('STALE_BASE','布局生成期间聊天或世界修订已变化，候选不发布',{});
           if(response.finishReason==='length')throw Object.assign(new Error('空间布局输出被截断；本次响应未用于排版，原场景保留'),{code:'LAYOUT_BATCH_TRUNCATED'});
           let extracted=extractPayload(response.text??''),parsed=parseOperations(extracted.payload,{phase:'geography'});
@@ -2437,7 +2495,7 @@ export function createSqlRepository(options: RepositoryOptions) {
           const allowedRefs=new Set(layoutRefs.filter(r=>currentLayoutTask.mapIds.includes(r.id)).flatMap(r=>[r.id,r.alias]));
           const hasRequestedLayout=()=>parsed.operations.some(op=>op.value.op==='map.layout.request'&&allowedRefs.has(op.value.ref??''));
           // Ask for a fresh complete response once. Never patch broken JSON locally or reuse partial lines as a full layout.
-          const retryEmptyLayout=input.manual&&Array.isArray(input.layoutMaps);
+          const retryEmptyLayout=input.manual&&Array.isArray(input.layoutMaps)||combinedSpatial&&combinedPlanningSent;
           const retryBrokenJson=!parsed.operations.length&&parsed.issues.some(i=>i.code==='JSON_SYNTAX');
           const unknownEntityRefs=unknownLayoutEntityRefs(parsed.operations.map(operation=>operation.value),layoutRefs);
           retryableBatchReply=hasRequestedLayout()||retryEmptyLayout||retryBrokenJson||unknownEntityRefs.length>0;

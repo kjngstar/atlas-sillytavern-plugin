@@ -3,7 +3,7 @@ import { decisionActorBudget } from './atlas-runtime-limits.ts';
 import { normalizeWorkBatching, type WorkBatchingSettings } from './atlas-work-batching.ts';
 
 export type ModelBatchingSettings = { charactersPerBatch: number; mapsPerBatch: number; requestsPerOperation?: number };
-export type ModelGenerationOptions = { maxTokens: number; batching: ModelBatchingSettings; workBatching?: WorkBatchingSettings };
+export type ModelGenerationOptions = { maxTokens: number; batching: ModelBatchingSettings; workBatching?: WorkBatchingSettings; spatialPipeline?: 'combined' | 'staged' };
 export const DEFAULT_MODEL_BATCHING = { charactersPerBatch: 0, mapsPerBatch: 0, requestsPerOperation: 0 };
 export function normalizeModelBatching(value: unknown): Required<ModelBatchingSettings> {
   const raw=value&&typeof value==='object'?value as Record<string,unknown>:{};
@@ -17,7 +17,9 @@ export function validModelBatching(value: unknown): value is ModelBatchingSettin
   return valid(raw.charactersPerBatch)&&valid(raw.mapsPerBatch)&&(raw.requestsPerOperation===undefined||valid(raw.requestsPerOperation));
 }
 export function normalizeGenerationOptions(value?: Partial<ModelGenerationOptions>): ModelGenerationOptions {
-  return {maxTokens:typeof value?.maxTokens==='number'&&Number.isSafeInteger(value.maxTokens)&&value.maxTokens>=0?value.maxTokens:0,batching:normalizeModelBatching(value?.batching),...(value?.workBatching?{workBatching:normalizeWorkBatching(value.workBatching)}:{})};
+  // Current workload clients combine spatial planning; older callers retain
+  // their staged protocol unless they explicitly opt in.
+  return {maxTokens:typeof value?.maxTokens==='number'&&Number.isSafeInteger(value.maxTokens)&&value.maxTokens>=0?value.maxTokens:0,batching:normalizeModelBatching(value?.batching),...(value?.workBatching?{workBatching:normalizeWorkBatching(value.workBatching)}:{}),spatialPipeline:value?.spatialPipeline??(value?.workBatching?'combined':'staged')};
 }
 export function planningOutputTokens(options?: Partial<ModelGenerationOptions>): number {
   return options?.maxTokens&&options.maxTokens>0?options.maxTokens:Infinity;

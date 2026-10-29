@@ -24,11 +24,11 @@ const scopes=req=>JSON.parse(req.messages[1].content.split('\n').find(l=>l.start
 const layout=s=>({op:'map.layout.request',ref:s.map,data:{kind:s.kind,spec:s.kind==='floor'?{rooms:s.baselineRooms}:s.kind==='city'?{districts:[{id:s.container.ref,name:s.container.name,bank:'west',order:0}],buildings:s.locations.filter(l=>l.kind==='building').map(l=>({id:l.ref,name:l.name,districtId:s.container.ref,w:s.childSpaces.find(c=>c.ref===l.ref)?.w??100,h:s.childSpaces.find(c=>c.ref===l.ref)?.h??100})),enclosure:'open',riverWidth:0}:{surface:'mixed',zones:s.locations.map(l=>({id:l.ref,name:l.name,role:l.kind==='city'?'city':'other',size:'medium'})),features:[],links:[]}}});
 const reply=req=>scopes(req).map(s=>JSON.stringify(layout(s))).join('\n');
 const scene=(db,id)=>JSON.parse(queryBound(db,'SELECT frame_json FROM maps WHERE id=?',[id])[0].frame_json).atlasScene;
-async function fixture(count,{seed:configure,work={},maxTokens=0,respond}={}){
+async function fixture(count,{seed:configure,work={},maxTokens=0,respond,spatialPipeline}={}){
  const seed=await makeSeedWith(SQL),ids=Array.from({length:count},(_,i)=>`work-map-${i}`);
  for(const id of ids)insertRows(seed.db,'maps',[row('maps',id,{name:id,kind:'world',frame_json:{cols:100,rows:100}})]);
  configure?.(seed.db);const bytes=seed.exportBytes();seed.close();const calls=[];
- const repo=createSqlRepository({chatUid:IDS.chatA,branchId:IDS.branchMain,modelPort:{generationOptions:async()=>({maxTokens,batching:{charactersPerBatch:0,mapsPerBatch:0,requestsPerOperation:0},workBatching:{...DEFAULT_WORK_BATCHING,...work}}),request:async req=>{calls.push(req);return {batchId:req.batchId,httpStatus:200,finishReason:'stop',...await respond?.(req,calls.length)??{text:req.promptMode==='atlas-spatial-extract'?'{"facts":[]}':reply(req)}};}}});
+ const repo=createSqlRepository({chatUid:IDS.chatA,branchId:IDS.branchMain,modelPort:{generationOptions:async()=>({maxTokens,batching:{charactersPerBatch:0,mapsPerBatch:0,requestsPerOperation:0},workBatching:{...DEFAULT_WORK_BATCHING,...work},spatialPipeline}),request:async req=>{calls.push(req);return {batchId:req.batchId,httpStatus:200,finishReason:'stop',...await respond?.(req,calls.length)??{text:req.promptMode==='atlas-spatial-extract'?'{"facts":[]}':reply(req)}};}}});
  await repo.open({bytes});return {repo,calls,ids};
 }
 test('workload batch counts are independent from legacy per-entity quantities and preserve on older updates',()=>{
@@ -38,21 +38,22 @@ test('workload batch counts are independent from legacy per-entity quantities an
  const older=applySettingsCommand(saved.settings,{action:'runtime.update',modelBatching:{charactersPerBatch:2,mapsPerBatch:2}});assert.equal(older.settings.workBatching.mapBatches,3);
  for(const n of [0,-1,1.5,Number.MAX_SAFE_INTEGER+1])assert.equal(applySettingsCommand(settings,{action:'runtime.update',workBatching:{...DEFAULT_WORK_BATCHING,mapBatches:n}}).ok,false);
 });
-test('12 maps use one shared evidence request and one planning request',async()=>{
+test('12 maps use one planning request with original sources and no paid evidence selector',async()=>{
  const f=await fixture(12);try{
   const result=await f.repo.prepareTurn(input({layoutMaps:f.ids,sourceSnapshot:[{key:'story',kind:'story',text:'地图中的道路相互连通。'}]}));
-  assert.equal(f.calls.length,2);assert.equal(f.calls[0].promptMode,'atlas-spatial-extract');assert.equal(f.calls[1].batchTargets.count,12);
+  assert.equal(f.calls.length,1);assert.equal(f.calls[0].promptMode,undefined);assert.equal(f.calls[0].batchTargets.count,12);
+  assert.ok(f.calls[0].messages[1].content.includes('地图中的道路相互连通。'));
   const db=f.repo.getCandidate(result.token).db;for(const id of f.ids)assert.ok(scene(db,id));
   const usage=JSON.parse(queryBound(db,'SELECT decisions_json FROM turns WHERE id=?',[result.receipt.turnId])[0].decisions_json).work_usage;
-  assert.deepEqual(usage,{normal:{evidence:1,maps:1},extra:0,transports:2});
-  assert.equal(result.receipt.requestAudit.transports,f.calls.length);assert.deepEqual(result.receipt.requestAudit.byWorkClass,{evidence:1,maps:1});
+  assert.deepEqual(usage,{normal:{maps:1},extra:0,transports:1});
+  assert.equal(result.receipt.requestAudit.transports,f.calls.length);assert.deepEqual(result.receipt.requestAudit.byWorkClass,{maps:1});
   const stored=JSON.parse(queryBound(db,'SELECT receipt_json FROM turns WHERE id=?',[result.receipt.turnId])[0].receipt_json);assert.deepEqual(stored.requestAudit,result.receipt.requestAudit);
  }finally{await f.repo.close();}
 });
 test('three user-selected batches process 12 maps as 4 / 4 / 4 with no repeated evidence',async()=>{
  const f=await fixture(12,{work:{mapBatches:3}});try{
   const result=await f.repo.prepareTurn(input({layoutMaps:f.ids,sourceSnapshot:[{key:'story',kind:'story',text:'地图中的道路相互连通。'}]}));
-  assert.deepEqual(f.calls.filter(r=>r.batchTargets).map(r=>r.batchTargets.count),[4,4,4]);assert.equal(f.calls.length,4);
+  assert.deepEqual(f.calls.filter(r=>r.batchTargets).map(r=>r.batchTargets.count),[4,4,4]);assert.equal(f.calls.length,3);
   for(const id of f.ids)assert.ok(scene(f.repo.getCandidate(result.token).db,id));
  }finally{await f.repo.close();}
 });
@@ -114,7 +115,7 @@ test('a transport retry and bad JSON cannot trigger another independent format r
  }finally{await f.repo.close();}
 });
 test('zero extra quota preserves valid evidence maps and defers rejected maps without a repair request',async()=>{
- const f=await fixture(2,{work:{extraRequests:0},respond:req=>({text:req.promptMode==='atlas-spatial-extract'?JSON.stringify({facts:[{mapRef:'M2',segmentRef:'missing'}]}):reply(req)})});try{
+ const f=await fixture(2,{spatialPipeline:'staged',work:{extraRequests:0},respond:req=>({text:req.promptMode==='atlas-spatial-extract'?JSON.stringify({facts:[{mapRef:'M2',segmentRef:'missing'}]}):reply(req)})});try{
   const result=await f.repo.prepareTurn(input({layoutMaps:f.ids,sourceSnapshot:[{key:'s',kind:'story',text:'城市东侧是道路。'}]}));
   assert.equal(f.calls.length,2);assert.equal(f.calls[1].batchTargets.count,1);assert.equal(result.receipt.status,'partial');
   const db=f.repo.getCandidate(result.token).db;assert.ok(scene(db,f.ids[0]));assert.equal(scene(db,f.ids[1]),undefined);

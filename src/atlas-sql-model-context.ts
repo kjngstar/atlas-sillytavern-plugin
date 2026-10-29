@@ -5,6 +5,7 @@ import type {KnownRef} from './atlas-sql-refs.ts';
 import type {TableReadPort} from './atlas-ops-compile-types.ts';
 import type {TurnInput,Phase} from './atlas-ops-contract.ts';
 import {normalizeFrame} from './atlas-spatial-frame.ts';
+import {normalizeGenerationOptions} from './atlas-model-batching.ts';
 /**
  * P08/R05：提示词目录与编译目录必须是**同一份**。
  *
@@ -23,6 +24,7 @@ export function buildSqlForegroundRequest(tables:TableReadPort,branchId:string,i
    .map(map=>{const frame=normalizeFrame(map.frame_json);return {ref:known.find(ref=>ref.id===map.id)?.alias,name:map.name,
      frame:{cols:frame.cols,rows:frame.rows},metersPerCell:map.meters_per_cell,scaleQuality:map.scale_quality,scaleLocked:map.scale_locked};})),
   geoSources:input.assistantText,sourceSnapshot:input.sourceSnapshot,batchId:`${phase}_${turnId}`});
+ if(phase==='observe'&&normalizeGenerationOptions(input.generationOptions).spatialPipeline==='combined')request.messages[0].content+='\n本轮同时观察空间事实：提取实际进入/离开、地点父级、尺寸与门路变化，复用已有引用。原始来源由程序原样保留给后续地理与布局共同规划；不另外调用摘录模型。没有空间结构变化时不要重发旧事实或布局。';
  request.anchor=input.anchor;request.sourceSnapshot=input.sourceSnapshot;
  request.promptInput={injectionText:entityRefs.join('\n'),userText:input.userText,assistantText:input.assistantText,
   loreSupplement:input.sourceSnapshot.filter(source=>source.kind==='lorebook').map(source=>source.text).join('\n'),baseRevision:input.anchor.baseRevision};
