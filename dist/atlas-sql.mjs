@@ -6718,7 +6718,7 @@ function applySceneGroup(db, group2, ports) {
   if (!ports.isCurrent()) return failure("STALE_SCOPE", "$.scope", "世界已经切换，禁止应用布局");
   if (db.exec("PRAGMA foreign_keys")[0]?.values[0]?.[0] !== 1) return failure("FOREIGN_KEYS_OFF", "$", "需要宿主在开启事务前启用并读回外键");
   for (const r of group2.readSet ?? []) {
-    if (!["maps", "locations"].includes(r.table)) return failure("READ_TABLE_INVALID", "$.readSet", "布局读集只包含地图和地点");
+    if (!["maps", "locations", "routes"].includes(r.table)) return failure("READ_TABLE_INVALID", "$.readSet", "布局读集只包含地图、地点和路线");
     const row3 = ports.queryBound(db, "SELECT row_rev FROM " + r.table + " WHERE branch_id=? AND id=?", [ports.branchId, r.rowId])[0];
     if (row3?.row_rev !== r.rowRev) return failure("STALE_ROW", "$.readSet", "候选行在编译后已改变");
   }
