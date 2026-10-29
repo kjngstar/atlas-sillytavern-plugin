@@ -71,7 +71,7 @@ const FORMAT_SEGMENT = [
 
 const MINIMUM_HELP: Record<string, string> = {
   'location.upsert': '新建 name；修改 ref + 至少一个变更字段；kind=region/city/district/building/room/natural/vehicle/other；parent_ref=所属地点，mobility=fixed/mobile，anchor_ref=载具锚点；existence_quality=confirmed/inferred/hypothetical，正文明确事实用 confirmed，推断新增地点用 inferred，不能写 story（story 是来源名）；仅知道房间长宽（米）、不知道父图位置时，area={kind:"dimensions",widthM:12,heightM:8,quality:"confirmed",source:"story"}，按资料填写实际数值，不编造从(0,0)起的轮廓；已知范围坐标才用 area={kind:cells,cells:[{x,y}],quality:confirmed/estimated,source:manual/story/worldbook/estimate} 或 {kind:polygon,points:[{x,y}],quality,source}，坐标沿用所属地图尺度，不把米数直接当格数；有已提供 map_ref 才能给 position={x,y,precision:exact/approximate/layout}',
-  'character.upsert': '正式新建必须 data.name + data.identity / data.importance / data.importance_reason 至少一个；identity 写有依据的身份，不能只写 role 或 description 代替；role=protagonist/companion/npc，importance=core/recurring/supporting（不用 primary）；候选只需 data.name（data.registration=watch）；修改已有对象用 ref',
+  'character.upsert': '正式新建必须 data.name + data.identity / data.importance / data.importance_reason 至少一个；identity 写有依据的身份，不能只写 role 或 description 代替；role=protagonist/companion/npc，importance=core/recurring/supporting（不用 primary）；候选只需 data.name（data.registration=watch）；修改已有对象用 ref；data.location_ref=已实际到达的现有地点引用，主角与同行人物分别更新落点，不能因原坐标已存在而省略已完成的移动',
   'item.upsert': '新建 name，可用 placement={holder_ref|container_ref|location_ref} 指定初始落点；修改 ref；既有物品换落点用 item.transfer',
   'item.transfer': 'ref + data.to 对象：{"holder_ref":"人物引用"} / {"container_ref":"容器物品引用"} / {"location_ref":"地点引用"} / {"unknown":true} 四选一；to 不能直接写字符串。同批可先 item.upsert ref:"new:rope"，再 item.transfer ref:"new:rope"，转移是引用这个新物品，不是重复新建',
   'faction.upsert': '新建 name；修改 ref',
@@ -83,7 +83,7 @@ const MINIMUM_HELP: Record<string, string> = {
   'attention.propose': 'opportunity_ref, belief',
   'channel.upsert': 'owner_ref, kind, name',
   'map.estimate': 'ref=已有地图引用；data.width_m/height_m=资料中的实际长宽（米），或 meters_per_cell_min/meters_per_cell_max=有依据的标定范围；why 说明来源。不能把公里数直接当米，也不把画面缩放当实测比例尺',
-  'route.propose': 'data.from_ref、to_ref=两个地点引用；明确通行长度写 distance_m（米），区间写 distance_min_m/distance_max_m；quality=confirmed/estimated，modes 为通行方式数组，可带 map_ref。航程和直线距离同时存在时，航线的 distance_m 用航程，直线距离另作地图方位/标定依据，不能省掉已知航程只登记端点',
+  'route.propose': 'data.from_ref、to_ref=两个地点引用；明确通行长度写 distance_m（米），区间写 distance_min_m/distance_max_m；quality=confirmed/estimated；modes 为通行方式数组，只允许 walk/ride/ground_vehicle/water/flight/teleport/custom，船舶航路使用 water（不用 ship/boat）；kind=adjacent/road/path/door/stairs/air/water/portal/estimated，可带 map_ref。航程和直线距离同时存在时，航线的 distance_m 用航程，直线距离另作地图方位/标定依据，不能省掉已知航程只登记端点',
   'map.layout.request': 'ref + kind(overview/city/floor，以程序给定值为准) + spec（只写本次变化的约束：overview 用 surface/zones/links/features，city 用 districts/buildings/enclosure/riverWidth，floor 用 rooms/contents/actors/items，每条都要 id）；省略的键保持原样，删除只能写 spec.deletes；不要输出完整 scene、几何坐标、seed 或比例尺',
   'space.state.patch': 'ref=地图引用 + data.updates 数组，每项 objectRef（本图陈设/门引用，同名家具必须配 locationRef）与至少一个变化字段：openingState=open/closed/not-applicable/unknown、locked=true/false、material=solid/glass/wood/fabric/other/unknown、present=true/false；只改状态，不改尺寸/占地，不重发 scene；canOpen/blocksMovement/blocksSight 是派生值，写了必须和门自身状态一致',
   noop: '无修改',
