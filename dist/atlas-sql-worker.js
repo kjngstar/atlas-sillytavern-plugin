@@ -15457,6 +15457,7 @@ ${lines.join("\n")}
       const id = String(member.id ?? "");
       const kind = TEXT(member.kind);
       if (!kind) continue;
+      if (kind === "vehicle" && member.mobility === "mobile" && asId2(member.anchor_location_id)) continue;
       if (kind === "floor" && (chosen.mode === "interior" || chosen.mode === "compound")) {
         pushUnsupported(id, kind, "楼层由独立楼层入口展示，不作为同层平面房间或室外足迹");
       } else if (chosen.mode === "outdoor" && INDOOR_KINDS.has(kind)) {
