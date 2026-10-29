@@ -40,7 +40,7 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 var define_ATLAS_BUILD_INFO_default;
 var init_define_ATLAS_BUILD_INFO = __esm({
   "<define:__ATLAS_BUILD_INFO__>"() {
-    define_ATLAS_BUILD_INFO_default = { pluginVersion: "0.9.100", buildId: "build-59baa6ed980ddc65", buildCommit: "f42936260061c24621cce0454bbd27cc14777acd", buildDirty: false };
+    define_ATLAS_BUILD_INFO_default = { pluginVersion: "0.9.100", buildId: "build-cd14a518aafb108d", buildCommit: "39ec78e737921078a2b009e1e68bfced776f6ca0", buildDirty: false };
   }
 });
 
@@ -4503,6 +4503,7 @@ var init_atlas_ops_prompts = __esm({
       "只输出本次允许的操作，每行一个完整 JSON 对象。",
       '每行结构固定为 {"op":"操作名","ref":"对象引用（可选）","data":{实际字段},"source":"来源（可选）","why":"依据（可选）}；name、title、phase、subject_ref 等实际字段全部放在 data 内，禁止放在顶层。',
       "只写发生变化的字段。已有对象使用提供的短引用；新对象使用 new: 临时引用。",
+      "先按父地点、已存在名称和别名核对身份。简称、加上容器称呼或换用引号不意味着新地点；确认同一对象时使用已有引用，必要时补 aliases，不另建一间同用途房间来作为移动目的地。不能确定身份时保留粗位置，不按相似名称强行合并。",
       'L1、C1、I1 等短引用只能使用本次目录中实际存在的编号；目录为空时不能自行编造这些已有编号。新建地点写 ref:"new:city"，引用该新地点也写 "new:city"；这些临时别名只在本批有效。',
       "不要输出整份世界、SQL、解释段或思考过程。",
       '没有需要修改的数据时输出 {"op":"noop"}。',
@@ -4532,6 +4533,7 @@ var init_atlas_sql_model_context = __esm({
     init_define_ATLAS_BUILD_INFO();
     init_atlas_ops_prompts();
     init_atlas_sql_refs();
+    init_atlas_spatial_frame();
   }
 });
 
