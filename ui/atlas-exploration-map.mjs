@@ -63,6 +63,9 @@ export function projectExplorationMaps(nodes,locations,{maps=[],viewMode='player
   const areas=[...local.values()].sort(sort).map((c,i)=>({id:c.containerLocationId,nodeId:c.id,name:c.name,
    external:!children.includes(c),mobile:locations.find(l=>l.id===c.containerLocationId)?.mobility==='mobile',
    c:palette[i%palette.length],...footprint(source.get(c.id)??c)}));
+  // A neighbouring map is an exit at the edge of this view, not another giant
+  // territory pasted into the current interior.
+  for(const a of areas)if(a.external){a.parts=[[[-16,-20],[16,-20],[16,20],[-16,20]]];a.recorded=false;}
   // Connected components occupy compact rows. Route length does not determine
   // screen length: this view explicitly has no metric scale or north arrow.
   const ordered=[],remaining=new Set(areas.map(a=>a.nodeId));
@@ -87,9 +90,18 @@ export function projectExplorationMaps(nodes,locations,{maps=[],viewMode='player
   for(let i=0;i<anchored.length;i++)for(let j=0;j<i;j++){const a=anchors.get(anchored[i].id),b=anchors.get(anchored[j].id);spacing=Math.min(spacing,Math.hypot(a.x-b.x,a.y-b.y));}
   const thumbnailScale=Math.min(1,Math.max(.2,spacing/290));
   for(const a of anchored){const p=anchors.get(a.id);a.x=p.x;a.y=p.y;a.parts=a.parts.map(poly=>poly.map(([x,y])=>[x*thumbnailScale,y*thumbnailScale]));}
+  const inside=areas.filter(a=>!a.external);
+  if(inside.length){
+   const xs=inside.map(a=>a.x),ys=inside.map(a=>a.y),cx=(Math.min(...xs)+Math.max(...xs))/2,cy=(Math.min(...ys)+Math.max(...ys))/2;
+   hub[0]=cx;hub[1]=selfEdges.length?cy+95:cy;
+   areas.filter(a=>a.external).forEach((a,i)=>{a.x=i%2?Math.max(...xs)+180:Math.min(...xs)-180;a.y=cy+95+Math.floor(i/2)*120;});
+  }
   const positions=new Map(areas.map(a=>[a.nodeId,[a.x,a.y]]));
   positions.set(n.id,hub);
-  const passages=edges.map(e=>{const a=positions.get(e.from),b=positions.get(e.to);return {...e,points:[a,[(a[0]+b[0])/2,a[1]],[(a[0]+b[0])/2,b[1]],b]};});
+  const atBoundary=(id,toward)=>{const p=positions.get(id),area=areas.find(a=>a.nodeId===id);if(!area)return p;
+   const pts=area.parts.flat(),hx=Math.max(...pts.map(q=>Math.abs(q[0]))),hy=Math.max(...pts.map(q=>Math.abs(q[1]))),dx=toward[0]-p[0],dy=toward[1]-p[1];
+   const k=Math.min(dx?hx/Math.abs(dx):Infinity,dy?hy/Math.abs(dy):Infinity);return Number.isFinite(k)?[p[0]+dx*k,p[1]+dy*k]:p;};
+  const passages=edges.map(e=>{const a=atBoundary(e.from,positions.get(e.to)),b=atBoundary(e.to,positions.get(e.from));return {...e,points:[a,[(a[0]+b[0])/2,a[1]],[(a[0]+b[0])/2,b[1]],b]};});
   const all=[...areas.flatMap(a=>a.parts.flat().map(([x,y])=>[x+a.x,y+a.y])),...passages.flatMap(e=>e.points)];
   const xs=all.map(p=>p[0]),ys=all.map(p=>p[1]);
   n.geo={...g,exploration:{areas,passages,hub:selfEdges.length?hub:null,

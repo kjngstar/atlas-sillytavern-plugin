@@ -501,7 +501,11 @@ function create(canvas, mini, hooks){
     for(const a of sketch.areas){
       const active=st.hover?.id===a.id||st.sel?.id===a.id;
       ctx.save();ctx.translate(a.x,a.y);
-      for(const poly of a.parts){
+      if(a.external){
+        ctx.strokeStyle=hexA(a.c,active?1:.8);ctx.lineWidth=2/cam;
+        ctx.beginPath();ctx.moveTo(-8,-14);ctx.lineTo(-8,14);ctx.moveTo(8,-14);ctx.lineTo(8,14);ctx.stroke();
+      }
+      else for(const poly of a.parts){
         trace(poly);ctx.closePath();ctx.fillStyle=hexA(a.c,active?.26:.14);ctx.fill();
         ctx.strokeStyle=hexA(a.c,active?1:.8);ctx.lineWidth=(active?2.2:1.5)/cam;
         ctx.setLineDash(a.recorded&&!a.external?[]:[5/cam,4/cam]);ctx.stroke();ctx.setLineDash([]);
@@ -510,8 +514,8 @@ function create(canvas, mini, hooks){
       }
       ctx.restore();
       const maxY=Math.max(...a.parts.flat().map(p=>p[1]));
-      if(st.showLabels){pushLabel(a.x,a.y+maxY+10/cam,a.name+(a.external?' ↗':''),a.c,'live',true);
-        pushLabel(a.x,a.y+maxY+33/cam,a.external?'相邻区域':a.recorded?'双击展开内部':'内部未探明',ink,'sub',true);}
+      if(st.showLabels){pushLabel(a.x,a.y+maxY+10/cam,(a.external?'通往 ':'')+a.name+(a.external?' ↗':''),a.c,'live',true);
+        if(!a.external)pushLabel(a.x,a.y+maxY+33/cam,a.recorded?'双击展开内部':'内部未探明',ink,'sub',true);}
     }
     if(sketch.hub){const [x,y]=sketch.hub;ctx.beginPath();ctx.arc(x,y,4/cam,0,Math.PI*2);ctx.fillStyle=ink;ctx.fill();}
     ctx.restore();
