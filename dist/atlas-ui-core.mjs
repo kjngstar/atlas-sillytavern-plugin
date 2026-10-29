@@ -40,7 +40,7 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 var define_ATLAS_BUILD_INFO_default;
 var init_define_ATLAS_BUILD_INFO = __esm({
   "<define:__ATLAS_BUILD_INFO__>"() {
-    define_ATLAS_BUILD_INFO_default = { pluginVersion: "0.9.100", buildId: "build-92c03a24b35aea08", buildCommit: "25c88fd3e8449e6a4bff80e040330d57678bb949", buildDirty: false };
+    define_ATLAS_BUILD_INFO_default = { pluginVersion: "0.9.100", buildId: "build-84098396e869a635", buildCommit: "dde51a47e50f4360b82d77b0bf64a6c1b0802c3e", buildDirty: false };
   }
 });
 
@@ -95,7 +95,7 @@ var init_atlas_runtime_limits = __esm({
       decisionOutputReserveTokens: 512,
       decisionActorOutputTokens: 256,
       repairResponseTokens: 2048,
-      modelTimeoutMs: 12e4,
+      modelTimeoutMs: 3e5,
       mentionCandidates: 256,
       locationDepth: 12,
       containerDepth: 4,
@@ -6711,6 +6711,7 @@ var TABLE_DELTA_DISCIPLINE_CONTENT = '【增量契约补充纪律（必须逐条
 init_atlas_request_diagnostics();
 init_atlas_diagnostics();
 init_atlas_response_metrics();
+init_atlas_runtime_limits();
 function awaitResponse(work, signal) {
   return new Promise((resolve, reject) => {
     const abort = () => {
@@ -6919,7 +6920,7 @@ async function callAtlasWorldTurnApi(preset, input, deps = {}) {
   const maxTokens = Number.isSafeInteger(preset.maxTokens) && preset.maxTokens > 0 ? preset.maxTokens : void 0;
   const temperature = typeof preset.temperature === "number" ? preset.temperature : 1;
   const topP = typeof preset.topP === "number" ? preset.topP : 0.95;
-  const timeoutMs = Math.min(Math.max(preset.timeoutMs ?? 3e4, 1e3), 12e5);
+  const timeoutMs = Math.min(Math.max(preset.timeoutMs ?? ATLAS_RUNTIME_LIMITS.modelTimeoutMs, 1e3), 12e5);
   Object.assign(diagnosticDetails, { timeoutMs, maxTokens: maxTokens ?? 0, promptChars: bodyMessages.reduce((n, m) => n + m.content.length, 0), messageCount: bodyMessages.length });
   const fetchFn = deps.fetchFn ?? globalThis.fetch;
   const controller = new AbortController();
@@ -7370,6 +7371,7 @@ init_atlas_prompt_layers();
 init_atlas_world_contract();
 init_atlas_work_batching();
 init_atlas_model_batching();
+init_atlas_runtime_limits();
 
 // src/atlas-content-replace.ts
 init_define_ATLAS_BUILD_INFO();
@@ -7730,7 +7732,7 @@ function parseLegacyPreset(raw) {
   if (apiKey === null) return null;
   const maxTokens = isFiniteIntIn(record.maxTokens, MIN_MAX_TOKENS, MAX_MAX_TOKENS) ? record.maxTokens : 0;
   const temperature = isFiniteIn(record.temperature, MIN_TEMPERATURE, MAX_TEMPERATURE) ? record.temperature : 0.7;
-  const timeoutMs = isFiniteIntIn(record.timeoutMs, MIN_TIMEOUT_MS, MAX_TIMEOUT_MS) ? record.timeoutMs : 3e4;
+  const timeoutMs = isFiniteIntIn(record.timeoutMs, MIN_TIMEOUT_MS, MAX_TIMEOUT_MS) ? record.timeoutMs : ATLAS_RUNTIME_LIMITS.modelTimeoutMs;
   const systemPrompt = typeof record.systemPrompt === "string" ? record.systemPrompt : "";
   return { name: record.name.trim(), endpoint: record.endpoint, model: record.model.trim(), apiKey, maxTokens, temperature, topP: 0.95, timeoutMs, systemPrompt };
 }
