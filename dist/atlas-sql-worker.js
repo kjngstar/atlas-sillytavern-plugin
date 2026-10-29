@@ -5294,6 +5294,10 @@
     if (!projection?.ok || !projection.scene || scene.mapId !== projection.scene.mapId || scene.branchId !== projection.scene.branchId) return failure("PROJECTION_SCOPE_MISMATCH", "$", "几何文档与 SQL 现状不属于同一地图");
     if (scene.units !== projection.scene.units || scene.metersPerCell !== projection.scene.metersPerCell) return failure("PROJECTION_METRIC_MISMATCH", "$", "已保存布局需要重新按当前尺度验证");
     const d = clone(scene), s = d.layout;
+    if (s.kind === "overview") {
+      s.routes = clone(projection.scene.layout.routes ?? []);
+      return { ok: true, scene: d, issues: [] };
+    }
     if (s.kind === "city") {
       const allowed = new Set(pointLocationIds), b = s.bounds;
       s.pins = (projection.scene.layout.pins ?? []).filter((p) => p.type === "location" && allowed.has(p.id) && finite(p.x) && finite(p.y) && p.x >= b.x && p.y >= b.y && p.x <= b.x + b.w && p.y <= b.y + b.h).map(clone);
