@@ -63,7 +63,7 @@ function sceneMessages(id=state.nodeId){return D.MESSAGES.filter(m=>(within(m.ma
 function message(id){return D.MESSAGES.find(m=>m.id===id);}
 function task(id){return D.TASKS.find(t=>t.id===id);}
 function effectivePage(){return ui.resolveUIProfile(state.profileId).profile.behavior.forceMapPage?'map':state.page;}
-function syncMapVisibility(){map.setPaused(disposed||!hostVisible||document.hidden||effectivePage()!=='map');}
+function syncMapVisibility(){map.setPaused(disposed||!hostVisible||document.hidden||effectivePage()!=='map'||$('#placeStructure')?.hidden===false);}
 function resizeAfterLayout(){
  if(disposed)return Promise.resolve({ok:false,errorCode:'UI_DISPOSED'});
  if(!hostVisible||document.hidden||!$('#viewport').getBoundingClientRect().width)return Promise.resolve({ok:true,layoutPending:true});
@@ -176,9 +176,22 @@ function renderRail(){
 }
 function renderCrumbs(){const arr=path(state.nodeId)||[D.ROOT];$('#crumbs').innerHTML=arr.map((n,i)=>`${i?'<span class="crumb-sep">›</span>':''}<button class="crumb ${i===arr.length-1?'cur':''}" data-go="${esc(n.id)}"><span class="lv">${esc(n.tag||'地图')}</span><span>${esc(n.name)}</span></button>`).join('');
  const select=$('#floorSwitcher'),choices=current().floorChoices||[];select.hidden=!choices.length;select.innerHTML=choices.map(c=>`<option value="${esc(c.id)}">${esc(c.name)}</option>`).join('');select.value=state.nodeId;}
+function renderStructureOverview(){
+ const el=$('#placeStructure');if(!el)return;
+ const n=current(),g=n.geo||{},groups=n.spaceGroups||[];
+ const geometric=!!g.selfArea||!!g.hostArea||['overviewShapes','overviewRoutes','overviewFeatures','rooms','districts','cityBuildings','buildings','lands','plots','wings'].some(key=>g[key]?.length)||!!g.river?.length;
+ const located=(n.marks||[]).some(m=>m.type==='poi'&&!m.silent&&!m.proxy);
+ const show=effectivePage()==='map'&&state.mapMode==='map'&&!!n.containerLocationId&&!geometric&&!located;
+ el.hidden=!show;$('#viewport').classList.toggle('structure-view',show);$('#map').setAttribute('aria-hidden',String(show));
+ if(!show){el.replaceChildren();return;}
+ const entries=groups.flatMap(group=>group.entries).filter(entry=>known(byId(entry.id)));
+ const parent=(path(n.id)||[]).at(-2);
+ el.innerHTML=`<div class="structure-content"><span class="section-label">地点概览</span><h3>${entries.length?'这里有哪些地方':'尚未记录内部空间'}</h3><p class="scope-note">${entries.length?'按归属浏览已知地点；它们之间的实际位置与距离尚待确认。':'这里已有地点记录，内部结构还不清楚。可以返回上级查看周边。'}</p>${groups.map(group=>`<section><div class="section-label">${esc(group.label)}</div><div class="structure-entries">${group.entries.filter(entry=>known(byId(entry.id))).map(entry=>`<button data-go="${esc(entry.id)}"><i aria-hidden="true"></i><span><strong>${esc(entry.name)}</strong><small>${esc(byId(entry.id)?.tag||'地点')} · ${entry.hasLayout?'查看内部':'内部待细化'}</small></span>${icon('chev')}</button>`).join('')}</div></section>`).join('')}${parent?`<button class="text-btn structure-parent" data-go="${esc(parent.id)}">返回${esc(parent.name)}</button>`:''}</div>`;
+}
 function renderSpaceNavigation(){const n=current(),groups=n.spaceGroups||[],coverage=n.spaceCoverage;
  const el=$('#spaceNavigation'),open=el.querySelector('details')?.open===true;el.hidden=!groups.length;
  el.innerHTML=groups.length?`<details class="space-navigation" ${open?'open':''}><summary>本图空间 · ${coverage.total}${coverage.unplaced?`<em>${coverage.unplaced} 处位置待完善</em>`:''}</summary>${groups.map(g=>`<section><div class="section-label">${esc(g.label)}</div>${g.entries.map(c=>`<button class="child-location" data-go="${esc(c.id)}"><span>${esc(c.name)}</span><em>${!c.represented?'位置待完善':!c.hasLayout?'内部待布局':'查看'}</em>›</button>`).join('')}</section>`).join('')}<p class="scope-note">入口按已有归属分组；没有楼层依据的房间保留原归属。位置待完善不代表地点不存在。</p></details>`:'';
+ renderStructureOverview();
 }
 function renderTree(){let count=0;const walk=(n,depth)=>{if(!known(n))return '';count++;const has=n.children?.some(known),open=state.open.has(n.id),active=n.id===state.nodeId;
  return `<div class="tree-row ${active?'on':''}" style="padding-left:${6+depth*12}px"><button class="tw ${open&&has?'open':''}" data-expand="${esc(n.id)}" aria-label="${open?'收起':'展开'}${esc(n.name)}" ${has?'':'disabled'}>${has?icon('chev'):''}</button><button class="tree-link" data-go="${esc(n.id)}" title="${esc((n.tag||'地图')+(n.hasLayout===false?' · 内部待布局':''))}"><i class="tdot" style="--c:${color[n.kind]||color.world}"></i><span class="tname">${esc(n.name)}</span>${sceneCast(n.id).length?`<em class="tflag live">${sceneCast(n.id).length}人</em>`:''}<em class="tnum">${esc(n.tag||'地图')}</em></button></div>${has&&open?n.children.map(c=>walk(c,depth+1)).join(''):''}`;};
@@ -409,7 +422,7 @@ function settingsHTML(){const tabs=[['prompts','提示词'],['connection','API �
  return html+window.AtlasAppearance.appearanceSettingsHTML({skin:skinValue(),catalog:skinCatalog,runtime:window.AtlasSkinRuntime});
 }
 function renderAll({preserveWorkspace=false}={}){renderRail();renderCrumbs();renderTree();renderSpaceNavigation();renderSwitches();renderChips();renderPlace();renderInspector();renderDock();if(!preserveWorkspace)renderPage();renderModes();applyUIProfile();}
-function renderModes(){$('#mapModeSwitcher').value=state.mapMode;}
+function renderModes(){$('#mapModeSwitcher').value=state.mapMode;renderStructureOverview();syncMapVisibility();}
 function showFlow(id){const m=message(id);if(!m||!known(m))return;let destination=Object.keys(D.FLOWS).find(mapId=>(D.FLOWS[mapId]||[]).some(e=>e.id===id)&&mapId===state.nodeId)||Object.keys(D.FLOWS).find(mapId=>(D.FLOWS[mapId]||[]).some(e=>e.id===id));destination=destination||m.mapNodeId||m.locationId;state.mapMode='flow';navigate(destination,true);map.setMode('flow');select('message',id,true);renderModes();}
 function showTask(id){const t=task(id);if(!t||!known(t))return;state.mapMode='sim';navigate(t.mapId,true);map.setMode('sim');select('task',id,true);renderModes();}
 function showEvent(id){const e=D.EVENTS.find(e=>e.id===id);if(!e||!known(e))return;if(byId(e.mapId))navigate(e.mapId,true);select('event',id,true);map.selectKey(e.target);}
