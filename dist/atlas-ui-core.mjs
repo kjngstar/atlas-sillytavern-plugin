@@ -40,7 +40,7 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 var define_ATLAS_BUILD_INFO_default;
 var init_define_ATLAS_BUILD_INFO = __esm({
   "<define:__ATLAS_BUILD_INFO__>"() {
-    define_ATLAS_BUILD_INFO_default = { pluginVersion: "0.9.100", buildId: "build-00c33d9e59d39634", buildCommit: "0d104b7d9b35ee4bf3f6d3a33b909bb28e40c49b", buildDirty: false };
+    define_ATLAS_BUILD_INFO_default = { pluginVersion: "0.9.100", buildId: "build-892c26adb328831b", buildCommit: "e8ef87b7a94d233f41e142d344f50f329e288bef", buildDirty: false };
   }
 });
 
@@ -4534,6 +4534,7 @@ var init_atlas_sql_model_context = __esm({
     init_atlas_ops_prompts();
     init_atlas_sql_refs();
     init_atlas_spatial_frame();
+    init_atlas_model_batching();
   }
 });
 
@@ -5328,6 +5329,16 @@ var init_atlas_world_build_state = __esm({
   }
 });
 
+// src/atlas-spatial-planning.ts
+var init_atlas_spatial_planning = __esm({
+  "src/atlas-spatial-planning.ts"() {
+    "use strict";
+    init_define_ATLAS_BUILD_INFO();
+    init_atlas_ops_refs();
+    init_atlas_hash();
+  }
+});
+
 // src/atlas-sql-layout-task.ts
 var init_atlas_sql_layout_task = __esm({
   "src/atlas-sql-layout-task.ts"() {
@@ -5350,6 +5361,7 @@ var init_atlas_sql_layout_task = __esm({
     init_atlas_layout_signature();
     init_atlas_world_contract();
     init_atlas_prompt_layers();
+    init_atlas_spatial_planning();
     init_atlas_space_canonical();
     init_atlas_spatial_profile();
   }
@@ -5550,6 +5562,7 @@ var init_atlas_sql_world_completion = __esm({
     init_atlas_construction_budget();
     init_atlas_source_catalogue();
     init_atlas_spatial();
+    init_atlas_spatial_planning();
   }
 });
 
@@ -6090,6 +6103,7 @@ var init_atlas_db_repository = __esm({
     init_atlas_sql_layout_task();
     init_atlas_functional_areas();
     init_atlas_layout_evidence();
+    init_atlas_spatial_planning();
     init_atlas_sql_legacy_import();
     init_atlas_db_commit();
     init_atlas_db_rollback();
