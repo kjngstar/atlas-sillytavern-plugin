@@ -6639,6 +6639,42 @@ function compileSceneGroup({ request, scope, currentScope, mapRow, locations, ch
       mutations.push({ table: "locations", rowId: before.id, before: clone(before), after, sourceOpIds: [operationId], basis: { kind: "layout", mapId: mapRow.id, quality: geo.precision } });
       readSet.push({ table: "locations", rowId: before.id, rowRev: before.row_rev });
     }
+    if (result.scene.layout.kind === "city") {
+      const positions = new Map(locations.map((l) => [l.id, l]));
+      for (const mutation7 of mutations) if (mutation7.table === "locations") positions.set(mutation7.rowId, mutation7.after);
+      const anchor = (id) => {
+        const seen = /* @__PURE__ */ new Set();
+        let row3 = positions.get(id);
+        while (row3 && !seen.has(row3.id)) {
+          seen.add(row3.id);
+          if (row3.mobility === "mobile") {
+            row3 = positions.get(row3.anchor_location_id);
+            continue;
+          }
+          if (row3.map_id === mapRow.id && finite(row3.grid_x) && finite(row3.grid_y) && row3.coord_precision !== "unknown") return [row3.grid_x, row3.grid_y];
+          row3 = positions.get(row3.parent_location_id);
+        }
+        return null;
+      };
+      for (const before of routes) {
+        if (before.branch_id !== scope.branchId || before.map_id !== mapRow.id || before.status === "closed" || before.geometry_quality === "confirmed") continue;
+        const a = anchor(before.from_location_id), b = anchor(before.to_location_id);
+        if (!a || !b || Math.hypot(a[0] - b[0], a[1] - b[1]) < 1e-7) continue;
+        const geometry = { kind: "line", coordinates: [a, b] };
+        let raw = before.geometry_json;
+        if (typeof raw === "string") {
+          try {
+            raw = JSON.parse(raw);
+          } catch {
+            raw = null;
+          }
+        }
+        if (stable(raw) === stable(geometry)) continue;
+        const after = { ...clone(before), geometry_json: geometry, geometry_quality: "estimated", geometry_rev: Number(before.geometry_rev ?? 0) + 1, row_rev: Number(before.row_rev ?? 0) + 1, updated_turn_id: turnId };
+        mutations.push({ table: "routes", rowId: before.id, before: clone(before), after, sourceOpIds: [operationId], basis: { kind: "layout-route", mapId: mapRow.id, quality: "estimated" } });
+        readSet.push({ table: "routes", rowId: before.id, rowRev: before.row_rev });
+      }
+    }
     for (const room of [...result.scene.layout.rooms ?? [], ...result.scene.layout.corridor?.entityId ? [{ ...result.scene.layout.corridor, id: result.scene.layout.corridor.entityId }] : []]) {
       if (room.placement === "proxy") continue;
       if (room.id === mapRow.container_location_id) continue;
@@ -40924,15 +40960,27 @@ function worldBuildMapQuality(db, branchId, mapId) {
   const frame = normalizeFrame(map["frame_json"]);
   const scene = frame["atlasScene"];
   const layout = record2(scene) && record2(scene["layout"]) ? scene["layout"] : null;
-  const required = queryBound(db, "SELECT * FROM locations WHERE branch_id=? AND map_id=? AND status='active' AND kind<>'floor' AND id<>COALESCE(?, '')", [branchId, mapId, map["container_location_id"]]);
+  const required = queryBound(db, "SELECT * FROM locations WHERE branch_id=? AND map_id=? AND status='active' AND kind<>'floor' AND mobility<>'mobile' AND id<>COALESCE(?, '')", [branchId, mapId, map["container_location_id"]]);
   const present = elementIds(layout);
+  if (layout?.["kind"] === "city") for (const row3 of required) {
+    let area = row3["area_geometry_json"];
+    if (typeof area === "string") {
+      try {
+        area = JSON.parse(area);
+      } catch {
+        continue;
+      }
+    }
+    const x = row3["grid_x"], y = row3["grid_y"];
+    if (row3["kind"] === "other" && !area && row3["coord_precision"] !== "unknown" && typeof x === "number" && Number.isFinite(x) && typeof y === "number" && Number.isFinite(y) && x >= 0 && y >= 0 && x <= Number(frame["cols"]) && y <= Number(frame["rows"])) present.add(str22(row3["id"]));
+  }
   const canonical = readSpaceCanonical2(frame, str22(map["container_location_id"])).canonical;
   const requiredIds = [...required.map((row3) => str22(row3["id"])), ...(canonical?.furnishing ?? []).filter((entry) => !entry.itemId).map((entry) => entry.localId)];
   const missing = requiredIds.filter((id) => !present.has(id));
   const checkedScene = readSceneFrame(frame, { branchId, mapId });
   const sceneErrors = (checkedScene.issues ?? []).filter((issue31) => issue31.severity === "error").length + (record2(scene) && Array.isArray(scene["issues"]) ? scene["issues"].filter((issue31) => record2(issue31) && issue31["severity"] === "error").length : 0) + (layout && Array.isArray(layout["issues"]) ? layout["issues"].filter((issue31) => record2(issue31) && issue31["severity"] !== "warning").length : 0);
   const routes = queryBound(db, "SELECT * FROM routes WHERE branch_id=? AND map_id=? AND status<>'closed'", [branchId, mapId]);
-  const missingRoutes = routes.filter((route) => !present.has(str22(route["id"]))).map((route) => str22(route["id"]));
+  const missingRoutes = routes.filter((route) => !present.has(str22(route["id"])) && !projectRouteGeometry(route, mapId).geometry).map((route) => str22(route["id"]));
   const container = map["container_location_id"] ? queryBound(db, "SELECT * FROM locations WHERE branch_id=? AND id=?", [branchId, str22(map["container_location_id"])])[0] : null;
   const parentContainer = container?.["parent_location_id"] ? queryBound(db, "SELECT * FROM locations WHERE branch_id=? AND id=?", [branchId, str22(container["parent_location_id"])])[0] : null;
   const profile = resolveSpatialProfile({ map, maps: pageAllRows(createTableReadPort(db), "maps", branchId), container, parentContainer, members: required, routes });
@@ -41438,6 +41486,7 @@ var init_atlas_world_build_execution = __esm({
     init_atlas_spatial();
     init_atlas_sql_layout_task();
     init_atlas_spatial_profile();
+    init_atlas_db_views();
     POLICY = "world-build-v2";
     DISCOVERY_PAGE = 64;
     str22 = (value) => typeof value === "string" ? value : "";
