@@ -67,6 +67,24 @@ test('明确邻近关系不能搬动确认建筑来凑墙距',()=>{
   assert.deepEqual(result.kept,first.scene);
 });
 
+for(const mpp of [1,5])test(`城市重排按${mpp}米/格更新估计路线，确认路线与实际行程长度保持`,()=>{
+  const mapRow={branch_id:'b1',id:'M_C',name:'港区',container_location_id:'d1',frame_json:{cols:500/mpp,rows:300/mpp},meters_per_cell:mpp,scale_quality:'estimated',scale_locked:0,status:'active',row_rev:1};
+  const locations=[{id:'d1',kind:'district',map_id:null,parent_location_id:null},...['b1','b2'].map(id=>({id,kind:'building',map_id:'M_C',parent_location_id:'d1',grid_x:1,grid_y:1,coord_precision:'layout',area_geometry_json:{kind:'dimensions',widthM:12,heightM:8,quality:'confirmed',source:'story'}}))].map(l=>({branch_id:'b1',name:l.id,status:'active',row_rev:1,...l}));
+  const route={branch_id:'b1',id:'route',map_id:'M_C',from_location_id:'b1',to_location_id:'b2',status:'open',geometry_quality:'estimated',geometry_json:{kind:'line',coordinates:[[1,1],[2,2]]},distance_m:42,geometry_rev:1,row_rev:1};
+  const request={kind:'city',spec:{riverWidth:0,enclosure:'open',districts:[{id:'d1',bank:'west',order:0}],buildings:[{id:'b1',districtId:'d1',w:12,h:8},{id:'b2',districtId:'d1',w:12,h:8,near:'b1',sector:'east',gapM:4}]}};
+  const input={request,scope:SCOPE,currentScope:SCOPE,mapRow,maps:[mapRow],locations,characters:[],items:[],routes:[route],turnId:'layout',operationId:'layout'};
+  const out=Kit.compileSceneGroup(input);assert.equal(out.ok,true,JSON.stringify(out.issues));
+  const saved=out.group.mutations.find(m=>m.table==='routes').after;
+  const a=out.scene.layout.buildings.find(b=>b.id==='b1'),b=out.scene.layout.buildings.find(b=>b.id==='b2');
+  assert.deepEqual(saved.geometry_json.coordinates,[[(a.x+a.w/2)/mpp,(a.y+a.h/2)/mpp],[(b.x+b.w/2)/mpp,(b.y+b.h/2)/mpp]]);
+  assert.equal(saved.distance_m,42);
+  assert.equal(saved.geometry_quality,'estimated');
+  assert.deepEqual(route.geometry_json.coordinates,[[1,1],[2,2]]);
+  const locked=Kit.compileSceneGroup({...input,routes:[{...route,geometry_quality:'confirmed'}]});
+  assert.equal(locked.ok,true,JSON.stringify(locked.issues));
+  assert.ok(!locked.group.mutations.some(m=>m.table==='routes'));
+});
+
 // ───────────────────────── G07-A · 新城市默认开放：不画假城墙 ─────────────────────────
 
 test('G07：enclosure=open + riverWidth=0 → 无假城墙、无城门、无环城墙道路', () => {
