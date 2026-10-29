@@ -2897,6 +2897,7 @@ function checkSceneDocument(doc) {
     collection2("districts", (p) => plain(p) && polygon2(p.polygon) && point(p.site));
     collection2("buildings", rect);
     collection2("gates", point);
+    if (shape.pins !== void 0) collection2("pins", inside2, LIMITS.markers);
     for (const key of ["roads", "segments"]) collection2(key, (p) => plain(p) && point(p.a) && point(p.b) && finite(p.width) && p.width > 0);
   } else if (shape?.kind === "overview") {
     if (shape.surface !== void 0 && !OVERVIEW_SURFACES.includes(shape.surface)) issues.push(diagnostic("SCENE_ENUM_INVALID", "$.layout.surface", "概览表面类型非法"));
@@ -5457,10 +5458,15 @@ function publicSpaceCanonical(canonical, { viewMode = "author", visibleLocalIds 
   }
   return { version: 1, locationId: canonical.locationId, revision: Number.isInteger(canonical.revision) && canonical.revision >= 0 ? canonical.revision : 0, size, furnishing };
 }
-function hydrateScene(scene, projection) {
+function hydrateScene(scene, projection, { pointLocationIds = [] } = {}) {
   if (!projection?.ok || !projection.scene || scene.mapId !== projection.scene.mapId || scene.branchId !== projection.scene.branchId) return failure("PROJECTION_SCOPE_MISMATCH", "$", "几何文档与 SQL 现状不属于同一地图");
   if (scene.units !== projection.scene.units || scene.metersPerCell !== projection.scene.metersPerCell) return failure("PROJECTION_METRIC_MISMATCH", "$", "已保存布局需要重新按当前尺度验证");
   const d = clone(scene), s = d.layout;
+  if (s.kind === "city") {
+    const allowed = new Set(pointLocationIds), b = s.bounds;
+    s.pins = (projection.scene.layout.pins ?? []).filter((p) => p.type === "location" && allowed.has(p.id) && finite(p.x) && finite(p.y) && p.x >= b.x && p.y >= b.y && p.x <= b.x + b.w && p.y <= b.y + b.h).map(clone);
+    return { ok: true, scene: d, issues: [] };
+  }
   if (s.kind !== "floor") return { ok: true, scene: d, issues: [] };
   const pins = projection.scene.layout.pins ?? [], coarse = projection.coarseList ?? [], P = new Map(pins.map((p) => [p.id, p])), C = new Map(coarse.map((p) => [p.entityId, p]));
   s.actors = s.actors.filter((a) => {
@@ -33693,6 +33699,7 @@ function renderedEntityIds(scene, known) {
       add2(group2?.itemId);
     }
   } else if (kind === "city") {
+    for (const pin of Array.isArray(layout.pins) ? layout.pins : []) add2(pin?.id);
     for (const district of Array.isArray(layout.districts) ? layout.districts : []) add2(district?.id);
     for (const building of Array.isArray(layout.buildings) ? layout.buildings : []) add2(building?.id);
   }
@@ -34018,6 +34025,7 @@ function querySpatialScene(ctx, query) {
   const routeRows = queryBound(ctx.db, "SELECT * FROM routes WHERE branch_id = ?", [ctx.branchId]);
   const locationById = /* @__PURE__ */ new Map();
   for (const row3 of locationRows) locationById.set(String(row3.id), row3);
+  const pointLocationIds = locationRows.filter((row3) => row3["mobility"] === "mobile" || row3["kind"] === "other" && (row3["area_geometry_json"] == null || row3["area_geometry_json"] === "null")).map((row3) => String(row3["id"]));
   const visibility = sqlVisibility(ctx);
   const currentSignatures = ctx.viewMode === "pov" ? /* @__PURE__ */ new Map() : computeMapLayoutSignatures(createTableReadPort(ctx.db), ctx.branchId);
   const scope = {
@@ -34097,7 +34105,7 @@ function querySpatialScene(ctx, query) {
       }
     }
     if (scene && projection.ok && projection.scene) {
-      const hydrated = hydrateScene(scene, projection);
+      const hydrated = hydrateScene(scene, projection, { pointLocationIds });
       if (hydrated.ok && hydrated.scene) {
         scene = hydrated.scene;
         if (Array.isArray(hydrated.issues)) issues.push(...hydrated.issues);
