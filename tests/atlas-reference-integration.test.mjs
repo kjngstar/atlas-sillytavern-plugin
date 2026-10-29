@@ -46,7 +46,8 @@ test('容器自己的房间轮廓可序列化；父地图入口只存子图 ID�
  const d=projection({mapView:view([map,child]),sceneView:view([{mapId:'inside',scene}])});
  assert.doesNotThrow(()=>JSON.stringify(d));
  assert.equal(d.ROOT.marks.find(m=>m.id==='L').node.id,'inside');
- assert.equal(d.ROOT.children[0].marks.find(m=>m.id==='L').node,null);
+ assert.equal(d.ROOT.children[0].marks.some(m=>m.id==='L'),false,'进入容器后不再把自身画成子地点图标');
+ assert.equal(d.ROOT.children[0].geo.rooms.find(r=>r.id==='L').isContainer,true,'自身墙体仍保留');
  assert.equal(d.ROOT.children[0].hasLayout,true);
  assert.equal(d.ROOT.children[0].kind,'room');
  assert.equal(d.ROOT.children[0].renderKind,'floor');

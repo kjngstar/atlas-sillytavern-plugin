@@ -200,7 +200,8 @@ export function referenceGeometry(map, document, {viewMode='author',visibleLocat
       represented.add(text(p.entityId));
     }
   }
-  const uniquePins=[...new Map(rawPins.filter(finite).map(p=>[`${p.type}:${p.entityId??p.id}`,p])).values()];
+  // 当前容器由标题与已有墙体/边界说明，不再把自己当成图内的子地点。
+  const uniquePins=[...new Map(rawPins.filter(p=>finite(p)&&text(p.entityId??p.id)!==text(map.containerLocationId)).map(p=>[`${p.type}:${p.entityId??p.id}`,p])).values()];
   /**
    * M6-03③：示意坐标不许被「升格」成精确。
    *
@@ -268,6 +269,8 @@ export function referenceGeometry(map, document, {viewMode='author',visibleLocat
       selfArea:(()=>{
         const sa=layout.selfArea;
         if(!sa||typeof sa!=='object'||!Array.isArray(sa.polygon)||sa.polygon.length<3||!sa.polygon.every(finite))return null;
+        // frame 是计算画布，不是场地轮廓；旧存档的兜底矩形也不能当边界显示。
+        if(sa.source!=='canonical'&&sa.quality!=='confirmed')return null;
         const owner=text(sa.locationId);
         if(!author&&!(owner&&visible.has(owner)))return null;
         return {locationId:owner||null,name:text(sa.name)||null,
@@ -310,7 +313,7 @@ export function referenceGeometry(map, document, {viewMode='author',visibleLocat
       entityId:layout.corridor?.entityId??null,name:text(layout.corridor?.name)||null,
       y:corridor.y+corridor.h/2},
       hostArea:hostArea?{...rect(hostArea),id:hostArea.id,name:hostArea.name}:null,
-      rooms:[...functionalAreas.map(r=>({...rect(r),id:r.id,name:r.name,kind:'other',status:r.quality==='confirmed'?'功能分区':'功能分区 · 估计',tint:'57,224,160',live:false})),...(layout.rooms??[]).filter(r=>r.id!==hostArea?.id).map((r,i)=>({...rect(r),id:r.id,name:r.name,kind:r.id===map.containerLocationId&&map.containerLocationKind==='vehicle'?'vehicle':'room',
+      rooms:[...functionalAreas.map(r=>({...rect(r),id:r.id,name:r.name,kind:'other',status:r.quality==='confirmed'?'功能分区':'功能分区 · 估计',tint:'57,224,160',live:false})),...(layout.rooms??[]).filter(r=>r.id!==hostArea?.id).map((r,i)=>({...rect(r),id:r.id,name:r.name,isContainer:r.id===map.containerLocationId,kind:r.id===map.containerLocationId&&map.containerLocationKind==='vehicle'?'vehicle':'room',
         role:r.role??'indoor',
         status:text(r.status)||null,
         tint:r.role==='garden'?'57,224,160':r.role==='outdoor'?'255,194,71':['67,224,255','155,107,255','57,224,160','127,212,255'][i%4],live:activeRooms.has(r.id)}))],
