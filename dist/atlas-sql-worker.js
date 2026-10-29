@@ -3760,7 +3760,7 @@
       const xs = d.polygon.map((p) => p.x), ys = d.polygon.map((p) => p.y), candidates = [], step = Math.max((decorative ? 22 : 10) * detailScale, Math.max(w, h) / 240);
       for (let y = Math.min(...ys) + lane; y + f.h < Math.max(...ys); y += step) for (let x = Math.min(...xs) + lane; x + f.w < Math.max(...xs); x += step) {
         const q2 = { x, y, w: f.w, h: f.h };
-        if (corners(inflate(q2, pad)).every((p) => polygonContains(d.polygon, p)) && roadClear(q2) && !buildings.some((b2) => intersects(inflate(b2, decorative ? pad : lane), q2))) {
+        if (corners(inflate(q2, pad)).every((p) => polygonContains(d.polygon, p)) && roadClear(q2) && !buildings.some((b2) => intersects(inflate(b2, f.near === b2.id || b2.near === f.id ? 0 : decorative ? pad : lane), q2))) {
           const score = Math.min(...roads.map((r) => segmentDistance(center(q2), r.a, r.b))) + distance(center(q2), d.site) * 0.035 + (decorative ? rng() * 30 : 0);
           candidates.push({ q: q2, score });
         }
@@ -3773,7 +3773,7 @@
     }
     const validBuilding = (q) => {
       const d = districts.find((d2) => d2.id === q.districtId);
-      return d && corners(inflate(q, pad)).every((p) => polygonContains(d.polygon, p)) && roadClear(q) && !buildings.some((b) => intersects(inflate(b, lane), q));
+      return d && corners(inflate(q, pad)).every((p) => polygonContains(d.polygon, p)) && roadClear(q) && !buildings.some((b) => b.id !== q.id && intersects(inflate(b, q.near === b.id || b.near === q.id ? 0 : lane), q));
     };
     for (const f of ordered2(spec.buildings || []).filter((f2) => f2.locked)) {
       const q = { ...f, ...f.locked };
@@ -3786,6 +3786,44 @@
       else if (old?.quality === "confirmed") return { ok: false, issues: [{ id: f.id, code: "BUILDING_LOCK_CONFLICT" }], kept: clone3(previous) };
     }
     for (const f of ordered2(spec.buildings || []).filter((f2) => !buildings.some((b) => b.id === f2.id))) if (!placeBuilding(f)) issues.push({ id: f.id, code: "BUILDING_NO_SPACE" });
+    const nearby = ordered2(spec.buildings || []).filter((f) => f.near), nearIds = new Set(nearby.map((f) => f.id)), settled = new Set(buildings.filter((b) => !nearIds.has(b.id)).map((b) => b.id)), pending = [...nearby];
+    const adjacent = (f, a, sector) => {
+      const gap = f.gapM ?? lane, q = { ...buildings.find((b) => b.id === f.id), ...f };
+      if (sector === "east") {
+        q.x = a.x + a.w + gap;
+        q.y = a.y + (a.h - q.h) / 2;
+      }
+      if (sector === "west") {
+        q.x = a.x - q.w - gap;
+        q.y = a.y + (a.h - q.h) / 2;
+      }
+      if (sector === "north") {
+        q.x = a.x + (a.w - q.w) / 2;
+        q.y = a.y - q.h - gap;
+      }
+      if (sector === "south") {
+        q.x = a.x + (a.w - q.w) / 2;
+        q.y = a.y + a.h + gap;
+      }
+      return q;
+    };
+    while (pending.length) {
+      const index = pending.findIndex((f2) => settled.has(f2.near)), f = pending.splice(index < 0 ? 0 : index, 1)[0], a = buildings.find((b2) => b2.id === f.near), b = buildings.find((b2) => b2.id === f.id);
+      if (!a || !b) return { ok: false, issues: [{ id: f.id, code: "BUILDING_PROXIMITY_CONFLICT" }], kept: previous ? clone3(previous) : null };
+      const fixed = f.locked || b.quality === "confirmed";
+      const options = (f.sector ? [f.sector] : ["east", "south", "west", "north"]).map((sector) => adjacent(f, a, sector));
+      const q = options.find((q2) => validBuilding(q2) && (!fixed || Math.abs(q2.x - b.x) < EPS2 && Math.abs(q2.y - b.y) < EPS2));
+      if (!q) return { ok: false, issues: [{ id: f.id, code: "BUILDING_PROXIMITY_CONFLICT" }], kept: previous ? clone3(previous) : null };
+      Object.assign(b, q);
+      settled.add(f.id);
+    }
+    for (const f of nearby) {
+      const a = buildings.find((b2) => b2.id === f.near), b = buildings.find((b2) => b2.id === f.id);
+      if (!(f.sector ? [f.sector] : ["east", "south", "west", "north"]).some((sector) => {
+        const q = adjacent(f, a, sector);
+        return Math.abs(q.x - b.x) < EPS2 && Math.abs(q.y - b.y) < EPS2;
+      })) return { ok: false, issues: [{ id: f.id, code: "BUILDING_PROXIMITY_CONFLICT" }], kept: previous ? clone3(previous) : null };
+    }
     for (const d of districts) for (let i = 0; i < (spec.blocksPerDistrict ?? 8); i++) placeBuilding({ id: "texture:" + d.id + ":" + i, districtId: d.id, name: "街区轮廓", w: (28 + rng() * 24) * detailScale, h: (25 + rng() * 25) * detailScale }, true);
     const rline = Array.from({ length: 81 }, (_, i) => pt(riverX(river, h * i / 80), h * i / 80)), riverPolygon = rline.map((p) => pt(p.x - river.width / 2, p.y)).concat([...rline].reverse().map((p) => pt(p.x + river.width / 2, p.y)));
     const dock = { id: "dock", name: "河岸码头", type: "dock", x: riverX(river, h * 0.68) - river.width / 2, y: h * 0.68, bank: "west", width: river.width * 0.38 };
@@ -4668,7 +4706,15 @@
           s.issues.push(diagnostic("BUILDING_DISTRICT_RECONCILED", "$.buildings", "建筑分区与已登记归属不符，已保留真实归属，不把示意排位当作包含关系", { severity: "warning", entityId: r.id }));
         }
         if (!districtIds.has(districtId)) throw new Error("DISTRICT_REF_UNKNOWN");
-        return { ...ctx.locks?.buildings?.[r.id]?.w > 0 ? dimensions(ctx.locks.buildings[r.id]) : dimensions(r), districtId, ...locked ? { locked } : {}, ...proxyPlacement(ctx, r.id) };
+        let proximity = {};
+        if (r.near !== void 0) {
+          if (typeof r.near !== "string" || !s.known.locations.has(r.near) || r.near === r.id) throw new Error("BUILDING_NEAR_REF_INVALID");
+          if (r.sector !== void 0 && !["north", "east", "south", "west"].includes(r.sector)) throw new Error("BUILDING_NEAR_SECTOR_INVALID");
+          if (r.gapM !== void 0 && (!finite(r.gapM) || r.gapM < 0)) throw new Error("BUILDING_GAP_INVALID");
+          proximity = { near: r.near, ...r.sector ? { sector: r.sector } : {}, ...r.gapM !== void 0 ? { gapM: r.gapM } : {} };
+        } else if (r.gapM !== void 0) throw new Error("BUILDING_NEAR_REF_REQUIRED");
+        const authority = ctx.childSpaces?.[r.id];
+        return { ...ctx.locks?.buildings?.[r.id]?.w > 0 ? dimensions(ctx.locks.buildings[r.id]) : authority ? dimensions({ w: authority.widthM, h: authority.heightM }) : dimensions(r), districtId, ...proximity, ...locked ? { locked } : {}, ...proxyPlacement(ctx, r.id) };
       });
       return finish(s, ctx, city);
     } catch (e) {
@@ -7822,7 +7868,7 @@ END`;
     actors: { id: "character", roomId: "location" },
     items: { id: "item" },
     districts: { id: "location" },
-    buildings: { id: "location", districtId: "location" },
+    buildings: { id: "location", districtId: "location", near: "location" },
     // M4-02：概览集合（02 §10 / 契约 OverviewSpec）。
     // zones.id 与 zones.near 是**地点**引用（命名河流作为已登记自然地点参与互动）；
     // links.id 是**路线**引用（不得凭空造路）；features.zoneId 是地点引用，
@@ -15566,7 +15612,7 @@ ${lines.join("\n")}
         links: ["id"],
         features: ["zoneId"],
         districts: ["id"],
-        buildings: ["id", "districtId"],
+        buildings: ["id", "districtId", "near"],
         rooms: ["id"],
         contents: ["roomId"],
         actors: ["id", "roomId"],
@@ -16168,6 +16214,7 @@ ${lines.join("\n")}
     if (work) request.messages[1].content += "\n【整组地图规划】本批可同时包含不同种类和多层父子地图；一次返回所有列出地图的约束。hierarchy 标明父图与共享空间。父子共用 childSpaces/spaceSize 尺寸，程序从父到子求解坐标、继承轮廓；不为每层再请求，不输出独立坐标或改变父子归属。";
     request.messages[1].content += "\n每个操作外层只含 op、ref、data 和可选 why。op 固定 map.layout.request；ref 使用本图 map 引用；data 包含给定 kind 和 spec。下面提供本图完整合法 JSON 示例。幅面用程序给定 extent。" + (hasOverview ? "\noverview 的 spec 可含 surface、zones、links、features。zone 用 id、name、role、size，可选 sector 与 near。role 取 city/settlement/forest/water/mountain/ruins/district/campus/land/other；size 取 small/medium/large；sector 取八方向或 center。link 的 id 必须是已登记路线引用。feature 用局部 id、type、可选 zoneId 和 density；density 取 low/medium/high，type 取 forest_texture/ridge/shore/building_cluster/road_texture/ruins_scatter/watercourse。overview 的 zone 必须是本图直属地点或目录里已有的代理入口；links 只能用目录中已登记的路线引用；feature 只是本图局部装饰，永远不产生新实体、也不产生新道路。" : "") + (hasCity ? '\ncity 的 districts 每项必须含 id、name、bank、order；bank 取 west/east，order 为整数。buildings 每项必须含 id、name、districtId、w、h。districts 至少一项；没有已登记街区时，以城市容器的地点引用作为自身街区。每个建筑的 districtId 必须对应本次或已保存街区，不能省略街区声明。新城市默认 enclosure="open"；无河流依据时 riverWidth=0。' : "") + (hasFloor ? "\nfloor 的 rooms 每项用 id/name/w/h/side，side 只能 north 或 south；可选 role=indoor/outdoor/garden，分别表示室内、开放院落、园林。contents 每项用 id/name/type/roomId/w/h，type 只能 shelf/desk/bench/reading/stairs/table/chair/bed/cabinet/doorway/light/decor；actors 每项用 id/roomId，可选 near=陈设ID；items 每项用 id/on=陈设ID。所有键都必须双引号，不得照抄省略号或伪 JSON。" : "") + "\n布局阶段不新建 SQL 实体：所有可交互地点必须已经在目录里。但建设阶段允许新增地点，两者不冲突——不要因为布局不新建实体就停止补全世界。actors/items 是本批有目录引用且在生成器额度内的相关者，不是整张人物表；未发送者仍保存在 SQL，由程序维护位置和地点名单，不能创建替身来凑数。\n不要输出其他操作。";
     request.messages[1].content += "\n父图中的本地点轮廓是下钻边界；子图用于细化同一个空间，不重画成一座无关的城市。相邻街区维持父图的相对方位，不能把外城区、内城区、中心区都复制成同一幅城市模板。size=large/medium/small 必须维持相对面积顺序；没有实体依据的 road_texture 不输出，真实道路仅使用已登记 links。";
+    if (hasCity) request.messages[1].content += "\ncity 建筑有明确邻近关系时，在该 buildings 项写 near=参照建筑引用、sector=north/east/south/west；资料给出两建筑外墙间距时写 gapM=实际米数。gapM 是墙到墙的净距，不是中心距离，也不是全图最小留白。没有明确间距时省略 gapM，不自行精确化。";
     request.anchor = input.anchor;
     request.messages[1].content += "\n细节责任：detail.tier=important 的已登记地点按角色锚点、明确剧情或来源事实补齐细节；ordinary 使用有限、够用的细节。重要性不改变已有尺寸、作者锁，也不把推测设施的延后内部自动升级为开局必建。";
     request.promptInput = {
