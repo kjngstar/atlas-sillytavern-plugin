@@ -2557,8 +2557,8 @@ var init_atlas_ops_prompts = __esm({
       "information.propose": "content；可选 title、kind=observation/report/rumor/announcement/lie/hypothesis、truth=true/false/mixed/unknown、secrecy=public/restricted/secret（默认 restricted）；origin_ref=信息起源地点；spread_at_ref=已公开或可听到此消息的地点，建立当地风声；recipient_ref=明确已获知的人物或势力，建立认知。普通传播不创建新消息副本，不填写程序的传播进度和到达时间",
       "attention.propose": "opportunity_ref, belief",
       "channel.upsert": "owner_ref, kind, name",
-      "map.estimate": "ref + 尺寸或距离依据",
-      "route.propose": "from_ref, to_ref",
+      "map.estimate": "ref=已有地图引用；data.width_m/height_m=资料中的实际长宽（米），或 meters_per_cell_min/meters_per_cell_max=有依据的标定范围；why 说明来源。不能把公里数直接当米，也不把画面缩放当实测比例尺",
+      "route.propose": "data.from_ref、to_ref=两个地点引用；明确通行长度写 distance_m（米），区间写 distance_min_m/distance_max_m；quality=confirmed/estimated，modes 为通行方式数组，可带 map_ref。航程和直线距离同时存在时，航线的 distance_m 用航程，直线距离另作地图方位/标定依据，不能省掉已知航程只登记端点",
       "map.layout.request": "ref + kind(overview/city/floor，以程序给定值为准) + spec（只写本次变化的约束：overview 用 surface/zones/links/features，city 用 districts/buildings/enclosure/riverWidth，floor 用 rooms/contents/actors/items，每条都要 id）；省略的键保持原样，删除只能写 spec.deletes；不要输出完整 scene、几何坐标、seed 或比例尺",
       "space.state.patch": "ref=地图引用 + data.updates 数组，每项 objectRef（本图陈设/门引用，同名家具必须配 locationRef）与至少一个变化字段：openingState=open/closed/not-applicable/unknown、locked=true/false、material=solid/glass/wood/fabric/other/unknown、present=true/false；只改状态，不改尺寸/占地，不重发 scene；canOpen/blocksMovement/blocksSight 是派生值，写了必须和门自身状态一致",
       noop: "无修改"
