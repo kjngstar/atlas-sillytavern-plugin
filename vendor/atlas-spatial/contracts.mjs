@@ -151,6 +151,7 @@ export function checkSceneDocument(doc){
       bad(shape.river,p=>plain(p)&&[p.cx,p.amplitude,p.width,p.height].every(finite)&&p.width>0&&p.height>0,'$.layout.river');}
     else if(shape.riverPolygon?.length||shape.dock!==null)issues.push(diagnostic('SCENE_GEOMETRY_INVALID','$.layout.river','无河流的城市不能保留水域或码头'));
     collection('districts',p=>plain(p)&&polygon(p.polygon)&&point(p.site));collection('buildings',rect);collection('gates',point);
+    if(shape.pins!==undefined)collection('pins',inside,LIMITS.markers);
     for(const key of ['roads','segments'])collection(key,p=>plain(p)&&point(p.a)&&point(p.b)&&finite(p.width)&&p.width>0);
   }else if(shape?.kind==='overview'){
     if(shape.surface!==undefined&&!OVERVIEW_SURFACES.includes(shape.surface))issues.push(diagnostic('SCENE_ENUM_INVALID','$.layout.surface','概览表面类型非法'));
