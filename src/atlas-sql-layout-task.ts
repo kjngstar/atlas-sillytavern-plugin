@@ -25,7 +25,7 @@ import { buildStagePrompt } from './atlas-ops-prompts.ts';
 import { normalizeFrame, normalizeSqlMapFrame } from './atlas-spatial-frame.ts';
 import { ATLAS_RUNTIME_LIMITS } from './atlas-runtime-limits.ts';
 import { workBatchSize } from './atlas-work-batching.ts';
-import { normalizeModelBatching, planningOutputTokens } from './atlas-model-batching.ts';
+import { normalizeGenerationOptions, normalizeModelBatching, planningOutputTokens } from './atlas-model-batching.ts';
 import { stableHexHash } from './atlas-hash.ts';
 import { resolveLocationDetailTier } from './atlas-world-build-plan.ts';
 import { readWorldFacts } from './atlas-world-build-state.ts';
@@ -891,7 +891,7 @@ export function buildSqlLayoutTask(
     batchId: `layout_${turnId}`,
     mapScope: JSON.stringify(scopes),
     geoMissing: '必须为以上地图生成或更新可绘制空间布局，每张图一行 map.layout.request。仅有坐标点不算完成。',
-    geoSources: options?.combinedSpatial ? '空间事实与原始依据随观察保留；使用本次地理来源和已登记事实共同规划，不再另行请求摘录。' : '第一步验证的位置依据将在发送布局请求前附加；本阶段不接收原始剧情或世界书。',
+    geoSources: options?.combinedSpatial || normalizeGenerationOptions(input.generationOptions).spatialPipeline==='combined' ? '空间事实与原始依据随观察保留；使用本批提供的空间来源和已登记事实规划，不再另行请求摘录。' : '第一步验证的位置依据将在发送布局请求前附加；本阶段不接收原始剧情或世界书。',
     mapLayoutIds: catalogue.knownRefs.map((item) => `${item.alias}=${item.id}`).join('\n'),
     mapLayoutFrame: [
       'extent 是程序给定的幅面；kind 与 units 以每张图给出的值为准，不得改写。',

@@ -43,6 +43,7 @@ test('12 maps use one planning request with original sources and no paid evidenc
   const result=await f.repo.prepareTurn(input({layoutMaps:f.ids,sourceSnapshot:[{key:'story',kind:'story',text:'地图中的道路相互连通。'}]}));
   assert.equal(f.calls.length,1);assert.equal(f.calls[0].promptMode,undefined);assert.equal(f.calls[0].batchTargets.count,12);
   assert.ok(f.calls[0].messages[1].content.includes('地图中的道路相互连通。'));
+  assert.ok(!f.calls[0].messages[1].content.includes('本阶段不接收原始剧情或世界书'));
   const db=f.repo.getCandidate(result.token).db;for(const id of f.ids)assert.ok(scene(db,id));
   const usage=JSON.parse(queryBound(db,'SELECT decisions_json FROM turns WHERE id=?',[result.receipt.turnId])[0].decisions_json).work_usage;
   assert.deepEqual(usage,{normal:{maps:1},extra:0,transports:1});
