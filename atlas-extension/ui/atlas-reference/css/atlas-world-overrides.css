@@ -113,7 +113,8 @@
 /* Missing geographic placement is a navigable place overview, not a fake parcel. */
 #atlasDemo .place-structure{position:absolute;inset:74px 26px 54px;z-index:6;overflow:auto;display:flex;align-items:center;justify-content:center;color:var(--txt);}
 #atlasDemo .place-structure[hidden],#atlasDemo .viewport.page-open .place-structure{display:none;}
-#atlasDemo .structure-content{width:min(100%,480px);padding:24px;box-sizing:border-box;background:var(--win-1);border:1px solid var(--line-2);border-radius:16px;box-shadow:0 10px 36px rgba(0,0,0,.08);}
+#atlasDemo .viewport.structure-view{background:var(--win-1);}
+#atlasDemo .structure-content{width:min(100%,480px);padding:24px;box-sizing:border-box;}
 #atlasDemo .structure-content h3{font-size:22px;font-weight:600;margin:10px 0 12px;}
 #atlasDemo .structure-content section{margin-top:22px;}
 #atlasDemo .structure-entries{display:grid;gap:5px;margin-top:9px;}
