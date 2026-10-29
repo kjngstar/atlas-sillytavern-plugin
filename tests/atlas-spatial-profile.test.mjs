@@ -41,6 +41,19 @@ const BRANCH = IDS.branchMain;
 const TURN = 'turn_profile';
 const SCOPE = { chatId: IDS.chatA, branchId: BRANCH, revision: 5, viewMode: 'author' };
 
+test('停靠载具不要求街区图生成静态室内足迹，未知锚点仍明确不支持',()=>{
+  const vehicle={id:'boat',kind:'vehicle',mobility:'mobile',anchor_location_id:'pier'};
+  const input={map:{id:'port-map',frame_json:{}},container:{id:'port',kind:'district'},members:[{id:'office',kind:'building'},{id:'pier',kind:'other'},vehicle]};
+  const resolved=resolveSpatialProfile(input);
+  assert.equal(resolved.layoutKind,'city');
+  assert.deepEqual(resolved.unsupported,[]);
+  assert.equal(resolved.partial,false);
+  const unknown=resolveSpatialProfile({...input,members:[{...vehicle,anchor_location_id:null}]});
+  assert.deepEqual(unknown.unsupported.map(m=>m.id),['boat']);
+  assert.equal(vehicle.kind,'vehicle');
+  assert.equal(vehicle.mobility,'mobile');
+});
+
 // 复合驿站：场地 + 已知建筑 + 开放停靠区；建筑里有房间；官道与沿途地点。
 const SITE = 'L_SITE';
 const BLD = 'L_BLD';
