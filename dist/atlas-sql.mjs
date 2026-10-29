@@ -5240,7 +5240,7 @@ function projectMapView({ view, mapId, scope } = {}) {
     let polygon2 = null;
     const area = geometry(p.area, "$.points.area");
     if (area?.kind === "polygon" && Array.isArray(area.points) && area.points.length >= 3 && area.points.every((q) => finite(q.x) && finite(q.y))) polygon2 = area.points.map((q) => ({ x: q.x * k, y: q.y * k }));
-    pins.push({ id: p.entityId, entityId: p.entityId, name: String(p.name ?? ""), type: p.kind === "character" ? "person" : p.kind, mapId, x: p.x * k, y: p.y * k, quality: p.markerQuality ?? p.precision ?? "approximate", locationId: p.locationId ?? null, radius: finite(p.radius) ? p.radius * k : null, polygon: polygon2 });
+    pins.push({ id: p.entityId, entityId: p.entityId, name: String(p.name ?? ""), type: p.kind === "character" ? "person" : p.kind, mapId, x: p.x * k, y: p.y * k, quality: p.markerQuality ?? p.precision ?? "approximate", locationId: p.locationId ?? null, radius: finite(p.radius) ? p.radius * k : null, polygon: polygon2, ...p.isProtagonist === true ? { isProtagonist: true } : {} });
   }
   const xs = pins.map((p) => p.x), ys = pins.map((p) => p.y);
   const bounds = finite(frameWidth) && frameWidth > 0 && finite(frameHeight) && frameHeight > 0 ? { x: finite(frame.origin_x) ? frame.origin_x * k : 0, y: finite(frame.origin_y) ? frame.origin_y * k : 0, w: frameWidth * k, h: frameHeight * k } : { x: Math.min(0, ...xs) - k, y: Math.min(0, ...ys) - k, w: Math.max(k, Math.max(0, ...xs) - Math.min(0, ...xs) + 2 * k), h: Math.max(k, Math.max(0, ...ys) - Math.min(0, ...ys) + 2 * k) };
@@ -5487,6 +5487,16 @@ function hydrateScene(scene, projection, { pointLocationIds = [] } = {}) {
     const p = P.get(a.id);
     return p && p.quality !== "layout" ? { ...a, x: p.x, y: p.y, quality: p.quality, name: p.name } : a;
   });
+  const rooms = new Map([...s.rooms ?? [], ...s.areas ?? [], ...s.hostArea ? [s.hostArea] : []].map((r) => [r.id, r]));
+  for (const [key, type] of [["actors", "person"], ["items", "item"]]) {
+    const represented = new Set(s[key].map((p) => p.id));
+    for (const p of pins) {
+      const room = rooms.get(p.locationId);
+      if (p.type !== type || represented.has(p.id) || !room || !finite(p.x) || !finite(p.y) || p.x < room.x || p.y < room.y || p.x > room.x + room.w || p.y > room.y + room.h) continue;
+      s[key].push({ ...clone(p), roomId: p.locationId });
+      represented.add(p.id);
+    }
+  }
   s.path = [];
   return { ok: true, scene: d, issues: [] };
 }
