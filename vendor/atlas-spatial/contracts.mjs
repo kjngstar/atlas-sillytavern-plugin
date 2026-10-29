@@ -11,7 +11,7 @@ export const FRAME_SPACE_CANONICAL_KEY = 'atlasSpaceCanonical';
 export function readMetricDimensions(area) {
   if (!area || area.kind !== 'dimensions' || !['confirmed','estimated'].includes(area.quality)) return null;
   const {widthM,heightM}=area;
-  if (![widthM,heightM].every(v=>Number.isFinite(v)&&v>=.2&&v<=20000)) return null;
+  if (![widthM,heightM].every(v=>Number.isFinite(v)&&v>=.2)) return null;
   return {widthM,heightM};
 }
 /**

@@ -4,6 +4,7 @@ import {collectEntityRefs,collectKnownRefs} from './atlas-sql-refs.ts';
 import type {KnownRef} from './atlas-sql-refs.ts';
 import type {TableReadPort} from './atlas-ops-compile-types.ts';
 import type {TurnInput,Phase} from './atlas-ops-contract.ts';
+import {normalizeFrame} from './atlas-spatial-frame.ts';
 /**
  * P08/R05：提示词目录与编译目录必须是**同一份**。
  *
@@ -19,7 +20,8 @@ export function buildSqlForegroundRequest(tables:TableReadPort,branchId:string,i
  const entityRefs=collectEntityRefs(tables,branchId,known);
  const request=buildStagePrompt({phase,assistantSource:input.assistantText,userSource:input.userText,entityRefs,
   geoEntities:entityRefs.join('\n'),mapScope:JSON.stringify(tables.selectWhere('maps',{branch_id:branchId,status:'active'},1000)
-   .map(map=>({ref:known.find(ref=>ref.id===map.id)?.alias,name:map.name,frame:map.frame_json,scaleLocked:map.scale_locked}))),
+   .map(map=>{const frame=normalizeFrame(map.frame_json);return {ref:known.find(ref=>ref.id===map.id)?.alias,name:map.name,
+     frame:{cols:frame.cols,rows:frame.rows},metersPerCell:map.meters_per_cell,scaleQuality:map.scale_quality,scaleLocked:map.scale_locked};})),
   geoSources:input.assistantText,sourceSnapshot:input.sourceSnapshot,batchId:`${phase}_${turnId}`});
  request.anchor=input.anchor;request.sourceSnapshot=input.sourceSnapshot;
  request.promptInput={injectionText:entityRefs.join('\n'),userText:input.userText,assistantText:input.assistantText,

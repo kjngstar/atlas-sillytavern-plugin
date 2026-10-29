@@ -79,7 +79,7 @@ const asId = (value: unknown): string | null => (typeof value === 'string' && va
 const finite = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value);
 const asText = (value: unknown): string | null => (typeof value === 'string' && value ? value : null);
 
-/** 单轴合法性：有限、正、在 0.2–20000 米之间。 */
+/** 单轴合法性：有限且至少 0.2 米；区域与建筑共用同一尺寸合同。 */
 function validSide(value: unknown): value is number {
   return finite(value) && value >= SPACE_MIN_SIDE_M;
 }
