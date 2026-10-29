@@ -164,7 +164,7 @@ function frameChrome(st){
  if($('#scaleLabel').textContent!==label)$('#scaleLabel').textContent=label;
  $('#scaleLabel').dataset.distance=q?.schematic||scale.distance===null?'':String(scale.distance);
  $('#scaleLabel').dataset.estimated=scale.estimated?'1':'';
- bar.dataset.width=String(scale.width);
+ bar.dataset.width=String(scale.width);bar.style.visibility=q?.schematic?'hidden':'';
  $('#mmZoom').textContent=Math.round(st.cam.s/map.fitScale()*100)+'%';
  $('#coordLabel').textContent=`${q?.schematic?'方位与比例待定 · 双击区域进入':`X ${st.cam.x.toFixed(1)} · Y ${st.cam.y.toFixed(1)}`}`;
 }
