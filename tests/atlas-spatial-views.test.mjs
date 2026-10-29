@@ -212,6 +212,24 @@ function seedPovKnowledge(db) {
   insertRows(db, 'knowledge', [know('K_L3', 'INFO_L3'), know('K_C3', 'INFO_C3')]);
 }
 
+test('SQL 已进入空房间的人物在只读场景中可见并参与完整性评估，秘密人物仍隔离',async()=>{
+  const {seed,ctx}=await seeded();
+  try{
+    seedPovKnowledge(seed.db);
+    const scene=classroomScene();scene.units='meters';scene.metersPerCell=1;scene.layout.actors=[];scene.layout.items=[];
+    seed.db.run("UPDATE maps SET frame_json=?,meters_per_cell=1,scale_quality='estimated' WHERE branch_id=? AND id=?",[JSON.stringify({cols:20,rows:15,atlasScene:scene}),BRANCH,IDS.M2]);
+    const before=seed.db.export();
+    const author=querySpatialScene(ctx,{kind:'scene',branchId:BRANCH,mapId:IDS.M2}).items.find(m=>m.mapId===IDS.M2);
+    const actor=author.scene.layout.actors.find(a=>a.id===IDS.C1);
+    assert.ok(actor,'已经通过 SQL 到达的人物不能因旧场景未画人而消失');
+    assert.equal(actor.roomId,IDS.L3);assert.equal(actor.x,5);assert.equal(actor.y,6);
+    assert.ok(!author.assessment.missingIds.includes(IDS.C1));
+    const pov=querySpatialScene(povCtx(ctx),{kind:'scene',branchId:BRANCH,mapId:IDS.M2});
+    assert.ok(!JSON.stringify(pov).includes(HIDDEN.actor));
+    assert.deepEqual(seed.db.export(),before,'人物展示投影不得修改存档');
+  }finally{seed.close();}
+});
+
 function writeSceneFrame(db, mapId, scene, extra = {}) {
   const frame = { origin_x: 0, origin_y: 0, reference_width_cells: 20, reference_height_cells: 15, ...extra };
   if (scene) frame.atlasScene = scene;
