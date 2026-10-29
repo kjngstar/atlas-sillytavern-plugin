@@ -116,21 +116,23 @@ test('地图按真实父子关系导航，同类场所可以连续嵌套，界�
  await tick();
  assert.equal(preview.state.nodeId,'garden');assert.deepEqual(calls.build,[]);
 });
-test('无地理落点的大场所显示真实子地点入口，导航不发模型请求，有几何后恢复地图',async t=>{
+test('父图保留可点击的画布略图，进入子图后显示细节且不发模型请求',async t=>{
  const dock={mapId:'dock',name:'渡口',kind:'site',containerLocationId:'dock-place',containerLocationKind:'other',parentMapId:'world',connectionQuality:'contained',points:[]};
  const shelter={mapId:'shelter',name:'候船棚',kind:'interior',containerLocationId:'shelter-place',containerLocationKind:'building',parentMapId:'dock',connectionQuality:'contained',points:[]};
- const scene={kind:'atlas-scene',units:'cells',layout:{kind:'overview',bounds:{x:0,y:0,w:100,h:100},shapes:[],pins:[],routes:[],features:[],selfArea:{locationId:'dock-place',name:'渡口',source:'frame',quality:'layout',polygon:[{x:0,y:0},{x:100,y:0},{x:100,y:100},{x:0,y:100}]}}};
- const data=projectReferenceData({mapView:view([WORLD,dock,shelter]),sceneView:view([{mapId:'dock',scene}]),catalogView:view([]),viewMode:'author'});
+ const scene={kind:'atlas-scene',units:'meters',layout:{kind:'floor',bounds:{x:0,y:0,w:12,h:8},rooms:[{id:'shelter-place',name:'候船棚',x:0,y:0,w:12,h:8}],corridor:{x:0,y:8,w:0,h:0},doors:[],groups:[],actors:[],items:[]}};
+ const data=projectReferenceData({mapView:view([WORLD,dock,shelter]),sceneView:view([{mapId:'shelter',scene}]),catalogView:view([]),viewMode:'author'});
  const {w,preview,calls}=withUI(t,{data});preview.go('dock');
- const overlay=w.document.getElementById('placeStructure');assert.equal(overlay.hidden,false);
- assert.match(overlay.textContent,/候船棚/);assert.match(overlay.textContent,/实际位置与距离尚待确认/);
- assert.equal(w.document.getElementById('map').getAttribute('aria-hidden'),'true');
- overlay.querySelector('[data-go="shelter"]').click();await tick();assert.equal(preview.state.nodeId,'shelter');
- assert.deepEqual(calls.build,[]);preview.go('dock');
- const ready=structuredClone(scene);ready.layout.selfArea.source='canonical';ready.layout.selfArea.quality='confirmed';
- const updated=projectReferenceData({mapView:view([WORLD,dock,shelter]),sceneView:view([{mapId:'dock',scene:ready}]),catalogView:view([]),viewMode:'author'});
- preview.updateSnapshot(updated);assert.equal(overlay.hidden,true);assert.equal(w.document.getElementById('map').getAttribute('aria-hidden'),'false');
+ assert.equal(w.document.getElementById('placeStructure'),null);
+ assert.equal(w.document.getElementById('map').getAttribute('aria-hidden'),null);
+ const sketch=preview.map.state.geo.exploration;assert.equal(sketch.areas[0].nodeId,'shelter');assert.equal(sketch.areas[0].recorded,true);
+ assert.equal(preview.map.scaleQuality().schematic,true);
+ const canvas=w.document.getElementById('map'),area=sketch.areas[0],st=preview.map.state,r=canvas.getBoundingClientRect();
+ canvas.dispatchEvent(new w.MouseEvent('dblclick',{bubbles:true,clientX:r.left+(area.x-st.cam.x)*st.cam.s+st.vw/2,clientY:r.top+(area.y-st.cam.y)*st.cam.s+st.vh/2}));
+ await tick();assert.equal(preview.state.nodeId,'shelter');assert.equal(preview.map.state.geo.exploration,undefined);
+ assert.equal(preview.map.scaleQuality().calibrated,true);assert.deepEqual(calls.build,[]);
+ preview.go('dock');assert.equal(preview.map.state.geo.exploration.areas[0].nodeId,'shelter');
 });
+
 test('楼层用原生选择器导航；未明楼层房间保留入口，导航不会偷偷请求生成',async t=>{
  const upper={mapId:'upper-map',name:'二楼',kind:'interior',containerLocationId:'upper',containerLocationKind:'floor',parentMapId:'bld-map',points:[]};
  const pantry={mapId:'pantry-map',name:'厨房',kind:'interior',containerLocationId:'pantry',containerLocationKind:'room',parentMapId:'bld-map',points:[]};
