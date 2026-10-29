@@ -40,7 +40,7 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 var define_ATLAS_BUILD_INFO_default;
 var init_define_ATLAS_BUILD_INFO = __esm({
   "<define:__ATLAS_BUILD_INFO__>"() {
-    define_ATLAS_BUILD_INFO_default = { pluginVersion: "0.9.100", buildId: "build-84098396e869a635", buildCommit: "dde51a47e50f4360b82d77b0bf64a6c1b0802c3e", buildDirty: false };
+    define_ATLAS_BUILD_INFO_default = { pluginVersion: "0.9.100", buildId: "build-0e552e9e3c09e114", buildCommit: "d6eae79a99f664963318110d219d7e0cfef841f1", buildDirty: false };
   }
 });
 

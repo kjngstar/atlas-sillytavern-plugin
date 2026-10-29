@@ -498,9 +498,7 @@ function create(canvas, mini, hooks){
       ctx.fillStyle=confirmed?'rgba(67,224,255,.07)':'rgba(127,212,255,.05)';ctx.fill();
       ctx.strokeStyle=confirmed?'rgba(67,224,255,.60)':'rgba(127,212,255,.42)';
       ctx.lineWidth=1.3/cam;ctx.setLineDash(confirmed?[]:[7/cam,5/cam]);ctx.stroke();ctx.setLineDash([]);
-      const cx=sa.pts.reduce((a,p)=>a+p[0],0)/sa.pts.length, cy=sa.pts.reduce((a,p)=>a+p[1],0)/sa.pts.length;
-      pushLabel(cx,cy-7,sa.name||'当前场所','#bcd6ee','name',true);
-      pushLabel(cx,cy+11,confirmed?'范围（已确认）':'范围示意 · 未标定','rgba(140,170,200,.75)','sub',true);
+      // 当前场所的名字已在标题栏；边界内留给实际地形、子地点和通行关系。
     }
     // ② zone 填色
     for(const shape of g.overviewShapes||[]){
@@ -1044,7 +1042,7 @@ function create(canvas, mini, hooks){
       // M6-06③：副标题只写**真实字段**。旧代码在这里硬写「禁书区 · 上锁」——
       // 那是示例世界的文案，会被原样印到任何世界的图上。现在有 status 用 status，
       // 没有就写中性描述，绝不为哪个房间编一个剧情状态。
-      if(r!==g.hostArea){pushLabel(x+w/2, y+h/2 - 4, r.name, !!r.live?C.cyan:'#a8bdd6', !!r.live?'live':'name', true);
+      if(r!==g.hostArea&&!r.isContainer){pushLabel(x+w/2, y+h/2 - 4, r.name, !!r.live?C.cyan:'#a8bdd6', !!r.live?'live':'name', true);
       pushLabel(x+w/2, y+h-13, r.status || (r.kind==='vehicle'?'车厢内部':r.role==='garden'?'园林 · 示意':r.role==='outdoor'?'室外 · 示意':r.kind==='exit'?'通道':'房间'), 'rgba(140,170,200,.75)','sub', true);}
     });
 
