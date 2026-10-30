@@ -108,6 +108,15 @@ function mapRuntime({ctx, st, pushLabel, sections}){
 }
 const FLOOR = [['function floorMap(', 'function drawFurn('], ['function drawFurn(', '/* ── L6 房间 ──']];
 const CITY = [['function cityMap(', '/* ── L3 街区 ──']];
+test('区域总览绘制不同色块，不在这一层绘制子图陈设',()=>{
+ const {ctx,log}=recordCtx(),labels=[];let details=0;
+ const runtime=mapRuntime({ctx,st:{cam:{s:1},showLabels:true},pushLabel:(...v)=>labels.push(v),sections:[['function drawBridgeSymbol(', 'function overviewMap(']]});
+ runtime.drawFurn=()=>details++;
+ const parts=[[[0,0],[100,0],[100,100],[0,100]]];
+ runtime.explorationMap({level:'regions',surface:{outlines:[]},passages:[],areas:[{id:'A',nodeId:'a',name:'西区',x:0,y:0,c:'#6799b1',parts,details:[{r:[1,1,3,3]}]},{id:'B',nodeId:'b',name:'东区',x:100,y:0,c:'#a58ab5',parts,details:[]}]});
+ assert.ok(log.some(v=>v.op==='fill'&&v.fill==='#6799b1@0.29'));assert.ok(log.some(v=>v.op==='fill'&&v.fill==='#a58ab5@0.29'));
+ assert.equal(details,0);assert.deepEqual(labels.map(v=>v[2]),['西区','东区']);
+});
 const ROOM = [['function roomMap(', 'function hexA(hex,a)']];
 
 function sceneRuntime(sections, geo, extra = {}){

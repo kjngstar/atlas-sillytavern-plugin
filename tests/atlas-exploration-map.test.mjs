@@ -45,7 +45,7 @@ test('父地点和已知邻区以实际路线生成出口，隐藏或不存在�
  const f=fixture(),outside={id:'road',containerLocationId:'road-place',name:'旧路',geo:{},marks:[],children:[]};f.nodes.set('road',outside);f.locations.push({id:'road-place'});
  f.maps[0].routes.push({routeId:'exit',fromLocationId:'station-place',toLocationId:'road-place',distanceM:3200});
  projectExplorationMaps(f.nodes,f.locations,{maps:f.maps});const s=f.parent.geo.exploration;
- assert.equal(s.areas.find(a=>a.nodeId==='road').external,true);assert.equal(s.passages.find(e=>e.id==='exit').distanceM,3200);assert.ok(s.surface.forecourt);assert.equal(s.hub,undefined);
+ assert.equal(s.areas.find(a=>a.nodeId==='road').external,true);assert.equal(s.passages.find(e=>e.id==='exit').distanceM,3200);assert.equal(s.surface.forecourt,null);assert.equal(s.hub,undefined);
 });
 test('缺少父图的场所沿用子图实际出入口，移动载具不生成固定地块',()=>{
  const f=fixture();f.hall.geo.doors=[{x:4,y:8,w:1.2,wall:'south'}];
