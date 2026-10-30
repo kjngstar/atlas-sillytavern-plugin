@@ -133,6 +133,18 @@ test('父图保留可点击的画布略图，进入子图后显示细节且不�
  preview.go('dock');assert.equal(preview.map.state.geo.exploration.areas[0].nodeId,'shelter');
 });
 
+test('地图入口无需悬停即可发现，单击原生按钮进入细图，平移不丢焦点且不发模型请求',async t=>{
+ const road={mapId:'road',name:'旧驿道',kind:'site',containerLocationId:'road-place',containerLocationKind:'other',parentMapId:'world',points:[]};
+ const bridge={mapId:'bridge',name:'石桥',kind:'site',containerLocationId:'bridge-place',containerLocationKind:'other',parentMapId:'road',points:[]};
+ const scene={kind:'atlas-scene',units:'cells',layout:{kind:'overview',bounds:{x:0,y:0,w:100,h:100},shapes:[],pins:[],routes:[],features:[{id:'river',type:'watercourse',path:[{x:50,y:0},{x:50,y:50},{x:50,y:100}],width:8}]}};
+ const data=projectReferenceData({mapView:view([WORLD,road,bridge]),sceneView:view([{mapId:'bridge',scene}]),catalogView:view([{entityId:'bridge-place',entityKind:'location',locationKind:'other',name:'石桥',mapId:'road'},{entityId:'road-place',entityKind:'location',locationKind:'other',name:'旧驿道',mapId:'world'}]),viewMode:'author'});
+ const {w,preview,calls}=withUI(t,{data});preview.go('road');preview.map.setPaused(true);preview.map.resize();
+ const entry=w.document.querySelector('#mapEntries [aria-label="进入石桥地图"]');assert.ok(entry);assert.equal(entry.tagName,'BUTTON');assert.equal(entry.textContent,'进入 ›');assert.equal(w.document.getElementById('mapEntries').hidden,false);
+ entry.focus();preview.map.state.cam.x+=4;preview.map.resize();assert.equal(w.document.querySelector('#mapEntries button'),entry);assert.equal(w.document.activeElement,entry);
+ entry.click();await tick();assert.equal(preview.state.nodeId,'bridge');assert.equal(w.document.getElementById('mapEntries').hidden,true);assert.deepEqual(calls.build,[]);
+ assert.match(w.document.getElementById('map').getAttribute('aria-label'),/进入按钮/);
+});
+
 test('楼层用原生选择器导航；未明楼层房间保留入口，导航不会偷偷请求生成',async t=>{
  const upper={mapId:'upper-map',name:'二楼',kind:'interior',containerLocationId:'upper',containerLocationKind:'floor',parentMapId:'bld-map',points:[]};
  const pantry={mapId:'pantry-map',name:'厨房',kind:'interior',containerLocationId:'pantry',containerLocationKind:'room',parentMapId:'bld-map',points:[]};

@@ -1,5 +1,6 @@
 /** Coarse, read-only map drawing. A sketch never supplies SQL positions or distances. */
 import {surveySurface} from './atlas-survey-surface.mjs';
+import {mapSymbolKind,bridgeMapSymbol} from './atlas-map-symbols.mjs';
 const point=p=>Array.isArray(p)&&p.length===2&&p.every(Number.isFinite);
 const polygon=p=>Array.isArray(p)&&p.length>=3&&p.every(point);
 const rect=r=>[[r.x,r.y],[r.x+r.w,r.y],[r.x+r.w,r.y+r.h],[r.x,r.y+r.h]];
@@ -9,8 +10,9 @@ const palette=['#639aaf','#8d91bb','#88a38c','#b49a74'];
 
 // Use the child's recorded outline, with its proportions intact. Furniture is
 // deliberately omitted at this level; entering the child exposes its full map.
-function footprint(node,depth=0){
+function footprint(node,depth=0,symbol=null){
  const g=node.geo??{};
+ if(symbol==='bridge'&&!g.rooms?.length&&!g.hostArea&&!g.selfArea&&!g.overviewShapes?.length){const bridge=bridgeMapSymbol(g,{thumbnail:true});return {recorded:false,symbol:'bridge',bridge,parts:[bridge.deck],features:[],entrances:[]};}
  const parts=[...(g.overviewShapes??[]),...(g.districts??[])].filter(s=>polygon(s.pts)).map(s=>s.pts);
  if(!parts.length)parts.push(...(g.rooms??[]).filter(validRect).map(rect));
  if(!parts.length&&polygon(g.selfArea?.pts))parts.push(g.selfArea.pts);
@@ -28,12 +30,15 @@ function footprint(node,depth=0){
 }
 
 export function projectExplorationMaps(nodes,locations,{maps=[],viewMode='player'}={}){
+ const places=new Map(locations.map(l=>[l.id,l]));
  const byPlace=new Map([...nodes.values()].filter(n=>n.containerLocationId).map(n=>[n.containerLocationId,n]));
  const visible=new Set(locations.map(l=>l.id));
  const routes=[...new Map(maps.flatMap(m=>m.routes??[]).filter(r=>r.hidden!==true||viewMode==='author').map(r=>[r.routeId??r.id,r])).values()];
  const source=new Map([...nodes].map(([id,n])=>[id,{...n,geo:structuredClone(n.geo)}]));
  for(const n of nodes.values()){
   const g=n.geo??{};
+  const ownSymbol=(viewMode==='author'||visible.has(n.containerLocationId))?mapSymbolKind(n,places.get(n.containerLocationId)):null;
+  if(ownSymbol==='bridge'&&!g.rooms?.length&&!g.hostArea&&!g.selfArea&&!g.overviewShapes?.length)g.bridgeSymbol=bridgeMapSymbol(g);
   // Existing local geometry remains authoritative. Never re-layout a real floor,
   // terrain map, measured footprint, or locations that already have positions.
   const outlines=[...(g.overviewShapes??[]),...(g.districts??[])];
@@ -63,10 +68,10 @@ export function projectExplorationMaps(nodes,locations,{maps=[],viewMode='player
   if(!local.size)continue;
   const areas=[...local.values()].sort(sort).map((c,i)=>({id:c.containerLocationId,nodeId:c.id,name:c.name,
    external:!children.includes(c),mobile:locations.find(l=>l.id===c.containerLocationId)?.mobility==='mobile',
-   c:palette[i%palette.length],...footprint(source.get(c.id)??c)}));
+   c:palette[i%palette.length],...footprint(source.get(c.id)??c,0,(viewMode==='author'||visible.has(c.containerLocationId))?mapSymbolKind(c,places.get(c.containerLocationId)):null)}));
   // A neighbouring map is an exit at the edge of this view, not another giant
   // territory pasted into the current interior.
-  for(const a of areas){if(a.external){a.parts=[[[-16,-20],[16,-20],[16,20],[-16,20]]];a.recorded=false;}if(a.mobile){a.parts=[[[-18,-12],[18,-12],[18,12],[-18,12]]];a.entrances=[];}}
+  for(const a of areas){if(a.external){a.parts=[[[-16,-20],[16,-20],[16,20],[-16,20]]];a.recorded=false;a.symbol=null;a.bridge=null;}if(a.mobile){a.parts=[[[-18,-12],[18,-12],[18,12],[-18,12]]];a.entrances=[];}}
   // Connected components occupy compact rows. Route length does not determine
   // screen length: this view explicitly has no metric scale or north arrow.
   const ordered=[],remaining=new Set(areas.map(a=>a.nodeId));
@@ -90,25 +95,29 @@ export function projectExplorationMaps(nodes,locations,{maps=[],viewMode='player
   let spacing=Infinity;
   for(let i=0;i<anchored.length;i++)for(let j=0;j<i;j++){const a=anchors.get(anchored[i].id),b=anchors.get(anchored[j].id);spacing=Math.min(spacing,Math.hypot(a.x-b.x,a.y-b.y));}
   const thumbnailScale=Math.min(1,Math.max(.2,spacing/290));
-  for(const a of anchored){const p=anchors.get(a.id);a.x=p.x;a.y=p.y;a.parts=a.parts.map(poly=>poly.map(([x,y])=>[x*thumbnailScale,y*thumbnailScale]));a.entrances=(a.entrances??[]).map(d=>({...d,x:d.x*thumbnailScale,y:d.y*thumbnailScale,w:d.w*thumbnailScale}));}
+  for(const a of anchored){const p=anchors.get(a.id);a.x=p.x;a.y=p.y;if(a.symbol==='bridge')continue;a.parts=a.parts.map(poly=>poly.map(([x,y])=>[x*thumbnailScale,y*thumbnailScale]));a.entrances=(a.entrances??[]).map(d=>({...d,x:d.x*thumbnailScale,y:d.y*thumbnailScale,w:d.w*thumbnailScale}));}
   const inside=areas.filter(a=>!a.external);
+  const crossing=inside.length===1&&inside[0].symbol==='bridge'?inside[0]:null;
   if(inside.length){
    const xs=inside.map(a=>a.x),ys=inside.map(a=>a.y),cx=(Math.min(...xs)+Math.max(...xs))/2,cy=(Math.min(...ys)+Math.max(...ys))/2;
-   hub[0]=cx;hub[1]=selfEdges.length?cy+95:cy;
-   areas.filter(a=>a.external).forEach((a,i)=>{a.x=i%2?Math.max(...xs)+180:Math.min(...xs)-180;a.y=cy+95+Math.floor(i/2)*120;});
+   const bridgeCrossing=!!crossing;
+   hub[0]=cx;hub[1]=selfEdges.length&&!bridgeCrossing?cy+95:cy;
+   areas.filter(a=>a.external).forEach((a,i)=>{a.x=i%2?Math.max(...xs)+180:Math.min(...xs)-180;a.y=(bridgeCrossing?cy:cy+95)+Math.floor(i/2)*120;});
   }
   const positions=new Map(areas.map(a=>[a.nodeId,[a.x,a.y]]));
   positions.set(n.id,hub);
-  const atBoundary=(id,toward)=>{const p=positions.get(id),area=areas.find(a=>a.nodeId===id);if(!area)return p;
+  const atBoundary=(id,toward)=>{const p=positions.get(id),area=areas.find(a=>a.nodeId===id);
+   if(id===n.id&&crossing){const b=crossing.bridge,c=[crossing.x+b.center[0],crossing.y+b.center[1]],sign=(toward[0]-c[0])*b.across[0]+(toward[1]-c[1])*b.across[1]>=0?1:-1;return [c[0]+sign*b.across[0]*b.half,c[1]+sign*b.across[1]*b.half];}
+   if(!area)return p;
    const pts=area.parts.flat(),hx=Math.max(...pts.map(q=>Math.abs(q[0]))),hy=Math.max(...pts.map(q=>Math.abs(q[1]))),dx=toward[0]-p[0],dy=toward[1]-p[1];
    const k=Math.min(dx?hx/Math.abs(dx):Infinity,dy?hy/Math.abs(dy):Infinity);return Number.isFinite(k)?[p[0]+dx*k,p[1]+dy*k]:p;};
   const passages=edges.map(e=>{const a=atBoundary(e.from,positions.get(e.to)),b=atBoundary(e.to,positions.get(e.from));return {...e,points:[a,[(a[0]+b[0])/2,a[1]],[(a[0]+b[0])/2,b[1]],b]};});
   const sharedSite=!!n.containerLocationId&&!['world','region','city'].includes(n.containerLocationKind??n.renderKind);
   const surface=surveySurface(areas,passages,{sharedSite,hub:selfEdges.length?hub:null});
-  const all=[...areas.flatMap(a=>a.parts.flat().map(([x,y])=>[x+a.x,y+a.y])),...passages.flatMap(e=>e.points),...surface.outlines.flat()];
+  const all=[...areas.flatMap(a=>[...a.parts.flat(),...(a.bridge?.river?.points??[])].map(([x,y])=>[x+a.x,y+a.y])),...passages.flatMap(e=>e.points),...surface.outlines.flat()];
   const xs=all.map(p=>p[0]),ys=all.map(p=>p[1]);
   n.geo={...g,exploration:{areas,passages,surface,
    bounds:[Math.min(...xs)-65,Math.max(...xs)+65,Math.min(...ys)-55,Math.max(...ys)+90],
-   note:sharedSite?'场地略图 · 范围与方位为示意':'区域略图 · 方位与比例待定',displayOnly:true}};
+   note:crossing?'桥梁略图 · 方位与桥面尺寸为示意':sharedSite?'场地略图 · 范围与方位为示意':'区域略图 · 方位与比例待定',displayOnly:true}};
  }
 }

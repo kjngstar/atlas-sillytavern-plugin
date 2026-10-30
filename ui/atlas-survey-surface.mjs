@@ -8,7 +8,7 @@ export function surveySurface(areas,passages,{sharedSite=false,hub=null}={}){
   for(let j=y0;j<y1;j++)for(let i=x0;i<x1;i++){if(cells.size>=limit)return;cells.add(i+','+j);}
  };
  const ribbon=(points,width)=>{for(let i=1;i<points.length;i++){const a=points[i-1],b=points[i];put(Math.min(a[0],b[0])-width/2,Math.min(a[1],b[1])-width/2,Math.abs(a[0]-b[0])+width,Math.abs(a[1]-b[1])+width);}};
- const fixed=areas.filter(a=>!a.external&&!a.mobile).map(a=>{
+ const fixed=areas.filter(a=>!a.external&&!a.mobile&&a.symbol!=='bridge').map(a=>{
   const pts=a.parts.flat();return {a,x0:a.x+Math.min(...pts.map(p=>p[0])),x1:a.x+Math.max(...pts.map(p=>p[0])),y0:a.y+Math.min(...pts.map(p=>p[1])),y1:a.y+Math.max(...pts.map(p=>p[1]))};
  });
  for(const p of fixed)put(p.x0-20,p.y0-20,p.x1-p.x0+40,p.y1-p.y0+40);

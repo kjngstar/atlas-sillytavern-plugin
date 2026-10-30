@@ -110,3 +110,10 @@
 #atlasDemo .pl-summary:focus-visible{outline:2px solid var(--cyan);outline-offset:-3px;border-radius:inherit;}
 #atlasDemo .pl-body{padding:0 12px 12px;pointer-events:auto;}
 #atlasDemo .pl-body>.pl-path{margin-top:0;}
+
+/* Actions stay anchored beside names on the map, including touch/keyboard use. */
+#atlasDemo .map-entries{position:absolute;inset:0;z-index:5;pointer-events:none;}
+#atlasDemo .map-entries[hidden],#atlasDemo .viewport.page-open .map-entries{display:none;}
+#atlasDemo .map-entry{position:absolute;width:42px;height:24px;padding:0;border:1px solid var(--cyan);border-radius:5px;background:var(--panel-1);color:var(--cyan);font:600 11px var(--font-sans, sans-serif);line-height:22px;pointer-events:auto;cursor:pointer;box-shadow:0 1px 3px #0001;}
+#atlasDemo .map-entry:hover{background:var(--panel-2);border-color:var(--txt);color:var(--txt);}
+#atlasDemo .map-entry:focus-visible{outline:2px solid var(--cyan);outline-offset:3px;}
