@@ -337,6 +337,7 @@ function create(canvas, mini, hooks){
     for(const r of g.overviewRoutes||[])pts(r&&(r.points||r.path));
     for(const r of g.corridorRoutes||[])pts(r.points);
     for(const f of g.overviewFeatures||[]){pts(f&&f.poly);pts(f&&f.line);}
+    pts(g.bridgeSymbol?.deck);pts(g.bridgeSymbol?.river?.points);
     pts(g.selfArea&&g.selfArea.pts);
     for(const d of g.districts||[])pts(d&&d.pts);
     for(const L of g.lands||[])pts(L&&L.pts);
@@ -423,7 +424,7 @@ function create(canvas, mini, hooks){
   /* ── 层级切换 ── */
   function setPath(node, path){
     st.node = node; st.path = path||[]; st.kind = node.renderKind || node.kind || 'world';
-    st.geo = node.geo || {}; st.sel = null; st.hover = null;st.hits=[];st.edgeHits=[];
+    st.geo = node.geo || {}; st.sel = null; st.hover = null;st.hits=[];st.edgeHits=[];st.entryHints=[];
     refreshMarks();
     fit(false);
     st.cam.s = st.tgt.s * 1.55;      // 入场“下坠”感
@@ -473,6 +474,7 @@ function create(canvas, mini, hooks){
     else if(st.kind==='building')buildingMap(g);
     else if(st.kind==='floor') floorMap(g);
     else                       roomMap(g);
+    if(g.bridgeSymbol&&!g.exploration){drawBridgeSymbol(g.bridgeSymbol);pushLabel(...g.bridgeSymbol.center,'桥面示意',canvasStyle?.labelColor||'#a7c5d7','area',true);}
     for(const route of g.corridorRoutes??[]){ctx.beginPath();route.points.forEach((p,i)=>i?ctx.lineTo(...p):ctx.moveTo(...p));ctx.strokeStyle=skinColor('road','stroke','rgba(127,212,255,.5)');ctx.lineWidth=1.2/st.cam.s;ctx.setLineDash([6/st.cam.s,4/st.cam.s]);ctx.stroke();ctx.setLineDash([]);}
     ctx.restore();
   }
@@ -487,6 +489,23 @@ function create(canvas, mini, hooks){
    * M6-05③：装饰只有材质。这里**不产生**任何可点击/可查询的实体 ——
    * 无名装饰不是地点，缺 shape 时也绝不补一个新地点出来。
    */
+  function drawBridgeSymbol(bridge){
+    const cam=st.cam.s,ink=canvasStyle?.labelColor||'#a7c5d7';
+    const trace=pts=>{ctx.beginPath();pts.forEach((p,i)=>i?ctx.lineTo(...p):ctx.moveTo(...p));};
+    ctx.save();ctx.lineJoin='round';ctx.lineCap='round';
+    if(bridge.river){
+      trace(bridge.river.points);ctx.strokeStyle=skinColor('water','stroke','rgba(75,151,183,.28)');ctx.lineWidth=bridge.river.width;ctx.stroke();
+      ctx.lineWidth=1/cam;ctx.strokeStyle=skinColor('water','stroke','rgba(75,133,157,.7)');
+      for(const bank of bridge.river.banks){trace(bank);ctx.stroke();}
+    }
+    trace(bridge.deck);ctx.closePath();ctx.fillStyle=canvasStyle?.background||'#0c1823';ctx.fill();
+    ctx.strokeStyle=hexA(ink,.9);ctx.lineWidth=1.8/cam;ctx.stroke();
+    const c=bridge.center,n=bridge.across,t=bridge.along;
+    ctx.strokeStyle=hexA(ink,.3);ctx.lineWidth=.8/cam;
+    for(let i=-bridge.half+14;i<bridge.half-8;i+=14){ctx.beginPath();ctx.moveTo(c[0]+n[0]*i-t[0]*bridge.halfWidth,c[1]+n[1]*i-t[1]*bridge.halfWidth);ctx.lineTo(c[0]+n[0]*i+t[0]*bridge.halfWidth,c[1]+n[1]*i+t[1]*bridge.halfWidth);ctx.stroke();}
+    ctx.restore();
+  }
+
   function explorationMap(sketch){
     const cam=st.cam.s,ink=canvasStyle?.labelColor||'#a7c5d7';
     const trace=pts=>{ctx.beginPath();pts.forEach((p,i)=>i?ctx.lineTo(...p):ctx.moveTo(...p));};
@@ -510,6 +529,7 @@ function create(canvas, mini, hooks){
         ctx.beginPath();ctx.moveTo(0,-13);ctx.lineTo(0,13);ctx.stroke();
         ctx.beginPath();ctx.moveTo(-7,-5);ctx.lineTo(-13,0);ctx.lineTo(-7,5);ctx.stroke();
       }
+      else if(a.symbol==='bridge')drawBridgeSymbol(a.bridge);
       else if(a.mobile){
         ctx.strokeStyle=hexA(ink,.8);ctx.lineWidth=1.3/cam;ctx.beginPath();ctx.moveTo(-15,0);ctx.lineTo(-9,8);ctx.lineTo(9,8);ctx.lineTo(15,0);ctx.closePath();ctx.stroke();
         ctx.strokeRect(-8,-8,16,8);
@@ -538,7 +558,7 @@ function create(canvas, mini, hooks){
       const maxY=Math.max(...a.parts.flat().map(p=>p[1]));
       const largest=a.parts.reduce((best,p)=>{const size=p=>Math.abs(p.reduce((sum,q,i)=>{const r=p[(i+1)%p.length];return sum+q[0]*r[1]-r[0]*q[1];},0));return size(p)>size(best)?p:best;},a.parts[0]);
       const center=[largest.reduce((s,p)=>s+p[0],0)/largest.length,largest.reduce((s,p)=>s+p[1],0)/largest.length];
-      if(st.showLabels)pushLabel(a.x+(a.external?0:center[0]),a.y+(a.external||a.mobile?maxY+10/cam:center[1]-6/cam),(a.external?'往 ':'')+a.name,ink,'area',true);
+      if(st.showLabels)pushLabel(a.x+(a.external?0:center[0]),a.y+(a.external||a.mobile||a.symbol==='bridge'?maxY+14/cam:center[1]-6/cam),(a.external?'往 ':'')+a.name,ink,'area',true,undefined,{nodeId:a.nodeId,name:a.name});
     }
     ctx.restore();
   }
@@ -1490,7 +1510,7 @@ function create(canvas, mini, hooks){
   }
 
   /** `rank` 越小越优先（0 = 选中/悬停）。不传就按标签种类给默认优先级。 */
-  function pushLabel(x,y,text,color,kind,world,rank){ if(st.showLabels) st.labels.push({x,y,text,color,kind,scr:!world,rank}); }
+  function pushLabel(x,y,text,color,kind,world,rank,entry){ if(st.showLabels) st.labels.push({x,y,text,color,kind,scr:!world,rank,entry}); }
 
   /* ══════════ 标记（屏幕空间） ══════════ */
   function collectMarks(){
@@ -1706,8 +1726,8 @@ function create(canvas, mini, hooks){
       .sort((a,b)=>a.rank-b.rank||a.i-b.i);
     for(const {l,sx,sy} of items){
       ctx.font=(l.kind==='sub'?'400 11px ':l.kind==='live'?'600 12px ':l.kind==='area'?'500 12px ':'500 11px ')+F.sans;
-      const tw=ctx.measureText(l.text).width+12, th=l.kind==='live'?20:17;
-      const spot=placeLabel(occupied,sx,sy,tw,th);
+      const tw=ctx.measureText(l.text).width+12, th=l.entry?24:l.kind==='live'?20:17;
+      const spot=placeLabel(occupied,sx,sy,tw+(l.entry?46:0),th);
       if(!spot)continue;   // 放不下就收纳：宁可少写一个字，也不挪 marker 或叠成一团
       // M6-10②：「让位」是要付代价的 —— 挪方位就得拉引线，读者得追着线才知道它属于谁。
       // 副标题是等级最低的标签，不配让别人付这个代价：首选位占不到就直接收纳，
@@ -1719,7 +1739,8 @@ function create(canvas, mini, hooks){
         ctx.beginPath(); ctx.moveTo(sx,sy); ctx.lineTo(spot.lx,spot.ly);
         ctx.strokeStyle=hexA((canvasStyle?.labelColor||l.color),.5); ctx.lineWidth=1; ctx.stroke();
       }
-      const cx=spot.box.x+spot.box.w/2;
+      const cx=spot.box.x+(l.entry?tw:spot.box.w)/2;
+      if(l.entry)(st.entryHints??=[]).push({...l.entry,x:spot.box.x+tw+2,y:spot.box.y-2});
       if(l.kind==='area'){
         ctx.font='500 12px '+F.sans;ctx.fillStyle=canvasStyle?.labelColor||l.color;ctx.fillText(l.text,cx,spot.box.y);
       } else if(l.kind==='live'){
@@ -1874,6 +1895,8 @@ function create(canvas, mini, hooks){
     // 标记
     for(const poly of st.geo.exploration?.surface?.outlines??[]){mctx.beginPath();poly.forEach(([x,y],i)=>{const q=T(x,y);i?mctx.lineTo(...q):mctx.moveTo(...q);});mctx.closePath();mctx.fillStyle=hexA(canvasStyle?.labelColor||'#a7c5d7',.06);mctx.fill();mctx.strokeStyle=hexA(canvasStyle?.labelColor||'#a7c5d7',.5);mctx.stroke();}
     for(const a of st.geo.exploration?.areas??[])if(a.recorded)for(const poly of a.parts){mctx.beginPath();poly.forEach(([x,y],i)=>{const q=T(x+a.x,y+a.y);i?mctx.lineTo(...q):mctx.moveTo(...q);});mctx.closePath();mctx.strokeStyle=canvasStyle?.labelColor||'#a7c5d7';mctx.stroke();}
+    for(const a of st.geo.exploration?.areas??[])if(a.bridge){const b=a.bridge;if(b.river){mctx.beginPath();b.river.points.forEach(([x,y],i)=>{const q=T(x+a.x,y+a.y);i?mctx.lineTo(...q):mctx.moveTo(...q);});mctx.strokeStyle='rgba(75,151,183,.6)';mctx.stroke();}mctx.beginPath();b.deck.forEach(([x,y],i)=>{const q=T(x+a.x,y+a.y);i?mctx.lineTo(...q):mctx.moveTo(...q);});mctx.closePath();mctx.strokeStyle=canvasStyle?.labelColor||'#a7c5d7';mctx.stroke();}
+    if(st.geo.bridgeSymbol){mctx.beginPath();st.geo.bridgeSymbol.deck.forEach(([x,y],i)=>{const q=T(x,y);i?mctx.lineTo(...q):mctx.moveTo(...q);});mctx.closePath();mctx.stroke();}
     (st.geo.exploration?[]:st.marks).forEach(m=>{ const q=T(m.x,m.y); mctx.beginPath(); mctx.arc(q[0],q[1],2.2,0,7);
       mctx.fillStyle=canvasStyle?.markerColors[m.type]||m.c||({char:C.cyan,item:C.amber,poi:C.violet,sig:C.green,exit:C.blue}[m.type]||C.cyan); mctx.fill(); });
     // 视口框
@@ -1899,7 +1922,7 @@ function create(canvas, mini, hooks){
 
     ctx.setTransform(st.dpr,0,0,st.dpr,0,0);
     ctx.clearRect(0,0,st.vw,st.vh);
-    st.labels=[];st.edgeHits=[];st.hits=[];st.utilitySymbols=[];st.utilityBoxes=[];
+    st.labels=[];st.entryHints=[];st.edgeHits=[];st.hits=[];st.utilitySymbols=[];st.utilityBoxes=[];
 
     ctx.save();
     ctx.translate(st.vw/2, st.vh/2);
@@ -1915,6 +1938,7 @@ function create(canvas, mini, hooks){
 
     if(st.geo.exploration){
       drawLabels();edgeFade();ctx.save();ctx.font='400 11px '+F.sans;ctx.textAlign='left';ctx.textBaseline='bottom';ctx.fillStyle=canvasStyle?.labelColor||'#a7c5d7';ctx.globalAlpha=.75;
+      ctx.fillText('点击「进入」展开地点地图；双击轮廓也可进入',18,st.vh-34);ctx.globalAlpha=.55;
       ctx.fillText(st.geo.exploration.note,18,st.vh-18);ctx.restore();
     }
     else if(st.showMarks){
