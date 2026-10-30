@@ -40,6 +40,9 @@ export function projectExplorationMaps(nodes,locations,{maps=[],viewMode='player
   const level=mapDetailLevel(n);
   const direct=(n.children??[]).filter(c=>c.known!==false&&!c.unclassified&&(viewMode==='author'||!c.containerLocationId||visible.has(c.containerLocationId)));
   const calibrated=n.metric>0&&!['layout','estimated','uncalibrated'].includes(n.transform?.metricQuality??n.transform?.scaleQuality);
+  // A saved city already has the road/district/building skeleton of a city map.
+  // Never replace it with a generic regional summary, even when its scale is estimated.
+  if(level==='regions'&&(g.districts?.length||g.cityBuildings?.length||g.avenues?.length))continue;
   if(level==='regions'&&!calibrated){
    const overview=direct.length?regionOverview(n,direct,{locations,nodes,routes:routes.filter(r=>viewMode==='author'||visible.has(r.fromLocationId??r.fromId)&&visible.has(r.toLocationId??r.toId))}):null;
    if(overview)n.geo={...g,exploration:overview};

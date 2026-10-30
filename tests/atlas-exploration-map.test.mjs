@@ -17,11 +17,11 @@ test('总览使用子房间真实轮廓比例和已登记门连接；不改坐�
  assert.equal(JSON.stringify({maps:f.maps,hall:f.hall,tool:f.tool}),before);
  assert.ok(s.bounds.every(Number.isFinite));assert.equal(s.passages[0].distanceM,null);
 });
-test('同场所共享连续场地示意，归属不新增通行路线，也不补十字形房间',()=>{
+test('同场所保留地点轮廓，归属不新增通行路线、外边界或十字形房间',()=>{
  const f=fixture();f.tool.geo={};projectExplorationMaps(f.nodes,f.locations);
  const s=f.parent.geo.exploration;assert.deepEqual(s.passages,[]);assert.equal(s.areas.find(a=>a.nodeId==='tool').recorded,false);
  assert.equal(s.areas.find(a=>a.nodeId==='tool').parts[0].length,4);
- assert.equal(s.surface.displayOnly,true);assert.equal(s.surface.outlines.length,1);
+ assert.equal(s.surface.displayOnly,true);assert.equal(s.surface.outlines.length,0);
 });
 test('已有落点保持原位，略图只调整预览大小；实测地图继续使用米制地图',()=>{
  const f=fixture();f.parent.marks=[{id:'hall-place',type:'poi',x:180,y:260},{id:'tool-place',type:'poi',x:320,y:260}];

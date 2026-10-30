@@ -2,8 +2,15 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {mapDetailLevel,regionOverview} from '../ui/atlas-map-layers.mjs';
 import {projectReferenceData} from '../ui/atlas-reference-data.mjs';
+import {projectExplorationMaps} from '../ui/atlas-exploration-map.mjs';
 const view=items=>({items});
 const area=p=>Math.abs(p.reduce((s,a,i)=>{const b=p[(i+1)%p.length];return s+a[0]*b[1]-b[0]*a[1];},0))/2;
+test('已保存城市的街道、街区和建筑不被上层色块总览替换',()=>{
+ const city={id:'city',containerLocationKind:'city',transform:{scaleQuality:'estimated'},geo:{districts:[{id:'D',pts:[[0,0],[100,0],[100,100],[0,100]]}],avenues:[{from:[0,50],to:[100,50]}],cityBuildings:[{id:'B',x:5,y:5,w:10,h:10}]},children:[]};
+ const child={id:'district',containerLocationId:'D',containerLocationKind:'district',parentMapId:'city',geo:{},children:[]};city.children=[child];
+ const before=JSON.stringify(city.geo);projectExplorationMaps(new Map([['city',city],['district',child]]),[{id:'D'}],{viewMode:'author'});
+ assert.equal(JSON.stringify(city.geo),before);assert.equal(city.geo.exploration,undefined);
+});
 
 test('绘图细节按空间语义选择，场所可连续嵌套，街区与房间仍用详细布局',()=>{
  for(const kind of ['world','region','city'])assert.equal(mapDetailLevel({containerLocationKind:kind}),'regions');
@@ -11,7 +18,7 @@ test('绘图细节按空间语义选择，场所可连续嵌套，街区与房�
  assert.equal(mapDetailLevel({containerLocationKind:'other',renderKind:'region'}),'layout');
 });
 
-test('区域色块形成紧凑地图，不取子房间轮廓，不改原落点，重排输入结果一致',()=>{
+test('区域地点使用分开的方块轮廓，不取子房间轮廓，不改原落点，重排输入结果一致',()=>{
  const children=['west','middle','east'].map((id,i)=>({id,containerLocationId:id,name:id,geo:{rooms:[{x:0,y:0,w:8,h:8}],furn:[{type:'desk'}]},children:[]}));
  const n={geo:{},marks:children.map((c,i)=>({id:c.id,type:'poi',x:i*200,y:0}))};
  const before=JSON.stringify({n,children}),s=regionOverview(n,children);
@@ -20,9 +27,10 @@ test('区域色块形成紧凑地图，不取子房间轮廓，不改原落点�
  assert.deepEqual(s.areas.map(a=>[a.x,a.y]),[[400,0],[200,0],[0,0]]);
  assert.deepEqual(regionOverview(n,[...children].reverse()),s);assert.equal(JSON.stringify({n,children}),before);
  assert.equal(s.surface.outlines.length,0);assert.equal(s.displayOnly,true);
- // Voronoi cells meet at shared boundaries, rather than shrinking into isolated blocks.
+ // Empty space remains between footprints; never partition the whole map into territories.
  const xs=s.areas.map(a=>a.parts[0].map(p=>p[0]+a.x));
- assert.equal(Math.min(...xs[0]),Math.max(...xs[1]));assert.equal(Math.min(...xs[1]),Math.max(...xs[2]));
+ assert.ok(Math.min(...xs[0])>Math.max(...xs[1]));assert.ok(Math.min(...xs[1])>Math.max(...xs[2]));
+ assert.ok(s.areas.every(a=>a.parts[0].length===4));
 });
 
 test('真实投影逐层从色块到轮廓再到陈设，所有显示变更均不写回场景',()=>{
