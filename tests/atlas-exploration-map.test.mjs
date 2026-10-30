@@ -17,10 +17,11 @@ test('总览使用子房间真实轮廓比例和已登记门连接；不改坐�
  assert.equal(JSON.stringify({maps:f.maps,hall:f.hall,tool:f.tool}),before);
  assert.ok(s.bounds.every(Number.isFinite));assert.equal(s.passages[0].distanceM,null);
 });
-test('没有道路依据时不把归属连成可通行路线，空白区域采用未探明轮廓',()=>{
+test('同场所共享连续场地示意，归属不新增通行路线，也不补十字形房间',()=>{
  const f=fixture();f.tool.geo={};projectExplorationMaps(f.nodes,f.locations);
  const s=f.parent.geo.exploration;assert.deepEqual(s.passages,[]);assert.equal(s.areas.find(a=>a.nodeId==='tool').recorded,false);
- assert.ok(s.areas.find(a=>a.nodeId==='tool').parts[0].length>4);
+ assert.equal(s.areas.find(a=>a.nodeId==='tool').parts[0].length,4);
+ assert.equal(s.surface.displayOnly,true);assert.equal(s.surface.outlines.length,1);
 });
 test('已有落点保持原位，略图只调整预览大小；实测地图继续使用米制地图',()=>{
  const f=fixture();f.parent.marks=[{id:'hall-place',type:'poi',x:180,y:260},{id:'tool-place',type:'poi',x:320,y:260}];
@@ -44,5 +45,13 @@ test('父地点和已知邻区以实际路线生成出口，隐藏或不存在�
  const f=fixture(),outside={id:'road',containerLocationId:'road-place',name:'旧路',geo:{},marks:[],children:[]};f.nodes.set('road',outside);f.locations.push({id:'road-place'});
  f.maps[0].routes.push({routeId:'exit',fromLocationId:'station-place',toLocationId:'road-place',distanceM:3200});
  projectExplorationMaps(f.nodes,f.locations,{maps:f.maps});const s=f.parent.geo.exploration;
- assert.equal(s.areas.find(a=>a.nodeId==='road').external,true);assert.equal(s.passages.find(e=>e.id==='exit').distanceM,3200);assert.ok(s.hub);
+ assert.equal(s.areas.find(a=>a.nodeId==='road').external,true);assert.equal(s.passages.find(e=>e.id==='exit').distanceM,3200);assert.ok(s.surface.forecourt);assert.equal(s.hub,undefined);
+});
+test('缺少父图的场所沿用子图实际出入口，移动载具不生成固定地块',()=>{
+ const f=fixture();f.hall.geo.doors=[{x:4,y:8,w:1.2,wall:'south'}];
+ f.locations.find(l=>l.id==='tool-place').mobility='mobile';
+ projectExplorationMaps(f.nodes,f.locations,{maps:f.maps});const s=f.parent.geo.exploration;
+ assert.equal(s.areas.find(a=>a.nodeId==='hall').entrances[0].wall,'south');
+ assert.equal(s.areas.find(a=>a.nodeId==='tool').mobile,true);
+ assert.ok(s.areas.find(a=>a.nodeId==='tool').parts.flat().every(([x,y])=>Math.abs(x)<=18&&Math.abs(y)<=12));
 });
