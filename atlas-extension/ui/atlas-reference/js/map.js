@@ -1735,7 +1735,7 @@ function create(canvas, mini, hooks){
     for(const {l,sx,sy} of items){
       ctx.font=(l.kind==='sub'?'400 11px ':l.kind==='live'?'600 12px ':l.kind==='area'?(st.geo.exploration?.level==='regions'?'600 14px ':'500 12px '):'500 11px ')+F.sans;
       const tw=ctx.measureText(l.text).width+12, th=l.entry?24:l.kind==='live'?20:17;
-      const spot=placeLabel(occupied,sx,sy,tw+(l.entry?46:0),th);
+      const spot=placeLabel(occupied,sx,sy,tw+(l.entry?30:0),th);
       if(!spot)continue;   // 放不下就收纳：宁可少写一个字，也不挪 marker 或叠成一团
       // M6-10②：「让位」是要付代价的 —— 挪方位就得拉引线，读者得追着线才知道它属于谁。
       // 副标题是等级最低的标签，不配让别人付这个代价：首选位占不到就直接收纳，
@@ -1747,8 +1747,14 @@ function create(canvas, mini, hooks){
         ctx.beginPath(); ctx.moveTo(sx,sy); ctx.lineTo(spot.lx,spot.ly);
         ctx.strokeStyle=hexA((canvasStyle?.labelColor||l.color),.5); ctx.lineWidth=1; ctx.stroke();
       }
-      const cx=spot.box.x+(l.entry?tw:spot.box.w)/2;
-      if(l.entry)(st.entryHints??=[]).push({...l.entry,x:spot.box.x+tw+2,y:spot.box.y-2});
+      const cx=spot.box.x+(l.entry?30:0)+tw/2;
+      if(l.entry){
+        const x=spot.box.x+14,y=spot.box.y+7;
+        const m={...l.entry,id:l.entry.nodeId,key:l.entry.nodeId,type:'poi',silent:true,iconEntry:true,node:{id:l.entry.nodeId,known:true}};
+        drawMark(ctx,m,x,y,st.t||0,st.hover?.id===m.id,st.sel?.id===m.id);
+        st.hits.push({m,x,y,r:18});
+        (st.entryHints??=[]).push({...l.entry,x:x-20,y:y-20});
+      }
       if(l.kind==='area'){
         ctx.font=(st.geo.exploration?.level==='regions'?'600 14px ':'500 12px ')+F.sans;ctx.fillStyle=canvasStyle?.labelColor||l.color;ctx.fillText(l.text,cx,spot.box.y);
       } else if(l.kind==='live'){
@@ -1946,7 +1952,7 @@ function create(canvas, mini, hooks){
 
     if(st.geo.exploration){
       drawLabels();edgeFade();ctx.save();ctx.font='400 11px '+F.sans;ctx.textAlign='left';ctx.textBaseline='bottom';ctx.fillStyle=canvasStyle?.labelColor||'#a7c5d7';ctx.globalAlpha=.75;
-      ctx.fillText('点击「进入」展开地点地图；双击轮廓也可进入',18,st.vh-34);ctx.globalAlpha=.55;
+      ctx.fillText('单击地点图标进入地图；双击轮廓也可进入',18,st.vh-34);ctx.globalAlpha=.55;
       ctx.fillText(st.geo.exploration.note,18,st.vh-18);ctx.restore();
     }
     else if(st.showMarks){
@@ -1970,7 +1976,7 @@ function create(canvas, mini, hooks){
     let best=null, bd=1e9;
     // M6-10①：命中用**和绘制同一个** markScreenPos（含同样的视口裁剪），
     // 保证"画出来的点点得中、点得中的一定画着"。
-    const markHits=st.showMarks&&!st.geo.exploration?visibleMarkHits():[];
+    const markHits=st.geo.exploration?st.hits:st.showMarks?visibleMarkHits():[];
     markHits.concat(st.edgeHits).forEach(h=>{
       const d=Math.hypot(h.x-mx,h.y-my);
       if(d<h.r+7 && d<bd){ bd=d; best=h.m; }

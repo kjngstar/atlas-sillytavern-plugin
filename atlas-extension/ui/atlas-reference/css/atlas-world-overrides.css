@@ -111,11 +111,11 @@
 #atlasDemo .pl-body{padding:0 12px 12px;pointer-events:auto;}
 #atlasDemo .pl-body>.pl-path{margin-top:0;}
 
-/* Actions stay anchored beside names on the map, including touch/keyboard use. */
-#atlasDemo .map-entries{position:absolute;inset:0;z-index:5;pointer-events:none;}
+/* Invisible semantic targets sit exactly on the existing Canvas place icons. */
+#atlasDemo .map-location-icons{position:absolute;inset:0;z-index:5;pointer-events:none;}
 #atlasDemo .map-level{position:absolute;top:18px;left:18px;z-index:4;padding:6px 9px;border-left:3px solid var(--cyan);background:var(--panel-1);color:var(--txt-2,var(--txt));font-size:11px;pointer-events:none;opacity:.88;}
 #atlasDemo .viewport.page-open .map-level{display:none;}
-#atlasDemo .map-entries[hidden],#atlasDemo .viewport.page-open .map-entries{display:none;}
-#atlasDemo .map-entry{position:absolute;width:42px;height:24px;padding:0;border:1px solid var(--cyan);border-radius:5px;background:var(--panel-1);color:var(--cyan);font:600 11px var(--font-sans, sans-serif);line-height:22px;pointer-events:auto;cursor:pointer;box-shadow:0 1px 3px #0001;}
-#atlasDemo .map-entry:hover{background:var(--panel-2);border-color:var(--txt);color:var(--txt);}
-#atlasDemo .map-entry:focus-visible{outline:2px solid var(--cyan);outline-offset:3px;}
+#atlasDemo .map-location-icons[hidden],#atlasDemo .viewport.page-open .map-location-icons{display:none;}
+#atlasDemo .map-location-hit{position:absolute;width:40px;height:40px;padding:0;border:0;border-radius:50%;background:transparent;pointer-events:auto;cursor:pointer;box-shadow:none;}
+#atlasDemo .map-location-hit:hover{background:transparent;box-shadow:0 0 0 1px var(--cyan);}
+#atlasDemo .map-location-hit:focus-visible{outline:2px solid var(--cyan);outline-offset:1px;}
