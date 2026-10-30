@@ -1,4 +1,5 @@
 /** Coarse, read-only map drawing. A sketch never supplies SQL positions or distances. */
+import {surveySurface} from './atlas-survey-surface.mjs';
 const point=p=>Array.isArray(p)&&p.length===2&&p.every(Number.isFinite);
 const polygon=p=>Array.isArray(p)&&p.length>=3&&p.every(point);
 const rect=r=>[[r.x,r.y],[r.x+r.w,r.y],[r.x+r.w,r.y+r.h],[r.x,r.y+r.h]];
@@ -18,12 +19,12 @@ function footprint(node,depth=0){
   const children=(node.children??[]).filter(n=>n.known!==false&&!n.unclassified&&n.containerLocationKind!=='floor').sort(sort);
   children.forEach((n,i)=>{const f=footprint(n,depth+1);if(f.recorded)parts.push(...f.parts.map(poly=>poly.map(([x,y])=>[x+(i%3)*250,y+Math.floor(i/3)*180])));});
  }
- if(!parts.length)return {recorded:false,parts:[[[-92,-48],[-24,-48],[-24,-65],[55,-65],[55,-42],[93,-42],[93,28],[62,28],[62,58],[-48,58],[-48,39],[-92,39]]],features:[]};
+ if(!parts.length)return {recorded:false,parts:[[[-60,-38],[60,-38],[60,38],[-60,38]]],features:[],entrances:[]};
  const pts=parts.flat(),xs=pts.map(p=>p[0]),ys=pts.map(p=>p[1]);
  const x0=Math.min(...xs),x1=Math.max(...xs),y0=Math.min(...ys),y1=Math.max(...ys);
  const s=Math.min(196/Math.max(1,x1-x0),132/Math.max(1,y1-y0));
  const xy=([x,y])=>[(x-(x0+x1)/2)*s,(y-(y0+y1)/2)*s];
- return {recorded:true,parts:parts.map(poly=>poly.map(xy)),features:(g.overviewFeatures??[]).map(f=>({...f,poly:f.poly?.map(xy),line:f.line?.map(xy),width:(f.width??1)*s}))};
+ return {recorded:true,parts:parts.map(poly=>poly.map(xy)),entrances:(g.doors??[]).filter(d=>Number.isFinite(d.x)&&Number.isFinite(d.y)).map(d=>{const [x,y]=xy([d.x,d.y]);return {x,y,w:Math.max(10,Math.min(24,(d.w??12)*s)),wall:d.wall};}),features:(g.overviewFeatures??[]).map(f=>({...f,poly:f.poly?.map(xy),line:f.line?.map(xy),width:(f.width??1)*s}))};
 }
 
 export function projectExplorationMaps(nodes,locations,{maps=[],viewMode='player'}={}){
@@ -65,7 +66,7 @@ export function projectExplorationMaps(nodes,locations,{maps=[],viewMode='player
    c:palette[i%palette.length],...footprint(source.get(c.id)??c)}));
   // A neighbouring map is an exit at the edge of this view, not another giant
   // territory pasted into the current interior.
-  for(const a of areas)if(a.external){a.parts=[[[-16,-20],[16,-20],[16,20],[-16,20]]];a.recorded=false;}
+  for(const a of areas){if(a.external){a.parts=[[[-16,-20],[16,-20],[16,20],[-16,20]]];a.recorded=false;}if(a.mobile){a.parts=[[[-18,-12],[18,-12],[18,12],[-18,12]]];a.entrances=[];}}
   // Connected components occupy compact rows. Route length does not determine
   // screen length: this view explicitly has no metric scale or north arrow.
   const ordered=[],remaining=new Set(areas.map(a=>a.nodeId));
@@ -73,14 +74,14 @@ export function projectExplorationMaps(nodes,locations,{maps=[],viewMode='player
    for(let i=0;i<queue.length;i++){const id=queue[i];ordered.push(id);for(const e of edges){const next=e.from===id?e.to:e.to===id?e.from:null;if(remaining.has(next)){remaining.delete(next);queue.push(next);}}}
   }
   const cols=Math.min(3,Math.max(1,Math.ceil(Math.sqrt(areas.length)))),rows=Math.ceil(areas.length/cols);
-  for(const a of areas){const i=ordered.indexOf(a.nodeId);a.x=(i%cols-(cols-1)/2)*290;a.y=(Math.floor(i/cols)-(rows-1)/2)*215;}
+  for(const a of areas){const i=ordered.indexOf(a.nodeId);a.x=(i%cols-(cols-1)/2)*210;a.y=(Math.floor(i/cols)-(rows-1)/2)*180;}
   const selfEdges=edges.filter(e=>e.from===n.id||e.to===n.id);
   const hub=[0,0];
   if(selfEdges.length){
    const exits=areas.filter(a=>selfEdges.some(e=>e.from===a.nodeId||e.to===a.nodeId));
    exits.forEach((a,i)=>{a.x=exits.length===1?280:(i%2?310:-310);a.y=Math.floor(i/2)*200;});
    const within=areas.filter(a=>!exits.includes(a));
-   within.forEach((a,i)=>{a.x=(i-(within.length-1)/2)*260;a.y=-165;});
+   within.forEach((a,i)=>{a.x=(i-(within.length-1)/2)*210;a.y=-120;});
   }
   const anchors=new Map((n.marks??[]).filter(m=>['poi','vehicle'].includes(m.type)&&!m.proxy&&Number.isFinite(m.x)&&Number.isFinite(m.y)).map(m=>[m.id,m]));
   // Preserve every recorded anchor, even when its geometry is still missing.
@@ -89,7 +90,7 @@ export function projectExplorationMaps(nodes,locations,{maps=[],viewMode='player
   let spacing=Infinity;
   for(let i=0;i<anchored.length;i++)for(let j=0;j<i;j++){const a=anchors.get(anchored[i].id),b=anchors.get(anchored[j].id);spacing=Math.min(spacing,Math.hypot(a.x-b.x,a.y-b.y));}
   const thumbnailScale=Math.min(1,Math.max(.2,spacing/290));
-  for(const a of anchored){const p=anchors.get(a.id);a.x=p.x;a.y=p.y;a.parts=a.parts.map(poly=>poly.map(([x,y])=>[x*thumbnailScale,y*thumbnailScale]));}
+  for(const a of anchored){const p=anchors.get(a.id);a.x=p.x;a.y=p.y;a.parts=a.parts.map(poly=>poly.map(([x,y])=>[x*thumbnailScale,y*thumbnailScale]));a.entrances=(a.entrances??[]).map(d=>({...d,x:d.x*thumbnailScale,y:d.y*thumbnailScale,w:d.w*thumbnailScale}));}
   const inside=areas.filter(a=>!a.external);
   if(inside.length){
    const xs=inside.map(a=>a.x),ys=inside.map(a=>a.y),cx=(Math.min(...xs)+Math.max(...xs))/2,cy=(Math.min(...ys)+Math.max(...ys))/2;
@@ -102,10 +103,12 @@ export function projectExplorationMaps(nodes,locations,{maps=[],viewMode='player
    const pts=area.parts.flat(),hx=Math.max(...pts.map(q=>Math.abs(q[0]))),hy=Math.max(...pts.map(q=>Math.abs(q[1]))),dx=toward[0]-p[0],dy=toward[1]-p[1];
    const k=Math.min(dx?hx/Math.abs(dx):Infinity,dy?hy/Math.abs(dy):Infinity);return Number.isFinite(k)?[p[0]+dx*k,p[1]+dy*k]:p;};
   const passages=edges.map(e=>{const a=atBoundary(e.from,positions.get(e.to)),b=atBoundary(e.to,positions.get(e.from));return {...e,points:[a,[(a[0]+b[0])/2,a[1]],[(a[0]+b[0])/2,b[1]],b]};});
-  const all=[...areas.flatMap(a=>a.parts.flat().map(([x,y])=>[x+a.x,y+a.y])),...passages.flatMap(e=>e.points)];
+  const sharedSite=!!n.containerLocationId&&!['world','region','city'].includes(n.containerLocationKind??n.renderKind);
+  const surface=surveySurface(areas,passages,{sharedSite,hub:selfEdges.length?hub:null});
+  const all=[...areas.flatMap(a=>a.parts.flat().map(([x,y])=>[x+a.x,y+a.y])),...passages.flatMap(e=>e.points),...surface.outlines.flat()];
   const xs=all.map(p=>p[0]),ys=all.map(p=>p[1]);
-  n.geo={...g,exploration:{areas,passages,hub:selfEdges.length?hub:null,
+  n.geo={...g,exploration:{areas,passages,surface,
    bounds:[Math.min(...xs)-65,Math.max(...xs)+65,Math.min(...ys)-55,Math.max(...ys)+90],
-   note:'区域略图 · 方位与比例待定',displayOnly:true}};
+   note:sharedSite?'场地略图 · 范围与方位为示意':'区域略图 · 方位与比例待定',displayOnly:true}};
  }
 }
