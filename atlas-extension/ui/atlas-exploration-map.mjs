@@ -1,6 +1,6 @@
 /** Coarse, read-only map drawing. A sketch never supplies SQL positions or distances. */
-import {surveySurface} from './atlas-survey-surface.mjs';
 import {mapSymbolKind,bridgeMapSymbol} from './atlas-map-symbols.mjs';
+import {mapDetailLevel,regionOverview,siteContext} from './atlas-map-layers.mjs';
 const point=p=>Array.isArray(p)&&p.length===2&&p.every(Number.isFinite);
 const polygon=p=>Array.isArray(p)&&p.length>=3&&p.every(point);
 const rect=r=>[[r.x,r.y],[r.x+r.w,r.y],[r.x+r.w,r.y+r.h],[r.x,r.y+r.h]];
@@ -26,7 +26,7 @@ function footprint(node,depth=0,symbol=null){
  const x0=Math.min(...xs),x1=Math.max(...xs),y0=Math.min(...ys),y1=Math.max(...ys);
  const s=Math.min(196/Math.max(1,x1-x0),132/Math.max(1,y1-y0));
  const xy=([x,y])=>[(x-(x0+x1)/2)*s,(y-(y0+y1)/2)*s];
- return {recorded:true,parts:parts.map(poly=>poly.map(xy)),entrances:(g.doors??[]).filter(d=>Number.isFinite(d.x)&&Number.isFinite(d.y)).map(d=>{const [x,y]=xy([d.x,d.y]);return {x,y,w:Math.max(10,Math.min(24,(d.w??12)*s)),wall:d.wall};}),features:(g.overviewFeatures??[]).map(f=>({...f,poly:f.poly?.map(xy),line:f.line?.map(xy),width:(f.width??1)*s}))};
+ return {recorded:true,parts:parts.map(poly=>poly.map(xy)),details:(g.furn??[]).map(f=>({...f,r:[...xy(f.r.slice(0,2)),...xy(f.r.slice(2,4))]})),entrances:(g.doors??[]).filter(d=>Number.isFinite(d.x)&&Number.isFinite(d.y)).map(d=>{const [x,y]=xy([d.x,d.y]);return {x,y,w:Math.max(10,Math.min(24,(d.w??12)*s)),wall:d.wall};}),features:(g.overviewFeatures??[]).map(f=>({...f,poly:f.poly?.map(xy),line:f.line?.map(xy),width:(f.width??1)*s}))};
 }
 
 export function projectExplorationMaps(nodes,locations,{maps=[],viewMode='player'}={}){
@@ -37,6 +37,14 @@ export function projectExplorationMaps(nodes,locations,{maps=[],viewMode='player
  const source=new Map([...nodes].map(([id,n])=>[id,{...n,geo:structuredClone(n.geo)}]));
  for(const n of nodes.values()){
   const g=n.geo??{};
+  const level=mapDetailLevel(n);
+  const direct=(n.children??[]).filter(c=>c.known!==false&&!c.unclassified&&(viewMode==='author'||!c.containerLocationId||visible.has(c.containerLocationId)));
+  const calibrated=n.metric>0&&!['layout','estimated','uncalibrated'].includes(n.transform?.metricQuality??n.transform?.scaleQuality);
+  if(level==='regions'&&!calibrated){
+   const overview=direct.length?regionOverview(n,direct,{locations,nodes,routes:routes.filter(r=>viewMode==='author'||visible.has(r.fromLocationId??r.fromId)&&visible.has(r.toLocationId??r.toId))}):null;
+   if(overview)n.geo={...g,exploration:overview};
+   continue;
+  }
   const ownSymbol=(viewMode==='author'||visible.has(n.containerLocationId))?mapSymbolKind(n,places.get(n.containerLocationId)):null;
   if(ownSymbol==='bridge'&&!g.rooms?.length&&!g.hostArea&&!g.selfArea&&!g.overviewShapes?.length)g.bridgeSymbol=bridgeMapSymbol(g);
   // Existing local geometry remains authoritative. Never re-layout a real floor,
@@ -71,7 +79,7 @@ export function projectExplorationMaps(nodes,locations,{maps=[],viewMode='player
    c:palette[i%palette.length],...footprint(source.get(c.id)??c,0,(viewMode==='author'||visible.has(c.containerLocationId))?mapSymbolKind(c,places.get(c.containerLocationId)):null)}));
   // A neighbouring map is an exit at the edge of this view, not another giant
   // territory pasted into the current interior.
-  for(const a of areas){if(a.external){a.parts=[[[-16,-20],[16,-20],[16,20],[-16,20]]];a.recorded=false;a.symbol=null;a.bridge=null;}if(a.mobile){a.parts=[[[-18,-12],[18,-12],[18,12],[-18,12]]];a.entrances=[];}}
+  for(const a of areas){if(a.external){a.parts=[[[-16,-20],[16,-20],[16,20],[-16,20]]];a.recorded=false;a.symbol=null;a.bridge=null;}if(level!=='detail'||a.external)a.details=[];if(a.mobile){a.parts=[[[-18,-12],[18,-12],[18,12],[-18,12]]];a.entrances=[];}}
   // Connected components occupy compact rows. Route length does not determine
   // screen length: this view explicitly has no metric scale or north arrow.
   const ordered=[],remaining=new Set(areas.map(a=>a.nodeId));
@@ -95,7 +103,7 @@ export function projectExplorationMaps(nodes,locations,{maps=[],viewMode='player
   let spacing=Infinity;
   for(let i=0;i<anchored.length;i++)for(let j=0;j<i;j++){const a=anchors.get(anchored[i].id),b=anchors.get(anchored[j].id);spacing=Math.min(spacing,Math.hypot(a.x-b.x,a.y-b.y));}
   const thumbnailScale=Math.min(1,Math.max(.2,spacing/290));
-  for(const a of anchored){const p=anchors.get(a.id);a.x=p.x;a.y=p.y;if(a.symbol==='bridge')continue;a.parts=a.parts.map(poly=>poly.map(([x,y])=>[x*thumbnailScale,y*thumbnailScale]));a.entrances=(a.entrances??[]).map(d=>({...d,x:d.x*thumbnailScale,y:d.y*thumbnailScale,w:d.w*thumbnailScale}));}
+  for(const a of anchored){const p=anchors.get(a.id);a.x=p.x;a.y=p.y;if(a.symbol==='bridge')continue;a.parts=a.parts.map(poly=>poly.map(([x,y])=>[x*thumbnailScale,y*thumbnailScale]));a.details=(a.details??[]).map(f=>({...f,r:f.r.map(v=>v*thumbnailScale)}));a.entrances=(a.entrances??[]).map(d=>({...d,x:d.x*thumbnailScale,y:d.y*thumbnailScale,w:d.w*thumbnailScale}));}
   const inside=areas.filter(a=>!a.external);
   const crossing=inside.length===1&&inside[0].symbol==='bridge'?inside[0]:null;
   if(inside.length){
@@ -112,12 +120,11 @@ export function projectExplorationMaps(nodes,locations,{maps=[],viewMode='player
    const pts=area.parts.flat(),hx=Math.max(...pts.map(q=>Math.abs(q[0]))),hy=Math.max(...pts.map(q=>Math.abs(q[1]))),dx=toward[0]-p[0],dy=toward[1]-p[1];
    const k=Math.min(dx?hx/Math.abs(dx):Infinity,dy?hy/Math.abs(dy):Infinity);return Number.isFinite(k)?[p[0]+dx*k,p[1]+dy*k]:p;};
   const passages=edges.map(e=>{const a=atBoundary(e.from,positions.get(e.to)),b=atBoundary(e.to,positions.get(e.from));return {...e,points:[a,[(a[0]+b[0])/2,a[1]],[(a[0]+b[0])/2,b[1]],b]};});
-  const sharedSite=!!n.containerLocationId&&!['world','region','city'].includes(n.containerLocationKind??n.renderKind);
-  const surface=surveySurface(areas,passages,{sharedSite,hub:selfEdges.length?hub:null});
+  const surface=siteContext(areas);
   const all=[...areas.flatMap(a=>[...a.parts.flat(),...(a.bridge?.river?.points??[])].map(([x,y])=>[x+a.x,y+a.y])),...passages.flatMap(e=>e.points),...surface.outlines.flat()];
   const xs=all.map(p=>p[0]),ys=all.map(p=>p[1]);
-  n.geo={...g,exploration:{areas,passages,surface,
+  n.geo={...g,exploration:{level,areas,passages,surface,
    bounds:[Math.min(...xs)-65,Math.max(...xs)+65,Math.min(...ys)-55,Math.max(...ys)+90],
-   note:crossing?'桥梁略图 · 方位与桥面尺寸为示意':sharedSite?'场地略图 · 范围与方位为示意':'区域略图 · 方位与比例待定',displayOnly:true}};
+   note:level==='detail'?'布局总览 · 各子图细节已展开，相对位置为示意':crossing?'地点略图 · 桥面与方位为示意':'地点略图 · 主要轮廓与分布，进入后展开细节',displayOnly:true}};
  }
 }
