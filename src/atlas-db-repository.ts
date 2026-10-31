@@ -2216,8 +2216,16 @@ export function createSqlRepository(options: RepositoryOptions) {
         }
       };
       if(Array.isArray(input.layoutMaps)&&input.layoutMaps.length)applyFunctionalAreas(input.layoutMaps,true);
-      const layoutInput=worldBuildWindow&&Array.isArray(input.layoutMaps)?{...input,layoutMaps:input.layoutMaps.filter(mapId=>!worldBuildMapReady(candidateDb,branchId,mapId))}:input;
-      let layoutTask=layoutInput.layoutMaps?buildSqlLayoutTask(candidateDb,branchId,layoutInput,turnId,layoutReport,{eagerLocationIds:plannedSceneLocationIds(combinedDrafts,combinedRefs)}):null;
+      const eagerLocationIds=plannedSceneLocationIds(combinedDrafts,combinedRefs);
+      let layoutInput=worldBuildWindow&&Array.isArray(input.layoutMaps)?{...input,layoutMaps:input.layoutMaps.filter(mapId=>!worldBuildMapReady(candidateDb,branchId,mapId))}:input;
+      // Automatic work may have frozen its map list before the combined response
+      // introduced a concrete interior. Apply that response's own constraints now;
+      // a parent footprint alone must not stand in for the requested furniture.
+      if(combinedPlanningSent&&!input.manual&&Array.isArray(layoutInput.layoutMaps)&&eagerLocationIds.length){
+        const plannedMaps=pageAllRows(createTableReadPort(candidateDb),'maps',branchId).filter(m=>m.status==='active'&&eagerLocationIds.includes(String(m.container_location_id))).map(m=>String(m.id));
+        layoutInput={...layoutInput,layoutMaps:[...new Set([...layoutInput.layoutMaps,...plannedMaps])]};
+      }
+      let layoutTask=layoutInput.layoutMaps?buildSqlLayoutTask(candidateDb,branchId,layoutInput,turnId,layoutReport,{eagerLocationIds}):null;
       drainLayoutReport();
       // Freeze the target set, then combine compatible maps inside its capacity.
       const pendingLayoutIds=layoutTask?[...layoutTask.mapIds,...layoutTask.remainingLocationIds]:[];

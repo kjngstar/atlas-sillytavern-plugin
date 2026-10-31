@@ -70,7 +70,8 @@ test('same-response new location is committed before its parent layout reference
     const parent=request.messages[1].content.match(/focus=([^、\n]+)/)?.[1];
     const text=request.phase==='observe'?'{"op":"noop"}':[
       {op:'location.upsert',ref:'new:store',data:{name:'器材间',kind:'room',parent_ref:parent}},
-      {op:'map.layout.request',ref:IDS.M2,data:{kind:'floor',spec:{rooms:[{id:'new:store',w:3,h:3,side:'north'}],contents:[]}}},
+      {op:'map.layout.request',ref:IDS.M2,data:{kind:'floor',spec:{rooms:[{id:'new:store',w:8,h:6,side:'north'}],contents:[]}}},
+      {op:'map.layout.request',data:{container_ref:'new:store',kind:'floor',spec:{rooms:[{id:'new:store',w:8,h:6,side:'north'}],contents:[{id:'shelf-new',roomId:'new:store',name:'器材架',type:'shelf',w:1,h:.4,count:1}]}}},
     ].map(op=>JSON.stringify(op)).join('\n');
     return {batchId:request.batchId,text,httpStatus:200,finishReason:'stop'};
   }}});
@@ -85,7 +86,10 @@ test('same-response new location is committed before its parent layout reference
     const room=queryBound(db,'SELECT id,parent_location_id,map_id FROM locations WHERE name=?',['器材间'])[0];
     assert.ok(room,JSON.stringify(prepared.receipt));assert.equal(room.parent_location_id,IDS.L3);assert.equal(room.map_id,IDS.M2);
     const frame=JSON.parse(queryBound(db,'SELECT frame_json FROM maps WHERE id=?',[IDS.M2])[0].frame_json);
-    assert.ok(frame.atlasScene.layout.rooms.some(r=>r.id===room.id),JSON.stringify(prepared.receipt));
+    assert.ok(frame.atlasScene?.layout.rooms.some(r=>r.id===room.id),JSON.stringify(prepared.receipt.issues));
+    const inner=queryBound(db,'SELECT frame_json FROM maps WHERE container_location_id=?',[room.id])[0];
+    assert.ok(inner&&JSON.parse(inner.frame_json).atlasScene,'同批明确内部必须实际保存，不能只建空壳或等下一楼');
+    assert.ok(JSON.parse(inner.frame_json).atlasScene.constraints.contents.some(f=>f.id==='shelf-new'),'明确的子图陈设必须应用，不能只保存父图投影出来的空房间');
     assert.ok(!prepared.receipt.issues.some(i=>i.code==='REF_UNKNOWN'||i.code==='ROOM_REF_UNKNOWN'));
   }finally{await repo.close();}
 });
