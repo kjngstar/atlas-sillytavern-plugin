@@ -38442,10 +38442,11 @@ function completeLayoutClosure(input) {
     const members = collectMapLocations({ mapRow: map, maps, locations });
     const profile = resolveSpatialProfile({ map, maps, container: container ?? null, parentContainer: locations.find((row3) => row3.id === container?.parent_location_id) ?? null, members, routes: input.routes.filter((r) => r.map_id === mapId) });
     const pending = frame.atlasLayoutRequest;
-    const kind = layout || pending?.status === "pending" ? profile.layoutKind : members.length === 0 && ["room", "floor"].includes(String(container?.kind)) && canonical ? "floor" : null;
+    const pendingActive = !!pending && (pending.status === void 0 || pending.status === "pending");
+    const kind = layout || pendingActive ? profile.layoutKind : members.length === 0 && ["room", "floor"].includes(String(container?.kind)) && canonical ? "floor" : null;
     if (kind !== "floor" && kind !== "city" && kind !== "overview") continue;
     const spaceSize = resolveMapSpaceSize({ maps, locations, mapRow: map, branchId: scope.branchId });
-    let spec = structuredClone(pending?.status === "pending" ? pending.spec : scene?.constraints ?? {});
+    let spec = structuredClone(pendingActive ? pending.spec : scene?.constraints ?? {});
     if (kind === "floor" && removedFurnishing.size) {
       const contents = spec.contents ?? [];
       const deleted = contents.filter((f) => {
@@ -43557,8 +43558,13 @@ function createSqlRepository(options) {
         }
       };
       if (Array.isArray(input.layoutMaps) && input.layoutMaps.length) applyFunctionalAreas(input.layoutMaps, true);
-      const layoutInput = worldBuildWindow && Array.isArray(input.layoutMaps) ? { ...input, layoutMaps: input.layoutMaps.filter((mapId) => !worldBuildMapReady(candidateDb, branchId, mapId)) } : input;
-      let layoutTask = layoutInput.layoutMaps ? buildSqlLayoutTask(candidateDb, branchId, layoutInput, turnId, layoutReport, { eagerLocationIds: plannedSceneLocationIds(combinedDrafts, combinedRefs) }) : null;
+      const eagerLocationIds = plannedSceneLocationIds(combinedDrafts, combinedRefs);
+      let layoutInput = worldBuildWindow && Array.isArray(input.layoutMaps) ? { ...input, layoutMaps: input.layoutMaps.filter((mapId) => !worldBuildMapReady(candidateDb, branchId, mapId)) } : input;
+      if (combinedPlanningSent && !input.manual && Array.isArray(layoutInput.layoutMaps) && eagerLocationIds.length) {
+        const plannedMaps = pageAllRows(createTableReadPort(candidateDb), "maps", branchId).filter((m) => m.status === "active" && eagerLocationIds.includes(String(m.container_location_id))).map((m) => String(m.id));
+        layoutInput = { ...layoutInput, layoutMaps: [.../* @__PURE__ */ new Set([...layoutInput.layoutMaps, ...plannedMaps])] };
+      }
+      let layoutTask = layoutInput.layoutMaps ? buildSqlLayoutTask(candidateDb, branchId, layoutInput, turnId, layoutReport, { eagerLocationIds }) : null;
       drainLayoutReport();
       const pendingLayoutIds = layoutTask ? [...layoutTask.mapIds, ...layoutTask.remainingLocationIds] : [];
       const layoutParents = layoutTask?.parentMapIds ?? {};
