@@ -1,6 +1,7 @@
 /** Coarse, read-only map drawing. A sketch never supplies SQL positions or distances. */
 import {mapSymbolKind,bridgeMapSymbol} from './atlas-map-symbols.mjs';
 import {mapDetailLevel,regionOverview,siteContext} from './atlas-map-layers.mjs';
+import {streetSurface} from './atlas-street-map.mjs';
 const point=p=>Array.isArray(p)&&p.length===2&&p.every(Number.isFinite);
 const polygon=p=>Array.isArray(p)&&p.length>=3&&p.every(point);
 const rect=r=>[[r.x,r.y],[r.x+r.w,r.y],[r.x+r.w,r.y+r.h],[r.x,r.y+r.h]];
@@ -76,7 +77,7 @@ export function projectExplorationMaps(nodes,locations,{maps=[],viewMode='player
    if(a!==n)local.set(a.id,a);if(b!==n)local.set(b.id,b);
    edges.push({id:r.routeId??r.id,from:a.id,to:b.id,kind:r.kind,status:r.status,distanceM:r.distanceM??null,quality:r.geometryQuality??r.quality??'estimated'});
   }
-  if(!local.size)continue;
+  if(!local.size&&ownSymbol!=='street')continue;
   const areas=[...local.values()].sort(sort).map((c,i)=>({id:c.containerLocationId,nodeId:c.id,name:c.name,
    external:!children.includes(c),mobile:locations.find(l=>l.id===c.containerLocationId)?.mobility==='mobile',
    c:palette[i%palette.length],...footprint(source.get(c.id)??c,0,(viewMode==='author'||visible.has(c.containerLocationId))?mapSymbolKind(c,places.get(c.containerLocationId)):null)}));
@@ -124,10 +125,11 @@ export function projectExplorationMaps(nodes,locations,{maps=[],viewMode='player
    const k=Math.min(dx?hx/Math.abs(dx):Infinity,dy?hy/Math.abs(dy):Infinity);return Number.isFinite(k)?[p[0]+dx*k,p[1]+dy*k]:p;};
   const passages=edges.map(e=>{const a=atBoundary(e.from,positions.get(e.to)),b=atBoundary(e.to,positions.get(e.from));return {...e,points:[a,[(a[0]+b[0])/2,a[1]],[(a[0]+b[0])/2,b[1]],b]};});
   const surface=siteContext(areas);
-  const all=[...areas.flatMap(a=>[...a.parts.flat(),...(a.bridge?.river?.points??[])].map(([x,y])=>[x+a.x,y+a.y])),...passages.flatMap(e=>e.points),...surface.outlines.flat()];
+  if(ownSymbol==='street')surface.street=streetSurface(passages,{name:n.name,alley:/(?:巷|弄|\b(?:lane|alley))$/iu.test(n.name),hub});
+  const all=[...areas.flatMap(a=>[...a.parts.flat(),...(a.bridge?.river?.points??[])].map(([x,y])=>[x+a.x,y+a.y])),...passages.flatMap(e=>e.points),...surface.outlines.flat(),...(surface.street?.ribbons??[]).flatMap(r=>r.polygon)];
   const xs=all.map(p=>p[0]),ys=all.map(p=>p[1]);
   n.geo={...g,exploration:{level,areas,passages,surface,
    bounds:[Math.min(...xs)-65,Math.max(...xs)+65,Math.min(...ys)-55,Math.max(...ys)+90],
-   note:level==='detail'?'布局总览 · 各子图细节已展开，相对位置为示意':crossing?'地点略图 · 桥面与方位为示意':'地点略图 · 主要轮廓与分布，进入后展开细节',displayOnly:true}};
+   note:surface.street?'街巷略图 · 路面宽度与形状为示意':level==='detail'?'布局总览 · 各子图细节已展开，相对位置为示意':crossing?'地点略图 · 桥面与方位为示意':'地点略图 · 主要轮廓与分布，进入后展开细节',displayOnly:true}};
  }
 }
