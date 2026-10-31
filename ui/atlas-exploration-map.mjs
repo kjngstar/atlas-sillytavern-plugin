@@ -125,8 +125,11 @@ export function projectExplorationMaps(nodes,locations,{maps=[],viewMode='player
    const k=Math.min(dx?hx/Math.abs(dx):Infinity,dy?hy/Math.abs(dy):Infinity);return Number.isFinite(k)?[p[0]+dx*k,p[1]+dy*k]:p;};
   const passages=edges.map(e=>{const a=atBoundary(e.from,positions.get(e.to)),b=atBoundary(e.to,positions.get(e.from));return {...e,points:[a,[(a[0]+b[0])/2,a[1]],[(a[0]+b[0])/2,b[1]],b]};});
   const surface=siteContext(areas);
-  if(ownSymbol==='street')surface.street=streetSurface(passages,{name:n.name,alley:/(?:巷|弄|\b(?:lane|alley))$/iu.test(n.name),hub});
-  const all=[...areas.flatMap(a=>[...a.parts.flat(),...(a.bridge?.river?.points??[])].map(([x,y])=>[x+a.x,y+a.y])),...passages.flatMap(e=>e.points),...surface.outlines.flat(),...(surface.street?.ribbons??[]).flatMap(r=>r.polygon)];
+  if(ownSymbol==='street'){
+   surface.street=streetSurface(passages,{name:n.name,alley:/(?:巷|弄|\b(?:lane|alley))$/iu.test(n.name),hub});
+   if(areas.some(a=>!a.external&&!a.mobile))surface.street.frontages=[];
+  }
+  const all=[...areas.flatMap(a=>[...a.parts.flat(),...(a.bridge?.river?.points??[])].map(([x,y])=>[x+a.x,y+a.y])),...passages.flatMap(e=>e.points),...surface.outlines.flat(),...(surface.street?.ribbons??[]).flatMap(r=>r.polygon),...(surface.street?.frontages??[]).flatMap(f=>f.pts)];
   const xs=all.map(p=>p[0]),ys=all.map(p=>p[1]);
   n.geo={...g,exploration:{level,areas,passages,surface,
    bounds:[Math.min(...xs)-65,Math.max(...xs)+65,Math.min(...ys)-55,Math.max(...ys)+90],

@@ -519,10 +519,14 @@ function create(canvas, mini, hooks){
     if(street){
       // A street is an open paved surface, not a route's dashed centreline.
       // Frontage bands are cartographic texture, never buildings or hit targets.
+      for(const f of street.frontages??[]){
+        trace(f.pts);ctx.closePath();ctx.fillStyle=hexA(ink,.10);ctx.fill();ctx.lineWidth=1/cam;ctx.strokeStyle=hexA(ink,.34);ctx.stroke();
+      }
       for(const r of street.ribbons){
-        trace(r.points);ctx.lineWidth=r.width+38;ctx.strokeStyle=hexA(ink,.055);ctx.stroke();
         trace(r.polygon);ctx.closePath();ctx.fillStyle=hexA(ink,.10);ctx.fill();
       }
+      ctx.strokeStyle=hexA(ink,.10);ctx.lineWidth=.6/cam;
+      for(const p of street.paving??[]){trace(p);ctx.stroke();}
       for(const r of street.ribbons)for(const edge of r.edges){
         trace(edge);ctx.lineWidth=6/cam;ctx.strokeStyle=hexA(ink,.11);ctx.stroke();
         ctx.lineWidth=1.3/cam;ctx.strokeStyle=hexA(ink,.6);ctx.stroke();
@@ -886,8 +890,8 @@ function create(canvas, mini, hooks){
       const on = st.filter.size===0 || st.filter.has(d.id);
       ctx.save(); ctx.globalAlpha = on?1:.16;
       ctx.beginPath();d.pts.forEach((p,i)=>i?ctx.lineTo(...p):ctx.moveTo(...p));ctx.closePath();
-      ctx.fillStyle = hexA(d.c,.10); ctx.fill();
-      ctx.lineWidth=1.6/st.cam.s; ctx.strokeStyle=hexA(d.c,.42); ctx.stroke();
+      ctx.fillStyle = hexA(d.c,d.displayOnly ? .055 : .10); ctx.fill();
+      ctx.lineWidth=(d.displayOnly?1:1.6)/st.cam.s; ctx.strokeStyle=hexA(d.c,d.displayOnly ? .25 : .42); ctx.stroke();
       ctx.setLineDash([4/st.cam.s,5/st.cam.s]);
       ctx.lineWidth=4/st.cam.s; ctx.strokeStyle=hexA(d.c,.10); ctx.stroke();
       ctx.setLineDash([]);
@@ -917,14 +921,20 @@ function create(canvas, mini, hooks){
         // inventing clickable stalls, doors, buildings, or a new watercourse.
         const xs=d.pts.map(p=>p[0]),ys=d.pts.map(p=>p[1]),x0=Math.min(...xs),x1=Math.max(...xs),y0=Math.min(...ys),y1=Math.max(...ys);
         ctx.save();ctx.beginPath();d.pts.forEach((p,i)=>i?ctx.lineTo(...p):ctx.moveTo(...p));ctx.closePath();ctx.clip();
+        for(const f of d.fabric??[]){
+          ctx.beginPath();f.pts.forEach((p,i)=>i?ctx.lineTo(...p):ctx.moveTo(...p));ctx.closePath();
+          ctx.fillStyle=hexA(d.c,.17);ctx.fill();ctx.strokeStyle=hexA(d.c,.4);ctx.lineWidth=.9/st.cam.s;ctx.stroke();
+        }
         ctx.strokeStyle=hexA(d.c,.18);ctx.lineWidth=.8/st.cam.s;
         if(d.role==='plaza'){
-          for(let y=y0+22;y<y1;y+=24){ctx.beginPath();ctx.moveTo(x0,y);ctx.lineTo(x1,y);ctx.stroke();}
+          const w=x1-x0,h=y1-y0;
+          ctx.strokeRect(x0+w*.29,y0+h*.31,w*.40,h*.37);
+          for(let y=y0+h*.32;y<y0+h*.68;y+=24){ctx.beginPath();ctx.moveTo(x0+w*.30,y);ctx.lineTo(x0+w*.68,y);ctx.stroke();}
         }else if(d.role==='quay'){
+          ctx.strokeStyle=hexA(d.c,.4);
           for(let k=0;k<4;k++){ctx.beginPath();ctx.moveTo(x0+12,y1-10-k*8);ctx.lineTo(x1-12,y1-10-k*8);ctx.stroke();}
         }else if(d.role==='market'){
-          const w=(x1-x0)*.22,h=(y1-y0)*.14;
-          for(let i=0;i<3;i++)for(let j=0;j<2;j++)ctx.strokeRect(x0+(x1-x0)*(.17+j*.43),y0+(y1-y0)*(.18+i*.23),w,h);
+          for(const f of d.fabric??[]){const a=f.pts[0],b=f.pts[1];ctx.beginPath();ctx.moveTo(a[0],a[1]+8);ctx.lineTo(b[0],b[1]+8);ctx.stroke();}
         }
         ctx.restore();
       }

@@ -36,13 +36,16 @@ function alleyFixture(){
 }
 test('两出口小巷画成路面，保留路线身份距离和外部图标；没有连接也不伪造出口',()=>{
  const f=alleyFixture(),before=JSON.stringify(f.maps);projectExplorationMaps(f.nodes,f.locations,{maps:f.maps});
- const s=f.lane.geo.exploration;assert.equal(s.surface.street.ribbons.length,2);assert.equal(s.surface.street.name,'雨棚巷');
+ const s=f.lane.geo.exploration;assert.equal(s.surface.street.ribbons.length,1);assert.equal(s.surface.street.name,'雨棚巷');
+ assert.ok(s.surface.street.frontages.every(f=>f.decorative&&f.displayOnly&&!f.id));
  assert.equal(s.areas.filter(a=>a.external).length,2);assert.ok(s.passages.every(e=>e.distanceM===300));assert.equal(JSON.stringify(f.maps),before);
  const empty=alleyFixture();projectExplorationMaps(empty.nodes,empty.locations);
  assert.equal(empty.lane.geo.exploration.areas.length,0);assert.equal(empty.lane.geo.exploration.passages.length,0);
  assert.ok(area(empty.lane.geo.exploration.surface.street.ribbons[0].polygon)>1000);
  const hidden=alleyFixture();hidden.maps[0].routes.forEach(r=>r.hidden=true);projectExplorationMaps(hidden.nodes,hidden.locations,{maps:hidden.maps});
  assert.equal(hidden.lane.geo.exploration.areas.length,0);
+ const confirmed=alleyFixture();confirmed.maps[0].routes.forEach(r=>r.geometryQuality='confirmed');projectExplorationMaps(confirmed.nodes,confirmed.locations,{maps:confirmed.maps});
+ assert.ok(confirmed.lane.geo.exploration.surface.street.ribbons[0].points.every(p=>p[1]===0),'已有确认路径不加示意弯折');
 });
 test('确认边界和已有布局不被街道符号覆盖',()=>{
  for(const geo of [{selfArea:{pts:[[0,0],[200,0],[200,50],[0,50]],quality:'confirmed'}},{rooms:[{x:0,y:0,w:20,h:4}]}]){
@@ -74,5 +77,5 @@ test('小巷绘图确实填充路面和双边缘，不再绘制原来的虚线�
  const ctx={save(){},restore(){},beginPath(){},moveTo(){},lineTo(){},closePath(){},translate(){},fill(){fills.push(this.fillStyle);},stroke(){strokes.push(this.lineWidth);},setLineDash(d){dashes.push(d);}};
  const rt=vm.createContext({ctx,st:{cam:{s:1},showLabels:true},canvasStyle:null,hexA:(c,a)=>c+'@'+a,pushLabel:(...v)=>labels.push(v)});
  vm.runInContext(source.slice(start,end),rt);rt.explorationMap(f.lane.geo.exploration);
- assert.equal(fills.length,2);assert.ok(strokes.some(w=>w>50));assert.ok(!dashes.some(d=>d.length));assert.ok(labels.some(l=>l[2]==='雨棚巷'));
+ assert.equal(fills.length,7);assert.ok(strokes.includes(1.3));assert.ok(!dashes.some(d=>d.length));assert.ok(labels.some(l=>l[2]==='雨棚巷'));
 });
