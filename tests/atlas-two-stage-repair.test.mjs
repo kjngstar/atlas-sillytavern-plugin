@@ -134,6 +134,7 @@ for (const [field, spec] of [
  ['route', {links:[{id:'missing-route'}]}],
  ['furniture-room', {contents:[{id:'local-desk',roomId:'missing-room'}]}],
  ['zone-near', {zones:[{id:'L1',near:'missing-neighbor'}]}],
+ ['building-near', {buildings:[{id:'L1',districtId:'L1',near:'missing-neighbor'}]}],
  ['corridor', {corridorLocationRef:'missing-corridor'}],
  ['feature-zone', {features:[{id:'local-forest',zoneId:'missing-zone'}]}],
 ]) test(`repair preflight catches ${field} references without treating local IDs as entities`, () => {
@@ -145,7 +146,7 @@ for (const [field, spec] of [
 test('all valid entity slots accept aliases and raw IDs; decoration and furniture IDs stay local',()=>{
  const refs=['location','room','route','character','item'].map((id,i)=>({id,alias:`X${i}`}));
  const spec={zones:[{id:'X0',near:'room'}],links:[{id:'X2'}],features:[{id:'local-texture',zoneId:'X0'}],
-  corridorLocationRef:'room',districts:[{id:'location'}],buildings:[{id:'X1',districtId:'location'}],
+  corridorLocationRef:'room',districts:[{id:'location'}],buildings:[{id:'X1',districtId:'location',near:'X0',sector:'east',gapM:4}],
   rooms:[{id:'room'}],contents:[{id:'local-desk',roomId:'X1'}],actors:[{id:'X3',roomId:'room',near:'local-desk'}],items:[{id:'X4',on:'local-desk'}]};
  assert.deepEqual(unknownLayoutEntityRefs([{op:'map.layout.request',data:{spec}}],refs),[]);
 });

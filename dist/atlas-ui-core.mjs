@@ -40,7 +40,7 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 var define_ATLAS_BUILD_INFO_default;
 var init_define_ATLAS_BUILD_INFO = __esm({
   "<define:__ATLAS_BUILD_INFO__>"() {
-    define_ATLAS_BUILD_INFO_default = { pluginVersion: "0.9.100", buildId: "build-59baa6ed980ddc65", buildCommit: "f42936260061c24621cce0454bbd27cc14777acd", buildDirty: false };
+    define_ATLAS_BUILD_INFO_default = { pluginVersion: "0.9.100", buildId: "build-d303205ecf4ecf30", buildCommit: "664a24c0c063b285e9a44a2963a60e68f7927d24", buildDirty: false };
   }
 });
 
@@ -95,7 +95,7 @@ var init_atlas_runtime_limits = __esm({
       decisionOutputReserveTokens: 512,
       decisionActorOutputTokens: 256,
       repairResponseTokens: 2048,
-      modelTimeoutMs: 12e4,
+      modelTimeoutMs: 3e5,
       mentionCandidates: 256,
       locationDepth: 12,
       containerDepth: 4,
@@ -4361,6 +4361,14 @@ var init_atlas_spatial_profile = __esm({
   }
 });
 
+// src/atlas-scene-expansion.ts
+var init_atlas_scene_expansion = __esm({
+  "src/atlas-scene-expansion.ts"() {
+    "use strict";
+    init_define_ATLAS_BUILD_INFO();
+  }
+});
+
 // src/atlas-sql-scene-maps.ts
 var init_atlas_sql_scene_maps = __esm({
   "src/atlas-sql-scene-maps.ts"() {
@@ -4373,6 +4381,7 @@ var init_atlas_sql_scene_maps = __esm({
     init_atlas_spatial_frame();
     init_atlas_spatial_profile();
     init_atlas_db_runtime();
+    init_atlas_scene_expansion();
   }
 });
 
@@ -4503,6 +4512,7 @@ var init_atlas_ops_prompts = __esm({
       "只输出本次允许的操作，每行一个完整 JSON 对象。",
       '每行结构固定为 {"op":"操作名","ref":"对象引用（可选）","data":{实际字段},"source":"来源（可选）","why":"依据（可选）}；name、title、phase、subject_ref 等实际字段全部放在 data 内，禁止放在顶层。',
       "只写发生变化的字段。已有对象使用提供的短引用；新对象使用 new: 临时引用。",
+      "先按父地点、已存在名称和别名核对身份。简称、加上容器称呼或换用引号不意味着新地点；确认同一对象时使用已有引用，必要时补 aliases，不另建一间同用途房间来作为移动目的地。不能确定身份时保留粗位置，不按相似名称强行合并。",
       'L1、C1、I1 等短引用只能使用本次目录中实际存在的编号；目录为空时不能自行编造这些已有编号。新建地点写 ref:"new:city"，引用该新地点也写 "new:city"；这些临时别名只在本批有效。',
       "不要输出整份世界、SQL、解释段或思考过程。",
       '没有需要修改的数据时输出 {"op":"noop"}。',
@@ -4532,6 +4542,8 @@ var init_atlas_sql_model_context = __esm({
     init_define_ATLAS_BUILD_INFO();
     init_atlas_ops_prompts();
     init_atlas_sql_refs();
+    init_atlas_spatial_frame();
+    init_atlas_model_batching();
   }
 });
 
@@ -5326,6 +5338,16 @@ var init_atlas_world_build_state = __esm({
   }
 });
 
+// src/atlas-spatial-planning.ts
+var init_atlas_spatial_planning = __esm({
+  "src/atlas-spatial-planning.ts"() {
+    "use strict";
+    init_define_ATLAS_BUILD_INFO();
+    init_atlas_ops_refs();
+    init_atlas_hash();
+  }
+});
+
 // src/atlas-sql-layout-task.ts
 var init_atlas_sql_layout_task = __esm({
   "src/atlas-sql-layout-task.ts"() {
@@ -5348,6 +5370,7 @@ var init_atlas_sql_layout_task = __esm({
     init_atlas_layout_signature();
     init_atlas_world_contract();
     init_atlas_prompt_layers();
+    init_atlas_spatial_planning();
     init_atlas_space_canonical();
     init_atlas_spatial_profile();
   }
@@ -5492,6 +5515,8 @@ var init_atlas_world_build_execution = __esm({
     init_atlas_spatial();
     init_atlas_sql_layout_task();
     init_atlas_spatial_profile();
+    init_atlas_db_views();
+    init_atlas_scene_expansion();
   }
 });
 
@@ -5547,6 +5572,7 @@ var init_atlas_sql_world_completion = __esm({
     init_atlas_construction_budget();
     init_atlas_source_catalogue();
     init_atlas_spatial();
+    init_atlas_spatial_planning();
   }
 });
 
@@ -6087,6 +6113,7 @@ var init_atlas_db_repository = __esm({
     init_atlas_sql_layout_task();
     init_atlas_functional_areas();
     init_atlas_layout_evidence();
+    init_atlas_spatial_planning();
     init_atlas_sql_legacy_import();
     init_atlas_db_commit();
     init_atlas_db_rollback();
@@ -6694,6 +6721,7 @@ var TABLE_DELTA_DISCIPLINE_CONTENT = '【增量契约补充纪律（必须逐条
 init_atlas_request_diagnostics();
 init_atlas_diagnostics();
 init_atlas_response_metrics();
+init_atlas_runtime_limits();
 function awaitResponse(work, signal) {
   return new Promise((resolve, reject) => {
     const abort = () => {
@@ -6902,7 +6930,7 @@ async function callAtlasWorldTurnApi(preset, input, deps = {}) {
   const maxTokens = Number.isSafeInteger(preset.maxTokens) && preset.maxTokens > 0 ? preset.maxTokens : void 0;
   const temperature = typeof preset.temperature === "number" ? preset.temperature : 1;
   const topP = typeof preset.topP === "number" ? preset.topP : 0.95;
-  const timeoutMs = Math.min(Math.max(preset.timeoutMs ?? 3e4, 1e3), 12e5);
+  const timeoutMs = Math.min(Math.max(preset.timeoutMs ?? ATLAS_RUNTIME_LIMITS.modelTimeoutMs, 1e3), 12e5);
   Object.assign(diagnosticDetails, { timeoutMs, maxTokens: maxTokens ?? 0, promptChars: bodyMessages.reduce((n, m) => n + m.content.length, 0), messageCount: bodyMessages.length });
   const fetchFn = deps.fetchFn ?? globalThis.fetch;
   const controller = new AbortController();
@@ -7353,6 +7381,7 @@ init_atlas_prompt_layers();
 init_atlas_world_contract();
 init_atlas_work_batching();
 init_atlas_model_batching();
+init_atlas_runtime_limits();
 
 // src/atlas-content-replace.ts
 init_define_ATLAS_BUILD_INFO();
@@ -7713,7 +7742,7 @@ function parseLegacyPreset(raw) {
   if (apiKey === null) return null;
   const maxTokens = isFiniteIntIn(record.maxTokens, MIN_MAX_TOKENS, MAX_MAX_TOKENS) ? record.maxTokens : 0;
   const temperature = isFiniteIn(record.temperature, MIN_TEMPERATURE, MAX_TEMPERATURE) ? record.temperature : 0.7;
-  const timeoutMs = isFiniteIntIn(record.timeoutMs, MIN_TIMEOUT_MS, MAX_TIMEOUT_MS) ? record.timeoutMs : 3e4;
+  const timeoutMs = isFiniteIntIn(record.timeoutMs, MIN_TIMEOUT_MS, MAX_TIMEOUT_MS) ? record.timeoutMs : ATLAS_RUNTIME_LIMITS.modelTimeoutMs;
   const systemPrompt = typeof record.systemPrompt === "string" ? record.systemPrompt : "";
   return { name: record.name.trim(), endpoint: record.endpoint, model: record.model.trim(), apiKey, maxTokens, temperature, topP: 0.95, timeoutMs, systemPrompt };
 }
@@ -12214,6 +12243,7 @@ init_atlas_db_runtime();
 init_atlas_hash();
 init_atlas_map_topology();
 init_atlas_runtime_limits();
+init_atlas_scene_expansion();
 
 // src/atlas-sql-chat.ts
 init_atlas_sql_model_context();

@@ -83,6 +83,32 @@ export function compileSceneGroup({request,scope,currentScope,mapRow,locations,c
     after.row_rev=before.row_rev+1;after.updated_turn_id=turnId;
     mutations.push({table:'locations',rowId:before.id,before:clone(before),after,sourceOpIds:[operationId],basis:{kind:'layout',mapId:mapRow.id,quality:geo.precision}});readSet.push({table:'locations',rowId:before.id,rowRev:before.row_rev});
   }
+  if(result.scene.layout.kind==='city'){
+    const positions=new Map(locations.map(l=>[l.id,l]));
+    for(const mutation of mutations)if(mutation.table==='locations')positions.set(mutation.rowId,mutation.after);
+    const anchor=id=>{
+      const seen=new Set();let row=positions.get(id);
+      while(row&&!seen.has(row.id)){
+        seen.add(row.id);
+        if(row.mobility==='mobile'){row=positions.get(row.anchor_location_id);continue;}
+        if(row.map_id===mapRow.id&&finite(row.grid_x)&&finite(row.grid_y)&&row.coord_precision!=='unknown')return [row.grid_x,row.grid_y];
+        row=positions.get(row.parent_location_id);
+      }
+      return null;
+    };
+    for(const before of routes){
+      if(before.branch_id!==scope.branchId||before.map_id!==mapRow.id||before.status==='closed'||before.geometry_quality==='confirmed')continue;
+      const a=anchor(before.from_location_id),b=anchor(before.to_location_id);
+      if(!a||!b||Math.hypot(a[0]-b[0],a[1]-b[1])<1e-7)continue;
+      const geometry={kind:'line',coordinates:[a,b]};
+      let raw=before.geometry_json;
+      if(typeof raw==='string'){try{raw=JSON.parse(raw);}catch{raw=null;}}
+      if(stable(raw)===stable(geometry))continue;
+      const after={...clone(before),geometry_json:geometry,geometry_quality:'estimated',geometry_rev:Number(before.geometry_rev??0)+1,row_rev:Number(before.row_rev??0)+1,updated_turn_id:turnId};
+      mutations.push({table:'routes',rowId:before.id,before:clone(before),after,sourceOpIds:[operationId],basis:{kind:'layout-route',mapId:mapRow.id,quality:'estimated'}});
+      readSet.push({table:'routes',rowId:before.id,rowRev:before.row_rev});
+    }
+  }
   for(const room of [...(result.scene.layout.rooms??[]),...(result.scene.layout.corridor?.entityId?[{...result.scene.layout.corridor,id:result.scene.layout.corridor.entityId}]:[])]){
     if(room.placement==='proxy')continue;
     if(room.id===mapRow.container_location_id)continue;

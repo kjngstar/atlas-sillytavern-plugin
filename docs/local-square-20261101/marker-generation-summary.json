@@ -1,0 +1,116 @@
+{
+  "firstBuild": {
+    "pluginVersion": "0.9.100",
+    "buildId": "build-4b3d09c266a29ed3",
+    "buildCommit": "15b2a477c21d23d36c752f8c10f023bfc8e65033",
+    "buildDirty": false
+  },
+  "finalBuild": {
+    "pluginVersion": "0.9.100",
+    "buildId": "build-aefebc65c5a55b93",
+    "buildCommit": "25ffc0aa3b12bd51a77ed122e9fd70cf9418d18d",
+    "buildDirty": false
+  },
+  "firstScope": {
+    "chatFingerprint": "ref-3b1229e4beece03f",
+    "branchRef": "ref-483d388493378983",
+    "revision": 4,
+    "viewMode": "author"
+  },
+  "finalScope": {
+    "chatFingerprint": "ref-3b1229e4beece03f",
+    "branchRef": "ref-483d388493378983",
+    "revision": 5,
+    "viewMode": "author"
+  },
+  "firstModelCalls": 5,
+  "addedModelCalls": 3,
+  "totalRecordedCalls": 8,
+  "addedCalls": [
+    {
+      "stage": "observe",
+      "status": "completed",
+      "ms": 11093
+    },
+    {
+      "stage": "geography",
+      "status": "failed",
+      "ms": 300013
+    },
+    {
+      "stage": "geography",
+      "status": "completed",
+      "ms": 6585
+    }
+  ],
+  "saltBefore": {
+    "name": "盐栈",
+    "id": "loc_b4911c6e11eb3a109a8353c2",
+    "ownerMapId": "map_dd15532eadaa55543b12aad6",
+    "childMap": null
+  },
+  "saltAfter": {
+    "name": "盐栈",
+    "id": "loc_b4911c6e11eb3a109a8353c2",
+    "ownerMapId": "map_dd15532eadaa55543b12aad6",
+    "childMap": "map_5f35774bf6dbf6545ae14713"
+  },
+  "sameSaltIdentity": true,
+  "stillMarkerOnly": [
+    {
+      "name": "织坊",
+      "id": "loc_c086c62fe06551ce8befe229",
+      "ownerMapId": "map_dd15532eadaa55543b12aad6",
+      "childMap": null
+    }
+  ],
+  "interiors": [
+    {
+      "name": "巡河站值班室",
+      "id": "map_42bac674b31b5d2c78674424",
+      "kind": "floor",
+      "rooms": [
+        {
+          "name": "巡河站值班室",
+          "w": 8,
+          "h": 5
+        }
+      ],
+      "furnishing": [
+        "档案工具柜",
+        "值班椅",
+        "值班巡河桌"
+      ]
+    },
+    {
+      "name": "盐栈前厅",
+      "id": "map_406984465f7d475ca1b3fbc6",
+      "kind": "floor",
+      "rooms": [
+        {
+          "name": "盐栈前厅",
+          "w": 7,
+          "h": 9
+        }
+      ],
+      "furnishing": [
+        "记账柜台",
+        "两排盐袋堆",
+        "高脚凳"
+      ]
+    },
+    {
+      "name": "修表铺工作间",
+      "id": "map_014c41187d9f7614e71990e0",
+      "kind": "floor",
+      "rooms": [
+        {
+          "name": "修表铺工作间",
+          "w": 6,
+          "h": 8
+        }
+      ],
+      "furnishing": []
+    }
+  ]
+}

@@ -19,7 +19,7 @@ export function projectMapView({view,mapId,scope}={}){
     if(!['location','character','item'].includes(p.kind))continue;
     let polygon=null;const area=geometry(p.area,'$.points.area');
     if(area?.kind==='polygon'&&Array.isArray(area.points)&&area.points.length>=3&&area.points.every(q=>finite(q.x)&&finite(q.y)))polygon=area.points.map(q=>({x:q.x*k,y:q.y*k}));
-    pins.push({id:p.entityId,entityId:p.entityId,name:String(p.name??''),type:p.kind==='character'?'person':p.kind,mapId,x:p.x*k,y:p.y*k,quality:p.markerQuality??p.precision??'approximate',locationId:p.locationId??null,radius:finite(p.radius)?p.radius*k:null,polygon});
+    pins.push({id:p.entityId,entityId:p.entityId,name:String(p.name??''),type:p.kind==='character'?'person':p.kind,mapId,x:p.x*k,y:p.y*k,quality:p.markerQuality??p.precision??'approximate',locationId:p.locationId??null,radius:finite(p.radius)?p.radius*k:null,polygon,...(p.isProtagonist===true?{isProtagonist:true}:{})});
   }
   const xs=pins.map(p=>p.x),ys=pins.map(p=>p.y);
   const bounds=finite(frameWidth)&&frameWidth>0&&finite(frameHeight)&&frameHeight>0?{x:finite(frame.origin_x)?frame.origin_x*k:0,y:finite(frame.origin_y)?frame.origin_y*k:0,w:frameWidth*k,h:frameHeight*k}:{x:Math.min(0,...xs)-k,y:Math.min(0,...ys)-k,w:Math.max(k,(Math.max(0,...xs)-Math.min(0,...xs))+2*k),h:Math.max(k,(Math.max(0,...ys)-Math.min(0,...ys))+2*k)};
@@ -207,12 +207,35 @@ export function publicSpaceCanonical(canonical,{viewMode='author',visibleLocalId
   return {version:1,locationId:canonical.locationId,revision:Number.isInteger(canonical.revision)&&canonical.revision>=0?canonical.revision:0,size,furnishing};
 }
 /** Reconcile saved visual anchors with the same-revision SQL position projection. */
-export function hydrateScene(scene,projection){
+export function hydrateScene(scene,projection,{pointLocationIds=[]}={}){
   if(!projection?.ok||!projection.scene||scene.mapId!==projection.scene.mapId||scene.branchId!==projection.scene.branchId)return failure('PROJECTION_SCOPE_MISMATCH','$','几何文档与 SQL 现状不属于同一地图');
   if(scene.units!==projection.scene.units||scene.metersPerCell!==projection.scene.metersPerCell)return failure('PROJECTION_METRIC_MISMATCH','$','已保存布局需要重新按当前尺度验证');
-  const d=clone(scene),s=d.layout;if(s.kind!=='floor')return {ok:true,scene:d,issues:[]};
+  const d=clone(scene),s=d.layout;
+  if(s.kind==='overview'){
+    // Routes belong to the same-revision SQL projection, including visibility
+    // and geometry validation; saved template links may lag a route update.
+    s.routes=clone(projection.scene.layout.routes??[]);
+    return {ok:true,scene:d,issues:[]};
+  }
+  if(s.kind==='city'){
+    // Open places without a footprint and anchored vehicles use the current
+    // SQL point projection. They are markers, never invented fixed buildings.
+    const allowed=new Set(pointLocationIds),b=s.bounds;
+    s.pins=(projection.scene.layout.pins??[]).filter(p=>p.type==='location'&&allowed.has(p.id)&&finite(p.x)&&finite(p.y)&&p.x>=b.x&&p.y>=b.y&&p.x<=b.x+b.w&&p.y<=b.y+b.h).map(clone);
+    return {ok:true,scene:d,issues:[]};
+  }
+  if(s.kind!=='floor')return {ok:true,scene:d,issues:[]};
   const pins=projection.scene.layout.pins??[],coarse=projection.coarseList??[],P=new Map(pins.map(p=>[p.id,p])),C=new Map(coarse.map(p=>[p.entityId,p]));
   s.actors=s.actors.filter(a=>{const p=P.get(a.id),c=C.get(a.id);return p?.locationId===a.roomId||c?.locationId===a.roomId;}).map(a=>{const p=P.get(a.id);return p&&p.quality!=='layout'?{...a,x:p.x,y:p.y,quality:p.quality,name:p.name}:a;});
   s.items=s.items.filter(a=>{const p=P.get(a.id);return p?.locationId===a.roomId;}).map(a=>{const p=P.get(a.id);return p&&p.quality!=='layout'?{...a,x:p.x,y:p.y,quality:p.quality,name:p.name}:a;});
+  const rooms=new Map([...(s.rooms??[]),...(s.areas??[]),...(s.hostArea?[s.hostArea]:[])].map(r=>[r.id,r]));
+  for(const [key,type] of [['actors','person'],['items','item']]){
+    const represented=new Set(s[key].map(p=>p.id));
+    for(const p of pins){
+      const room=rooms.get(p.locationId);
+      if(p.type!==type||represented.has(p.id)||!room||!finite(p.x)||!finite(p.y)||p.x<room.x||p.y<room.y||p.x>room.x+room.w||p.y>room.y+room.h)continue;
+      s[key].push({...clone(p),roomId:p.locationId});represented.add(p.id);
+    }
+  }
   s.path=[];return {ok:true,scene:d,issues:[]};
 }

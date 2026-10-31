@@ -3,6 +3,9 @@ import { visibleWorkbenchMaps } from './atlas-workbench-data.mjs';
 import { projectReferenceFlows } from './atlas-reference-flows.mjs';
 import { projectMapContext } from './atlas-map-context.mjs';
 import { projectSpaceNavigation } from './atlas-space-navigation.mjs';
+import { projectExplorationMaps } from './atlas-exploration-map.mjs';
+import { cityLocality } from './atlas-street-map.mjs';
+import { projectLocalSiteMaps } from './atlas-local-site-map.mjs';
 
 /** Descriptive categories, independent of the actual parent/child map tree. */
 const MAP_CATEGORY_NAMES = {
@@ -200,7 +203,8 @@ export function referenceGeometry(map, document, {viewMode='author',visibleLocat
       represented.add(text(p.entityId));
     }
   }
-  const uniquePins=[...new Map(rawPins.filter(finite).map(p=>[`${p.type}:${p.entityId??p.id}`,p])).values()];
+  // 当前容器由标题与已有墙体/边界说明，不再把自己当成图内的子地点。
+  const uniquePins=[...new Map(rawPins.filter(p=>finite(p)&&text(p.entityId??p.id)!==text(map.containerLocationId)).map(p=>[`${p.type}:${p.entityId??p.id}`,p])).values()];
   /**
    * M6-03③：示意坐标不许被「升格」成精确。
    *
@@ -217,11 +221,14 @@ export function referenceGeometry(map, document, {viewMode='author',visibleLocat
   if(layout?.kind==='city') {
     kind='city';
     const river=layout.river;
-    geo={districts:(layout.districts??[]).filter(d=>d.polygon?.length>=3&&d.polygon.every(finite)).map((d,i)=>({id:d.id,name:d.name,c:COLORS[i%COLORS.length],pts:d.polygon.map(xy)})),
+    const knownAreas=new Map((map.points??[]).map(p=>[p.entityId,p.area?.quality]));
+    const calibrated=metric>0&&['confirmed','exact'].includes(document?.metricQuality??map.scaleQuality);
+    geo={districts:(layout.districts??[]).filter(d=>d.polygon?.length>=3&&d.polygon.every(finite)).map((d,i)=>cityLocality({id:d.id,name:d.name,c:COLORS[i%COLORS.length],quality:['confirmed','exact'].includes(knownAreas.get(d.id))?knownAreas.get(d.id):d.quality,site:finite(d.site)?xy(d.site):null,pts:d.polygon.map(xy)},{template:typeof layout.structureKey==='string'&&!calibrated,hasBuildings:(layout.buildings??[]).some(b=>!b.decorative&&b.districtId===d.id)})),
       river:river?Array.from({length:41},(_,i)=>{const y=(river.height??b.h)*i/40;return xy({x:river.cx+Math.sin((y/(river.height||b.h)*2-.35)*Math.PI)*river.amplitude,y});}):null,
       riverWidth:river?.width?river.width*scale:null,wallPoints:(layout.wall??[]).filter(finite).map(xy),
-      cityBuildings:(layout.buildings??[]).filter(p=>!p.decorative).map(r=>({...rect(r),id:r.id,name:r.name})),
-      avenues:(layout.roads??[]).filter(r=>finite(r.from??r.a)&&finite(r.to??r.b)).map(r=>({from:xy(r.from??r.a),to:xy(r.to??r.b)})),pois:[]};
+      templateCity:typeof layout.structureKey==='string'&&!calibrated,
+      cityBuildings:(layout.buildings??[]).filter(p=>!p.decorative).map(r=>({...rect(r),id:r.id,name:r.name,quality:r.quality})),
+      avenues:(layout.roads??[]).filter(r=>finite(r.from??r.a)&&finite(r.to??r.b)).map(r=>({id:r.id,name:r.name,quality:r.quality??'layout',width:Number.isFinite(r.width)&&r.width>0?r.width*scale:null,from:xy(r.from??r.a),to:xy(r.to??r.b)})),pois:[]};
   } else if(layout?.kind==='overview') {
     // A SQL overview already contains validated geometry. Keep its paths and
     // footprints instead of reducing the whole map to unconnected markers.
@@ -268,6 +275,8 @@ export function referenceGeometry(map, document, {viewMode='author',visibleLocat
       selfArea:(()=>{
         const sa=layout.selfArea;
         if(!sa||typeof sa!=='object'||!Array.isArray(sa.polygon)||sa.polygon.length<3||!sa.polygon.every(finite))return null;
+        // frame 是计算画布，不是场地轮廓；旧存档的兜底矩形也不能当边界显示。
+        if(sa.source!=='canonical'&&sa.quality!=='confirmed')return null;
         const owner=text(sa.locationId);
         if(!author&&!(owner&&visible.has(owner)))return null;
         return {locationId:owner||null,name:text(sa.name)||null,
@@ -310,7 +319,7 @@ export function referenceGeometry(map, document, {viewMode='author',visibleLocat
       entityId:layout.corridor?.entityId??null,name:text(layout.corridor?.name)||null,
       y:corridor.y+corridor.h/2},
       hostArea:hostArea?{...rect(hostArea),id:hostArea.id,name:hostArea.name}:null,
-      rooms:[...functionalAreas.map(r=>({...rect(r),id:r.id,name:r.name,kind:'other',status:r.quality==='confirmed'?'功能分区':'功能分区 · 估计',tint:'57,224,160',live:false})),...(layout.rooms??[]).filter(r=>r.id!==hostArea?.id).map((r,i)=>({...rect(r),id:r.id,name:r.name,kind:r.id===map.containerLocationId&&map.containerLocationKind==='vehicle'?'vehicle':'room',
+      rooms:[...functionalAreas.map(r=>({...rect(r),id:r.id,name:r.name,kind:'other',status:r.quality==='confirmed'?'功能分区':'功能分区 · 估计',tint:'57,224,160',live:false})),...(layout.rooms??[]).filter(r=>r.id!==hostArea?.id).map((r,i)=>({...rect(r),id:r.id,name:r.name,isContainer:r.id===map.containerLocationId,kind:r.id===map.containerLocationId&&map.containerLocationKind==='vehicle'?'vehicle':'room',
         role:r.role??'indoor',
         status:text(r.status)||null,
         tint:r.role==='garden'?'57,224,160':r.role==='outdoor'?'255,194,71':['67,224,255','155,107,255','57,224,160','127,212,255'][i%4],live:activeRooms.has(r.id)}))],
@@ -445,6 +454,8 @@ export function projectReferenceData({state={},mapView,sceneView,catalogView,tas
   }
   projectMapContext(nodes,out.LOCATIONS,{inTransit});
   projectSpaceNavigation(nodes,out.LOCATIONS,{scenes});
+  projectLocalSiteMaps(nodes,out.LOCATIONS,{maps});
+  projectExplorationMaps(nodes,out.LOCATIONS,{maps,viewMode});
   const mapAt=id=>locationMap.get(id)?.childMapIds[0]??locationMap.get(id)?.mapId??null;
   out.CAST=catalog.filter(c=>c.entityKind==='character').map((c,i)=>{const p=pointIndex.get(c.entityId);return {id:c.entityId,name:c.name,initial:Array.from(c.name??'人').at(-1)||'人',role:p?.isProtagonist?'主角':'人物',c:COLORS[i%COLORS.length],
     state:c.locationId?'present':'unknown',tag:'已记录',locationId:c.locationId,mapNodeId:p?.mapId??mapAt(c.locationId)??c.mapId,description:c.summary??'',doing:'尚无行动记录',mind:'尚无后台想法记录',carry:[],known:true,

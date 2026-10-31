@@ -123,7 +123,7 @@ export declare function publicSpaceCanonical(canonical:unknown,options?:{viewMod
   size:{widthM:number;heightM:number;quality:'estimated'|'confirmed';locked:boolean;basis?:{kind:string;referenceId:string|null;note:string}}|null;
   furnishing:Array<{localId:string;type:string;name:string;itemId:string|null;widthM:number;heightM:number;quality:'layout'|'confirmed'}>;
 }|null;
-export declare function hydrateScene(scene:SceneDocument,projection:Record<string,any>):{ok:boolean;scene:SceneDocument|null;issues:Diagnostic[]};
+export declare function hydrateScene(scene:SceneDocument,projection:Record<string,any>,options?:{pointLocationIds?:string[]}):{ok:boolean;scene:SceneDocument|null;issues:Diagnostic[]};
 export declare function collectMapLocations(input:{mapRow:Record<string,any>;maps?:any[];locations?:any[]}):Record<string,any>[];
 export declare function buildLayoutContext(input:{scope:Scope;mapRow:Record<string,any>;maps?:any[];locations?:any[];characters?:any[];items?:any[];routes?:any[]}):{ok:boolean;context?:GenerateContext;issues:Diagnostic[]};
 export declare function createSpatialRenderer(options:{canvas:HTMLCanvasElement;onSelect?:(entity:any)=>void;onHover?:(entity:any,point:Point|null)=>void;onViewport?:(viewport:any)=>void;onIssue?:(issue:Diagnostic)=>void;theme?:Record<string,string>;scaleBarWidth?:number;ownsGestures?:boolean;painterFactory?:Function;animate?:boolean}):Renderer;

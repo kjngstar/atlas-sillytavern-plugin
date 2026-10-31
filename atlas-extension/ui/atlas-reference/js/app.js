@@ -127,15 +127,16 @@ function showEntity(kind,id,focus=false){
  */
 const engine=window.AtlasHost?.initial?.engine??{policyVersion:null,capabilities:[],activePromptPresetId:null,suggested:null};
 const map=window.AtlasMap.create($('#map'),$('#minimap'),{
- onSelect(m){if(m?.placeId){if(state.singleClickEnter&&m.node)navigate(m.node.id);else inspectPlace(m.placeId);return;}if(!m){state.selected=null;refreshFlows();state.inspectorTab='cast';renderInspector();return;}if(m.node){if(state.singleClickEnter)navigate(m.node.id);else inspectPlace(m.node.id);return;}
+ onSelect(m){if(m?.node&&(m.iconEntry||!m.placeId&&['poi','exit','vehicle'].includes(m.type))){navigate(m.node.id);return;}if(m?.placeId){if(state.singleClickEnter&&m.node)navigate(m.node.id);else inspectPlace(m.placeId);return;}if(!m){state.selected=null;refreshFlows();state.inspectorTab='cast';renderInspector();return;}if(m.node){if(state.singleClickEnter)navigate(m.node.id);else inspectPlace(m.node.id);return;}
   if(m.type==='char')select('character',m.id,true);
   else if(m.type==='item')select('item',m.id,true);
   else if(m.type==='message'||m.type==='sig')select('message',m.id||'m4',true);
   else if(m.type==='journey')select('task',m.id,true);
   else {state.selected={kind:'place-marker',id:m.id,name:m.name,sub:m.sub};renderInspector();openRight();}
  },
+ onEnter(m){if(m.node)navigate(m.node.id);},
  onHover(m,x,y){const tt=$('#tooltip');if(!m){tt.classList.remove('on');return;}const rect=root.getBoundingClientRect();
-  tt.textContent=m.name+(m.node?(state.singleClickEnter?' · 单击进入':' · 单击查看'):'');tt.style.left=Math.min(rect.width-210,Math.max(8,x-rect.left+14))+'px';tt.style.top=Math.min(rect.height-48,y-rect.top+18)+'px';tt.classList.add('on');},
+  tt.textContent=m.name+(m.node?(m.iconEntry||!m.placeId&&['poi','exit','vehicle'].includes(m.type)||state.singleClickEnter?' · 单击进入地图':' · 单击查看详情，双击进入地图'):'');tt.style.left=Math.min(rect.width-210,Math.max(8,x-rect.left+14))+'px';tt.style.top=Math.min(rect.height-48,y-rect.top+18)+'px';tt.classList.add('on');},
  onFrame:frameChrome,
  getMarks(n,marks){return marks.filter(m=>{
   if(m.type==='char'){const c=D.CAST.find(c=>c.id===m.id);if(!c)return false;return known(c)&&c.state!=='away'&&c.state!=='off'&&c.state!=='unknown'&&within(c.mapNodeId||c.locationId,n.id);}
@@ -153,19 +154,36 @@ const presetUI=window.AtlasPresetUI.create({root,store:presets,esc,toast,diagnos
  /** 真实预览：走宿主 → 服务端同一条组装链；没有这个端口时明确报「预览不可用」。 */
  previewMessages:task=>typeof window.AtlasHost.previewMessages==='function'?window.AtlasHost.previewMessages(task):Promise.reject(Error('当前宿主没有提供请求预览'))});
 function formatDistance(m){if(m>=1000)return `${+(m/1000).toFixed(2)} km`;return `${+m.toFixed(m<1?2:1)} m`;}
+function syncMapIcons(st){
+ const el=$('#mapLocationIcons');if(!el)return;
+ const hints=(st.entryHints||[]).filter(h=>known(byId(h.nodeId))&&Number.isFinite(h.x)&&Number.isFinite(h.y)&&h.x>=0&&h.y>=0&&h.x+40<=st.vw&&h.y+40<=st.vh);
+ const keep=new Set(hints.map(h=>h.nodeId));
+ for(const b of el.querySelectorAll('button'))if(!keep.has(b.dataset.go))b.remove();
+ for(const hint of hints){
+  let b=[...el.querySelectorAll('button')].find(b=>b.dataset.go===hint.nodeId);
+  if(!b){b=document.createElement('button');b.type='button';b.className='map-location-hit';b.dataset.go=hint.nodeId;el.append(b);}
+  const label='进入'+hint.name+'地图';if(b.getAttribute('aria-label')!==label){b.setAttribute('aria-label',label);b.title=hint.name+' · 单击进入地图';}
+  const x=Math.round(hint.x)+'px',y=Math.round(hint.y)+'px';if(b.style.left!==x)b.style.left=x;if(b.style.top!==y)b.style.top=y;
+ }
+ el.hidden=!hints.length;
+}
 function frameChrome(st){
  if(!st.node)return;
+ syncMapIcons(st);
+ const kind=st.node.containerLocationKind??st.kind,level=st.geo.exploration?.level??(['world','region','city'].includes(kind)?'regions':'detail');
+ const levelText=st.geo.exploration?.surface?.street?'街巷略图 · 路面宽度与形状为示意':st.geo.districts?.some(d=>d.displayOnly)?'城镇略图 · 地点轮廓为示意':{regions:'区域总览 · 进入地点查看下层地图',layout:'地点略图 · 进入地点展开布局',detail:'详细布局'}[level];
+ const levelEl=$('#mapLevel');if(levelEl){levelEl.hidden=!!st.geo.localSite;if(levelEl.textContent!==levelText)levelEl.textContent=levelText;}
  // M6-07②：比例尺的尺度依据由地图层给出（真实相机尺度 + 这个尺度可不可信）；
  // 74px 线长与换算公式只在 ui-model.fixedScale 里写一次 —— 这里不重复实现。
  const q=typeof map.scaleQuality==='function'?map.scaleQuality():null;
  const pxPerUnit=q&&Number.isFinite(q.cssPixelsPerUnit)?q.cssPixelsPerUnit:(st.node.metric?st.cam.s:st.cam.s*(st.node.transform?.scale||1));
- const scale=ui.fixedScale(pxPerUnit,q?q.metersPerUnit:st.node.metric,{estimated:!!q&&q.estimated}),bar=$('.sc-line i'),label=scale.label;
+ const scale=ui.fixedScale(pxPerUnit,q?q.metersPerUnit:st.node.metric,{estimated:!!q&&q.estimated}),bar=$('.sc-line i'),label=q?.schematic?'区域略图 · 无比例尺':scale.label;
  if($('#scaleLabel').textContent!==label)$('#scaleLabel').textContent=label;
- $('#scaleLabel').dataset.distance=scale.distance===null?'':String(scale.distance);
+ $('#scaleLabel').dataset.distance=q?.schematic||scale.distance===null?'':String(scale.distance);
  $('#scaleLabel').dataset.estimated=scale.estimated?'1':'';
- bar.dataset.width=String(scale.width);
+ bar.dataset.width=String(scale.width);bar.style.visibility=q?.schematic?'hidden':'';
  $('#mmZoom').textContent=Math.round(st.cam.s/map.fitScale()*100)+'%';
- $('#coordLabel').textContent=`X ${st.cam.x.toFixed(1)} · Y ${st.cam.y.toFixed(1)}`;
+ $('#coordLabel').textContent=`${q?.schematic?'方位与比例待定 · 双击区域进入':`X ${st.cam.x.toFixed(1)} · Y ${st.cam.y.toFixed(1)}`}`;
 }
 function renderRail(){
  $$('.rail-btn').forEach(b=>{const on=b.dataset.view===state.page;b.classList.toggle('active',on);b.setAttribute('aria-current',on?'page':'false');});
@@ -404,12 +422,12 @@ function diagnosticRows(q='',level='all'){
   return diagnosticGroups(rows).map(([key,list])=>`<section class="diagnostic-group"><div class="section-label">${esc(key)} · ${list.length} 项</div>${list.map(d=>{const meta=diagnosticMeta(d);return `<details class="diagnostic-row ${esc(d.level)}" data-diagnostic-id="${esc(d.id)}"><summary><time>${esc(d.t)}</time><em>${esc(d.level)}</em><div><b>${esc(d.code)}</b><span>${esc(d.message)}</span>${meta?`<code class="diag-meta">${esc(meta)}</code>`:''}</div>${icon('chev')}</summary><pre>${esc(JSON.stringify(d,null,2))}</pre></details>`;}).join('')}</section>`).join('');
 }
 function settingsHTML(){const tabs=[['prompts','提示词'],['connection','API 连接'],['assignments','任务与分批'],['interaction','地图交互'],['appearance','外观']];let html=`<div class="settings-tabs" role="tablist" aria-label="预设分类">${tabs.map(([id,t])=>`<button class="filter-btn ${state.settingsTab===id?'on':''}" data-settings-tab="${id}" role="tab" aria-selected="${state.settingsTab===id}">${t}</button>`).join('')}</div>`;
- if(state.settingsTab==='interaction')return html+`<div class="appearance-form"><h3>地图交互</h3><label class="appearance-row"><span>单击地点直接进入子地图</span><input type="checkbox" data-single-click-enter ${state.singleClickEnter?'checked':''}></label><p class="scope-note">默认关闭：单击地点查看右栏信息，再点击「进入此地点」。人物、物品与消息始终单击查看详情。</p><label class="appearance-row"><span>收起地图工具</span><input type="checkbox" data-map-widgets-collapsed ${state.mapWidgetsCollapsed?'checked':''}></label><p class="scope-note">默认只显示「地图工具」入口，点击可展开地点卡、视图选择、缩放、小地图、图例和状态条；不改变地图位置或缩放。</p><label class="appearance-row"><span>收起地图图例</span><input type="checkbox" data-legend-collapsed ${state.legendCollapsed?'checked':''}></label><p class="scope-note">图例固定收纳在比例尺上方。比例尺长度保持不变，缩放只改变距离数值。</p><p class="scope-note">${preferences.persistent?'交互偏好保存在当前浏览器。':'当前环境无法保存到浏览器，偏好在本次打开期间有效。'}</p></div>`;
+ if(state.settingsTab==='interaction')return html+`<div class="appearance-form"><h3>地图交互</h3><label class="appearance-row"><span>单击地点轮廓直接进入子地图</span><input type="checkbox" data-single-click-enter ${state.singleClickEnter?'checked':''}></label><p class="scope-note">地点图标始终单击进入。此开关默认关闭：单击轮廓查看信息，双击轮廓进入。人物、物品与消息单击查看详情。</p><label class="appearance-row"><span>收起地图工具</span><input type="checkbox" data-map-widgets-collapsed ${state.mapWidgetsCollapsed?'checked':''}></label><p class="scope-note">默认只显示「地图工具」入口，点击可展开地点卡、视图选择、缩放、小地图、图例和状态条；不改变地图位置或缩放。</p><label class="appearance-row"><span>收起地图图例</span><input type="checkbox" data-legend-collapsed ${state.legendCollapsed?'checked':''}></label><p class="scope-note">图例固定收纳在比例尺上方。比例尺长度保持不变，缩放只改变距离数值。</p><p class="scope-note">${preferences.persistent?'交互偏好保存在当前浏览器。':'当前环境无法保存到浏览器，偏好在本次打开期间有效。'}</p></div>`;
  if(state.settingsTab!=='appearance')return html+presetUI.render(state.settingsTab);
  return html+window.AtlasAppearance.appearanceSettingsHTML({skin:skinValue(),catalog:skinCatalog,runtime:window.AtlasSkinRuntime});
 }
 function renderAll({preserveWorkspace=false}={}){renderRail();renderCrumbs();renderTree();renderSpaceNavigation();renderSwitches();renderChips();renderPlace();renderInspector();renderDock();if(!preserveWorkspace)renderPage();renderModes();applyUIProfile();}
-function renderModes(){$('#mapModeSwitcher').value=state.mapMode;}
+function renderModes(){$('#mapModeSwitcher').value=state.mapMode;syncMapVisibility();}
 function showFlow(id){const m=message(id);if(!m||!known(m))return;let destination=Object.keys(D.FLOWS).find(mapId=>(D.FLOWS[mapId]||[]).some(e=>e.id===id)&&mapId===state.nodeId)||Object.keys(D.FLOWS).find(mapId=>(D.FLOWS[mapId]||[]).some(e=>e.id===id));destination=destination||m.mapNodeId||m.locationId;state.mapMode='flow';navigate(destination,true);map.setMode('flow');select('message',id,true);renderModes();}
 function showTask(id){const t=task(id);if(!t||!known(t))return;state.mapMode='sim';navigate(t.mapId,true);map.setMode('sim');select('task',id,true);renderModes();}
 function showEvent(id){const e=D.EVENTS.find(e=>e.id===id);if(!e||!known(e))return;if(byId(e.mapId))navigate(e.mapId,true);select('event',id,true);map.selectKey(e.target);}
@@ -561,7 +579,7 @@ function applyInteractionPreferences(){
  $('#legend').classList.toggle('collapsed',state.legendCollapsed);
  $('#legendToggle').textContent=state.legendCollapsed?'展开':'收起';
  $('#legendToggle').setAttribute('aria-expanded',String(!state.legendCollapsed));
- $('#map').setAttribute('aria-label','世界地图；拖动平移，滚轮缩放，单击地点'+(state.singleClickEnter?'进入子地图':'查看信息'));
+ $('#map').setAttribute('aria-label','世界地图；拖动平移，滚轮缩放；单击地点图标进入地图；单击地点轮廓'+(state.singleClickEnter?'进入子地图':'查看信息，双击进入子地图'));
 }
 function setPreference(key,value){
  if(!preferences.set(key,value))return;

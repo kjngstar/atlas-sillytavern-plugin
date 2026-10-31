@@ -304,6 +304,9 @@ export function resolveSpatialProfile(input: SpatialProfileInput): SpatialProfil
     const id = String(member.id ?? '');
     const kind = TEXT(member.kind);
     if (!kind) continue;
+    // A moored vehicle is rendered through its anchor and interior link. It
+    // does not ask the surrounding map to lay out a fixed indoor footprint.
+    if(kind==='vehicle'&&member.mobility==='mobile'&&asId(member.anchor_location_id))continue;
     if (kind === 'floor' && (chosen.mode === 'interior' || chosen.mode === 'compound')) {
       pushUnsupported(id, kind, '楼层由独立楼层入口展示，不作为同层平面房间或室外足迹');
     } else if (chosen.mode === 'outdoor' && INDOOR_KINDS.has(kind)) {

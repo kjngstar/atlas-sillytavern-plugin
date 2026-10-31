@@ -1,0 +1,61 @@
+{
+  "build": {
+    "pluginVersion": "0.9.100",
+    "buildId": "build-d303205ecf4ecf30",
+    "buildCommit": "664a24c0c063b285e9a44a2963a60e68f7927d24",
+    "buildDirty": false
+  },
+  "scope": {
+    "chatFingerprint": "ref-3b1229e4beece03f",
+    "branchRef": "ref-483d388493378983",
+    "revision": 5,
+    "viewMode": "author"
+  },
+  "installedRuntimeCommit": "6f3100b",
+  "installedFiles": 51,
+  "oldMapCount": 8,
+  "newMapCount": 8,
+  "sameScope": true,
+  "savedScenesUnchanged": true,
+  "savedPointsUnchanged": true,
+  "atlasCalls": 8,
+  "newAtlasCalls": 0,
+  "layers": [
+    {
+      "name": "榆湾镇",
+      "renderedRoads": 0,
+      "schematic": null,
+      "locations": []
+    },
+    {
+      "name": "石钟广场",
+      "renderedRoads": 0,
+      "schematic": "广场略图 · 建筑外形与相对分布为示意",
+      "locations": [
+        {
+          "name": "盐栈",
+          "knownInteriorOutlines": 1
+        },
+        {
+          "name": "修表铺",
+          "knownInteriorOutlines": 1
+        },
+        {
+          "name": "巡河站",
+          "knownInteriorOutlines": 1
+        },
+        {
+          "name": "织坊",
+          "knownInteriorOutlines": 0
+        }
+      ]
+    }
+  ],
+  "verification": {
+    "fullTests": 3095,
+    "focusedTests": 97,
+    "typecheck": "passed",
+    "pack": "passed",
+    "scope": "Host saved-chat readback and interaction; no new final-source model generation"
+  }
+}

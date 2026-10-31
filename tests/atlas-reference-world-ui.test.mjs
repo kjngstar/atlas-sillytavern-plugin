@@ -116,6 +116,52 @@ test('地图按真实父子关系导航，同类场所可以连续嵌套，界�
  await tick();
  assert.equal(preview.state.nodeId,'garden');assert.deepEqual(calls.build,[]);
 });
+test('父图保留可点击的画布略图，进入子图后显示细节且不发模型请求',async t=>{
+ const dock={mapId:'dock',name:'渡口',kind:'site',containerLocationId:'dock-place',containerLocationKind:'other',parentMapId:'world',connectionQuality:'contained',points:[]};
+ const shelter={mapId:'shelter',name:'候船棚',kind:'interior',containerLocationId:'shelter-place',containerLocationKind:'building',parentMapId:'dock',connectionQuality:'contained',points:[]};
+ const scene={kind:'atlas-scene',units:'meters',layout:{kind:'floor',bounds:{x:0,y:0,w:12,h:8},rooms:[{id:'shelter-place',name:'候船棚',x:0,y:0,w:12,h:8}],corridor:{x:0,y:8,w:0,h:0},doors:[],groups:[],actors:[],items:[]}};
+ const data=projectReferenceData({mapView:view([WORLD,dock,shelter]),sceneView:view([{mapId:'shelter',scene}]),catalogView:view([]),viewMode:'author'});
+ const {w,preview,calls}=withUI(t,{data});preview.go('dock');
+ assert.equal(w.document.getElementById('placeStructure'),null);
+ assert.equal(w.document.getElementById('map').getAttribute('aria-hidden'),null);
+ const sketch=preview.map.state.geo.exploration;assert.equal(sketch.areas[0].nodeId,'shelter');assert.equal(sketch.areas[0].recorded,true);
+ assert.equal(preview.map.scaleQuality().schematic,true);
+ const canvas=w.document.getElementById('map'),area=sketch.areas[0],st=preview.map.state,r=canvas.getBoundingClientRect();
+ canvas.dispatchEvent(new w.MouseEvent('dblclick',{bubbles:true,clientX:r.left+(area.x-st.cam.x)*st.cam.s+st.vw/2,clientY:r.top+(area.y-st.cam.y)*st.cam.s+st.vh/2}));
+ await tick();assert.equal(preview.state.nodeId,'shelter');assert.equal(preview.map.state.geo.exploration,undefined);
+ assert.equal(preview.map.scaleQuality().calibrated,true);assert.deepEqual(calls.build,[]);
+ preview.go('dock');assert.equal(preview.map.state.geo.exploration.areas[0].nodeId,'shelter');
+});
+
+test('地图沿用地点图标，无进入文字按钮，单击图标进入细图，平移不丢焦点且不发模型请求',async t=>{
+ const road={mapId:'road',name:'旧驿道',kind:'site',containerLocationId:'road-place',containerLocationKind:'other',parentMapId:'world',points:[]};
+ const bridge={mapId:'bridge',name:'石桥',kind:'site',containerLocationId:'bridge-place',containerLocationKind:'other',parentMapId:'road',points:[]};
+ const scene={kind:'atlas-scene',units:'cells',layout:{kind:'overview',bounds:{x:0,y:0,w:100,h:100},shapes:[],pins:[],routes:[],features:[{id:'river',type:'watercourse',path:[{x:50,y:0},{x:50,y:50},{x:50,y:100}],width:8}]}};
+ const data=projectReferenceData({mapView:view([WORLD,road,bridge]),sceneView:view([{mapId:'bridge',scene}]),catalogView:view([{entityId:'bridge-place',entityKind:'location',locationKind:'other',name:'石桥',mapId:'road'},{entityId:'road-place',entityKind:'location',locationKind:'other',name:'旧驿道',mapId:'world'}]),viewMode:'author'});
+ const {w,preview,calls}=withUI(t,{data});preview.go('road');preview.map.setPaused(true);preview.map.resize();
+ const entry=w.document.querySelector('#mapLocationIcons [aria-label="进入石桥地图"]');assert.ok(entry);assert.equal(entry.textContent,'');assert.equal(w.document.getElementById('mapEntries'),null);
+ const hit=preview.map.state.hits.find(h=>h.m.node?.id==='bridge');assert.ok(hit);assert.equal(hit.m.iconEntry,true);assert.equal(entry.style.left,Math.round(hit.x-20)+'px');assert.equal(entry.style.top,Math.round(hit.y-20)+'px');
+ entry.focus();preview.map.state.cam.x+=4;preview.map.resize();assert.equal(w.document.querySelector('#mapLocationIcons button'),entry);assert.equal(w.document.activeElement,entry);
+ entry.click();await tick();assert.equal(preview.state.nodeId,'bridge');assert.equal(w.document.getElementById('mapLocationIcons').hidden,true);assert.deepEqual(calls.build,[]);
+ assert.match(w.document.getElementById('map').getAttribute('aria-label'),/单击地点图标/);
+});
+
+test('存档城市地点图标带 placeId 仍单击进入，街区轮廓单击保持查看详情',async t=>{
+ const city={mapId:'city-map',name:'枫镇',containerLocationId:'C',containerLocationKind:'city',parentMapId:'world',points:[{entityId:'L',kind:'location',name:'枫巷',x:50,y:50,mapId:'city-map'}]};
+ const lane={mapId:'lane-map',name:'枫巷',containerLocationId:'L',containerLocationKind:'other',parentMapId:'city-map',points:[]};
+ const block={mapId:'block-map',name:'旧街区',containerLocationId:'D',containerLocationKind:'district',parentMapId:'city-map',points:[]};
+ const scene={units:'cells',layout:{kind:'city',bounds:{x:0,y:0,w:100,h:100},districts:[{id:'D',name:'旧街区',polygon:[[0,0],[100,0],[100,100],[0,100]]}],roads:[],pins:[{id:'L',entityId:'L',name:'枫巷',type:'location',x:50,y:50}]}};
+ const catalog=[['C','枫镇','city','world'],['L','枫巷','other','city-map'],['D','旧街区','district','city-map']].map(([entityId,name,locationKind,mapId])=>({entityId,entityKind:'location',name,locationKind,mapId}));
+ const data=projectReferenceData({mapView:view([WORLD,city,lane,block]),sceneView:view([{mapId:'city-map',scene}]),catalogView:view(catalog),viewMode:'author'});
+ const {w,preview,calls}=withUI(t,{data});preview.go('city-map');preview.map.setPaused(true);preview.map.resize();
+ const hit=preview.map.state.hits.find(h=>h.m.id==='L');assert.ok(hit);assert.equal(hit.m.placeId,'L');
+ const canvas=w.document.getElementById('map');canvas.dispatchEvent(new w.MouseEvent('click',{clientX:hit.x,clientY:hit.y}));await tick();
+ assert.equal(preview.state.nodeId,'lane-map');assert.deepEqual(calls.build,[]);
+ preview.go('city-map');preview.map.resize();const s=preview.map.state,p=s.geo.districts[0].pts[0];
+ canvas.dispatchEvent(new w.MouseEvent('click',{clientX:(p[0]+25-s.cam.x)*s.cam.s+s.vw/2,clientY:(p[1]+25-s.cam.y)*s.cam.s+s.vh/2}));await tick();
+ assert.equal(preview.state.nodeId,'city-map','点轮廓不能触发图标的单击进入规则');
+});
+
 test('楼层用原生选择器导航；未明楼层房间保留入口，导航不会偷偷请求生成',async t=>{
  const upper={mapId:'upper-map',name:'二楼',kind:'interior',containerLocationId:'upper',containerLocationKind:'floor',parentMapId:'bld-map',points:[]};
  const pantry={mapId:'pantry-map',name:'厨房',kind:'interior',containerLocationId:'pantry',containerLocationKind:'room',parentMapId:'bld-map',points:[]};

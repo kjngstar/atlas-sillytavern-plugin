@@ -25,7 +25,7 @@ import { buildStagePrompt } from './atlas-ops-prompts.ts';
 import { normalizeFrame, normalizeSqlMapFrame } from './atlas-spatial-frame.ts';
 import { ATLAS_RUNTIME_LIMITS } from './atlas-runtime-limits.ts';
 import { workBatchSize } from './atlas-work-batching.ts';
-import { normalizeModelBatching, planningOutputTokens } from './atlas-model-batching.ts';
+import { normalizeGenerationOptions, normalizeModelBatching, planningOutputTokens } from './atlas-model-batching.ts';
 import { stableHexHash } from './atlas-hash.ts';
 import { resolveLocationDetailTier } from './atlas-world-build-plan.ts';
 import { readWorldFacts } from './atlas-world-build-state.ts';
@@ -43,6 +43,7 @@ import type { ModelBatchRequest, ModelOperation, TurnInput } from './atlas-ops-c
 import type { LayoutKind, LayoutTask, PlanIssue } from './atlas-world-contract.ts';
 import { CAPABILITY_CORRIDOR_BINDING, CAPABILITY_SPACE_CANONICAL, CAPABILITY_SPATIAL_PROFILE, hasSpatialCapability } from './atlas-world-contract.ts';
 import { formatTaskContext } from './atlas-prompt-layers.ts';
+import { COMBINED_SPATIAL_OPS } from './atlas-spatial-planning.ts';
 import {
   locationSpaceSize,
   readSpaceCanonical,
@@ -162,7 +163,7 @@ export function unknownLayoutEntityRefs(operations:readonly ModelOperation[],ref
     // Local IDs (contents.id/features.id/actors.near/items.on) are intentionally excluded.
     const entityFields: Record<string, readonly string[]> = {
       zones: ['id', 'near'], links: ['id'], features: ['zoneId'],
-      districts: ['id'], buildings: ['id', 'districtId'], rooms: ['id'],
+      districts: ['id'], buildings: ['id', 'districtId', 'near'], rooms: ['id'],
       contents: ['roomId'], actors: ['id', 'roomId'], items: ['id'],
     };
     check((spec as Record<string, unknown>).corridorLocationRef);
@@ -597,6 +598,7 @@ export function buildSqlLayoutTask(
   input: TurnInput,
   turnId: string,
   report?: { issues: PlanIssue[] },
+  options?: { canonicalRefs?: boolean; combinedSpatial?: boolean; eagerLocationIds?:readonly string[] },
 ): LayoutTask<ModelBatchRequest> | null {
   const tables = createTableReadPort(db);
   const derived = deriveLayoutSites(tables, branchId);
@@ -631,12 +633,13 @@ export function buildSqlLayoutTask(
     // Parent geography is assembled first; remote interiors are generated only
     // when explicitly requested. Single-child overview wrappers need no model.
     const activePath=new Set<string>();
-    for(const locationId of occupied){
+    const eager=new Set(options?.eagerLocationIds??[]);
+    for(const locationId of [...occupied,...eager]){
       let id:string|null=locationId;const seen=new Set<string>();
       while(id&&!seen.has(id)){seen.add(id);const entry=mapByContainer.get(id);if(entry)activePath.add(entry.mapId);id=parentOf(id);}
     }
     chosen=entries.filter(entry=>activePath.has(entry.mapId)
-      ? occupiedSet.has(String(entry.container?.id))||entry.own.length>0&&(entry.kind!=='overview'||entry.own.length>1)
+      ? occupiedSet.has(String(entry.container?.id))||eager.has(String(entry.container?.id))||entry.own.length>0&&(entry.kind!=='overview'||entry.own.length>1)
       : entry.container===null&&entry.own.length>1);
     chosen.sort((a,b)=>depth(a)-depth(b)||byId(a.mapId,b.mapId));
   } else if (Array.isArray(input.layoutMaps)) {
@@ -705,6 +708,7 @@ export function buildSqlLayoutTask(
     // 否则「前景能解析、布局解析不到」会再次变成 alias 漂移。
     requiredRefs: input.requiredRefs,
   });
+  if(options?.canonicalRefs)for(const entry of catalogue.knownRefs)entry.alias=entry.id;
   const ref = (id: unknown): string | undefined => catalogue.knownRefs.find((item) => item.id === id)?.alias;
 
   // P08/R05（REF04）：必要引用本身装不下 → 本批布局**一次都不发**，错误明确；
@@ -884,11 +888,11 @@ export function buildSqlLayoutTask(
   const hasFloor = layoutKinds.includes('floor'), hasCity = layoutKinds.includes('city'), hasOverview = layoutKinds.includes('overview');
   const request = buildStagePrompt({
     phase: 'geography',
-    allowedOps: ['map.layout.request', 'noop'],
+    allowedOps: options?.combinedSpatial ? COMBINED_SPATIAL_OPS : ['map.layout.request', 'noop'],
     batchId: `layout_${turnId}`,
     mapScope: JSON.stringify(scopes),
     geoMissing: '必须为以上地图生成或更新可绘制空间布局，每张图一行 map.layout.request。仅有坐标点不算完成。',
-    geoSources: '第一步验证的位置依据将在发送布局请求前附加；本阶段不接收原始剧情或世界书。',
+    geoSources: options?.combinedSpatial || normalizeGenerationOptions(input.generationOptions).spatialPipeline==='combined' ? '空间事实与原始依据随观察保留；使用本批提供的空间来源和已登记事实规划，不再另行请求摘录。' : '第一步验证的位置依据将在发送布局请求前附加；本阶段不接收原始剧情或世界书。',
     mapLayoutIds: catalogue.knownRefs.map((item) => `${item.alias}=${item.id}`).join('\n'),
     mapLayoutFrame: [
       'extent 是程序给定的幅面；kind 与 units 以每张图给出的值为准，不得改写。',
@@ -904,14 +908,16 @@ export function buildSqlLayoutTask(
     ].join('\n'),
   });
   if(work)request.messages[1].content+='\n【整组地图规划】本批可同时包含不同种类和多层父子地图；一次返回所有列出地图的约束。hierarchy 标明父图与共享空间。父子共用 childSpaces/spaceSize 尺寸，程序从父到子求解坐标、继承轮廓；不为每层再请求，不输出独立坐标或改变父子归属。';
-  request.messages[1].content += '\n每个操作外层只含 op、ref、data 和可选 why。op 固定 map.layout.request；ref 使用本图 map 引用；data 包含给定 kind 和 spec。下面提供本图完整合法 JSON 示例。幅面用程序给定 extent。'
+  request.messages[1].content += '\n每条布局操作外层只含 op、ref、data 和可选 why。布局操作的 op 固定 map.layout.request；ref 使用本图 map 引用；data 包含给定 kind 和 spec。下面提供本图完整合法 JSON 示例。幅面用程序给定 extent。'
     + (hasOverview?'\noverview 的 spec 可含 surface、zones、links、features。zone 用 id、name、role、size，可选 sector 与 near。role 取 city/settlement/forest/water/mountain/ruins/district/campus/land/other；size 取 small/medium/large；sector 取八方向或 center。link 的 id 必须是已登记路线引用。feature 用局部 id、type、可选 zoneId 和 density；density 取 low/medium/high，type 取 forest_texture/ridge/shore/building_cluster/road_texture/ruins_scatter/watercourse。'
     + 'overview 的 zone 必须是本图直属地点或目录里已有的代理入口；links 只能用目录中已登记的路线引用；feature 只是本图局部装饰，永远不产生新实体、也不产生新道路。':'')
     + (hasCity?'\ncity 的 districts 每项必须含 id、name、bank、order；bank 取 west/east，order 为整数。buildings 每项必须含 id、name、districtId、w、h。districts 至少一项；没有已登记街区时，以城市容器的地点引用作为自身街区。每个建筑的 districtId 必须对应本次或已保存街区，不能省略街区声明。新城市默认 enclosure="open"；无河流依据时 riverWidth=0。':'')
     + (hasFloor?'\nfloor 的 rooms 每项用 id/name/w/h/side，side 只能 north 或 south；可选 role=indoor/outdoor/garden，分别表示室内、开放院落、园林。contents 每项用 id/name/type/roomId/w/h，type 只能 shelf/desk/bench/reading/stairs/table/chair/bed/cabinet/doorway/light/decor；actors 每项用 id/roomId，可选 near=陈设ID；items 每项用 id/on=陈设ID。所有键都必须双引号，不得照抄省略号或伪 JSON。':'')
-    + '\n布局阶段不新建 SQL 实体：所有可交互地点必须已经在目录里。但建设阶段允许新增地点，两者不冲突——不要因为布局不新建实体就停止补全世界。actors/items 是本批有目录引用且在生成器额度内的相关者，不是整张人物表；未发送者仍保存在 SQL，由程序维护位置和地点名单，不能创建替身来凑数。'
-    + '\n不要输出其他操作。';
+    + (options?.combinedSpatial ? '\n本批先用 location.upsert 声明必要的新地点，再用已有引用或同批合法 new: 引用输出布局；新容器用 data.container_ref，省略地图 ref。' : '\n布局阶段不新建 SQL 实体：所有可交互地点必须已经在目录里。但建设阶段允许新增地点，两者不冲突——不要因为布局不新建实体就停止补全世界。')
+    + 'actors/items 是本批有目录引用且在生成器额度内的相关者，不是整张人物表；未发送者仍保存在 SQL，由程序维护位置和地点名单，不能创建替身来凑数。'
+    + (options?.combinedSpatial ? '\n只输出本批地理与布局协议允许的操作。' : '\n不要输出其他操作。');
   request.messages[1].content += '\n父图中的本地点轮廓是下钻边界；子图用于细化同一个空间，不重画成一座无关的城市。相邻街区维持父图的相对方位，不能把外城区、内城区、中心区都复制成同一幅城市模板。size=large/medium/small 必须维持相对面积顺序；没有实体依据的 road_texture 不输出，真实道路仅使用已登记 links。';
+  if(hasCity)request.messages[1].content+='\ncity 建筑有明确邻近关系时，在该 buildings 项写 near=参照建筑引用、sector=north/east/south/west；资料给出两建筑外墙间距时写 gapM=实际米数。gapM 是墙到墙的净距，不是中心距离，也不是全图最小留白。没有明确间距时省略 gapM，不自行精确化。';
   request.anchor = input.anchor;
   request.messages[1].content+='\n细节责任：detail.tier=important 的已登记地点按角色锚点、明确剧情或来源事实补齐细节；ordinary 使用有限、够用的细节。重要性不改变已有尺寸、作者锁，也不把推测设施的延后内部自动升级为开局必建。';
   request.promptInput = {
@@ -981,7 +987,7 @@ export function buildSqlLayoutTask(
       ...scopes.map((scope, index) => `${scope.map}=${String(scope.name ?? '')}(${scope.kind} ${scope.extent.width}×${scope.extent.height}${scope.units}${pending[index].map.scale_locked ? ' 比例尺已锁定' : ''})`),
       ...(input.requiredRefs ?? []).map((item) => `${ref(item.id) ?? item.id}=必要引用(${item.kind})`),
     ],
-    allowedOpsAndKinds: `map.layout.request、noop；本批地图 kind 只能是 ${layoutKinds.join('/')}（以每张图给定值为准，不得改写）`,
+    allowedOpsAndKinds: `${options?.combinedSpatial ? COMBINED_SPATIAL_OPS.join('、') : 'map.layout.request、noop'}；本批地图 kind 只能是 ${layoutKinds.join('/')}（以每张图给定值为准，不得改写）`,
     extents: scopes.map((scope) => {
       const mpp = scope.frame.metersPerCell;
       const units = typeof mpp === 'number' && mpp > 0 ? `1 格 = ${mpp} 米`

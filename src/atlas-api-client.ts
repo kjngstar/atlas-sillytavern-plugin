@@ -21,6 +21,7 @@ import { newDiagnosticRequestRef, observeDiagnostic, setDiagnosticSignalContext,
 import { atlasRefFingerprint } from './atlas-diagnostics.ts';
 // P14 §20.3：响应长度/耗时口径分离（raw / visible / reasoning、headersMs / bodyMs）。
 import { measureResponseLengths } from './atlas-response-metrics.ts';
+import { ATLAS_RUNTIME_LIMITS } from './atlas-runtime-limits.ts';
 
 /** A host adapter that ignores AbortSignal must still release the turn at the deadline. */
 function awaitResponse<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
@@ -430,7 +431,7 @@ export async function callAtlasWorldTurnApi(
   const temperature = typeof preset.temperature === "number" ? preset.temperature : 1.0;
   const topP = typeof preset.topP === "number" ? preset.topP : 0.95;
 
-  const timeoutMs = Math.min(Math.max(preset.timeoutMs ?? 30_000, 1_000), 1_200_000);
+  const timeoutMs = Math.min(Math.max(preset.timeoutMs ?? ATLAS_RUNTIME_LIMITS.modelTimeoutMs, 1_000), 1_200_000);
   Object.assign(diagnosticDetails, { timeoutMs, maxTokens: maxTokens ?? 0, promptChars: bodyMessages.reduce((n, m) => n + m.content.length, 0), messageCount: bodyMessages.length });
   const fetchFn = deps.fetchFn ?? globalThis.fetch;
   const controller = new AbortController();

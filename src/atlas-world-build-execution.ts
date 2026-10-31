@@ -22,6 +22,8 @@ import { sceneEntryActivation } from './atlas-scene-entry.ts';
 import { readSceneFrame } from '../vendor/atlas-spatial/index.mjs';
 import { computeMapLayoutSignature, computeMapLayoutSignatures, LAYOUT_CONTEXT_FRAME_KEY } from './atlas-sql-layout-task.ts';
 import { resolveSpatialProfile } from './atlas-spatial-profile.ts';
+import { projectRouteGeometry } from './atlas-db-views.ts';
+import { sceneExpansionLocationIds } from './atlas-scene-expansion.ts';
 
 const POLICY = 'world-build-v2';
 const DISCOVERY_PAGE = 64;
@@ -130,8 +132,16 @@ export function worldBuildMapQuality(db: SqlDatabase, branchId: string, mapId: s
   const frame = normalizeFrame(map['frame_json']);
   const scene = frame['atlasScene'];
   const layout = record(scene) && record(scene['layout']) ? scene['layout'] : null;
-  const required = queryBound(db, "SELECT * FROM locations WHERE branch_id=? AND map_id=? AND status='active' AND kind<>'floor' AND id<>COALESCE(?, '')", [branchId, mapId, map['container_location_id']]);
+  const required = queryBound(db, "SELECT * FROM locations WHERE branch_id=? AND map_id=? AND status='active' AND kind<>'floor' AND mobility<>'mobile' AND id<>COALESCE(?, '')", [branchId, mapId, map['container_location_id']]);
   const present = elementIds(layout);
+  // A city can show a registered open place as a saved point when no footprint
+  // is known. Rooms/buildings and places with an area still require geometry.
+  if(layout?.['kind']==='city')for(const row of required){
+    let area:unknown=row['area_geometry_json'];
+    if(typeof area==='string'){try{area=JSON.parse(area);}catch{continue;}}
+    const x=row['grid_x'],y=row['grid_y'];
+    if(row['kind']==='other'&&!area&&row['coord_precision']!=='unknown'&&typeof x==='number'&&Number.isFinite(x)&&typeof y==='number'&&Number.isFinite(y)&&x>=0&&y>=0&&x<=Number(frame['cols'])&&y<=Number(frame['rows']))present.add(str(row['id']));
+  }
   const canonical = readSpaceCanonical(frame, str(map['container_location_id'])).canonical;
   const requiredIds = [...required.map(row => str(row['id'])), ...(canonical?.furnishing ?? []).filter(entry => !entry.itemId).map(entry => entry.localId)];
   const missing = requiredIds.filter(id => !present.has(id));
@@ -140,7 +150,7 @@ export function worldBuildMapQuality(db: SqlDatabase, branchId: string, mapId: s
     + (record(scene) && Array.isArray(scene['issues']) ? scene['issues'].filter(issue => record(issue) && issue['severity'] === 'error').length : 0)
     + (layout && Array.isArray(layout['issues']) ? layout['issues'].filter(issue => record(issue) && issue['severity'] !== 'warning').length : 0);
   const routes = queryBound(db, "SELECT * FROM routes WHERE branch_id=? AND map_id=? AND status<>'closed'", [branchId,mapId]);
-  const missingRoutes = routes.filter(route=>!present.has(str(route['id']))).map(route=>str(route['id']));
+  const missingRoutes = routes.filter(route=>!present.has(str(route['id']))&&!projectRouteGeometry(route,mapId).geometry).map(route=>str(route['id']));
   const container = map['container_location_id'] ? queryBound(db,'SELECT * FROM locations WHERE branch_id=? AND id=?',[branchId,str(map['container_location_id'])])[0] : null;
   const parentContainer=container?.['parent_location_id']?queryBound(db,'SELECT * FROM locations WHERE branch_id=? AND id=?',[branchId,str(container['parent_location_id'])])[0]:null;
   const profile = resolveSpatialProfile({map,maps:pageAllRows(createTableReadPort(db),'maps',branchId),container,parentContainer,members:required,routes});
@@ -210,6 +220,7 @@ function discover(ctx: WorldBuildExecutionContext, job: WorldBuildJobV1, previou
   if ([...byId.values()].some(entry => entry.workKind === 'settlement-plan' && entry.status === 'pending')) return [...byId.values()];
   const maps = pageAllRows(tables, 'maps', branchId).filter(row => row['status'] === 'active' && (job.kind!=='initialize'||ownedTurns.has(str(row['created_turn_id']))));
   const signatures=computeMapLayoutSignatures(tables,branchId);
+  const expanded=sceneExpansionLocationIds({locations,characters});
   const historical=job.kind==='lore-incremental'?readWorldBuildJobs(readProgressRows(tables,branchId)).values.filter(old=>old.id!==job.id).flatMap(old=>readWorldBuildTargets(readProgressRows(tables,branchId),old.id).values):[];
   for (const map of maps) {
     const id = str(map['id']), containerId = str(map['container_location_id']);
@@ -223,7 +234,7 @@ function discover(ctx: WorldBuildExecutionContext, job: WorldBuildJobV1, previou
     const entry = target(job, 'map-layout', id, stableHexHash(JSON.stringify([id, members, detail.tier])), depth);
     if(job.kind==='lore-incremental'&&historical.some(old=>old.workKind==='map-layout'&&old.subjectId===id&&old.inputSignature===entry.inputSignature)
       &&worldBuildMapReady(ctx.db,branchId,id,signatures))continue;
-    if (policy.interiorPolicy === 'on-confirmed-entry') { entry.requirement = 'deferred-interior'; entry.status = 'waiting-for-entry'; }
+    if (policy.interiorPolicy === 'on-confirmed-entry'&&!expanded.has(containerId)&&!normalizeFrame(map['frame_json']).atlasScene) { entry.requirement = 'deferred-interior'; entry.status = 'waiting-for-entry'; }
     add(entry);
   }
   add(target(job, 'route-reconcile', branchId, stableHexHash(job.id)));

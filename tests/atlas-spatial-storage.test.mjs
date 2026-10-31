@@ -351,6 +351,31 @@ function countTurnChanges(db, turnId = TURN_SPATIAL) {
   return rows.length ? Number(rows[0].values[0][0]) : 0;
 }
 
+test('城市路线随建筑重排可经过真实候选提交，并记录路线变更',async()=>{
+  const seed=await spatialSeed(['M_CITY'],{withRequest:false});
+  try{
+    const district='CITY_DISTRICT',a='M_CITY_A',b='M_CITY_B';
+    insertRows(seed.db,'entity_keys',[{branch_id:BRANCH,id:district,kind:'location'}]);
+    insertRows(seed.db,'locations',[{...roomRow(district,null,'港区'),kind:'district',parent_location_id:null}]);
+    seed.db.run("UPDATE locations SET kind='building',parent_location_id=?,area_geometry_json=? WHERE branch_id=? AND map_id=?",[district,JSON.stringify({kind:'dimensions',widthM:12,heightM:8,quality:'confirmed',source:'story'}),BRANCH,'M_CITY']);
+    const request={requestId:'city-reflow',operationId:'city-reflow',kind:'city',status:'pending',spec:{riverWidth:0,enclosure:'open',blocksPerDistrict:0,districts:[{id:district,bank:'west',order:0}],buildings:[{id:a,districtId:district,w:12,h:8},{id:b,districtId:district,w:12,h:8,near:a,sector:'east',gapM:4}]}};
+    seed.db.run("UPDATE maps SET kind='site',container_location_id=?,frame_json=?,scale_quality='estimated',scale_min_meters_per_cell=NULL,scale_max_meters_per_cell=NULL WHERE branch_id=? AND id=?",[district,JSON.stringify({cols:500,rows:300,atlasLayoutRequest:request}),BRANCH,'M_CITY']);
+    const old=selectOne(seed.db,'routes',BRANCH,IDS.R_AB);
+    insertRows(seed.db,'routes',[{...old,id:'CITY_ROUTE',from_location_id:a,to_location_id:b,map_id:'M_CITY',geometry_json:{kind:'line',coordinates:[[1,1],[2,2]]},geometry_quality:'estimated',distance_m:42,distance_min_m:null,distance_max_m:null}]);
+    seed.db.run('BEGIN');
+    const out=applyPendingSpatialRequests({db:seed.db,scope:SCOPE,turnId:TURN_SPATIAL,ports:makePorts()});
+    assert.ok(out.processed.includes('city-reflow'),JSON.stringify(out));
+    const route=selectOne(seed.db,'routes',BRANCH,'CITY_ROUTE');
+    const positions=[a,b].map(id=>{const row=selectOne(seed.db,'locations',BRANCH,id);return [row.grid_x,row.grid_y];});
+    assert.deepEqual(JSON.parse(route.geometry_json).coordinates,positions);
+    assert.equal(route.distance_m,42);
+    assert.ok(queryBound(seed.db,"SELECT * FROM turn_changes WHERE turn_id=? AND target_table='routes' AND target_row_id=?",[TURN_SPATIAL,'CITY_ROUTE']).length>0);
+    assert.deepEqual(foreignKeyCheck(seed.db),[]);
+    seed.db.run('ROLLBACK');
+    assert.deepEqual(JSON.parse(selectOne(seed.db,'routes',BRANCH,'CITY_ROUTE').geometry_json).coordinates,[[1,1],[2,2]]);
+  }finally{seed.db.close();}
+});
+
 function readStoredFrame(db, mapId) {
   const row = selectOne(db, 'maps', BRANCH, mapId);
   return typeof row.frame_json === 'string' ? JSON.parse(row.frame_json) : row.frame_json;

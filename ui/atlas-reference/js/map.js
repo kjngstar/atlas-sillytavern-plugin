@@ -337,6 +337,7 @@ function create(canvas, mini, hooks){
     for(const r of g.overviewRoutes||[])pts(r&&(r.points||r.path));
     for(const r of g.corridorRoutes||[])pts(r.points);
     for(const f of g.overviewFeatures||[]){pts(f&&f.poly);pts(f&&f.line);}
+    pts(g.bridgeSymbol?.deck);pts(g.bridgeSymbol?.river?.points);
     pts(g.selfArea&&g.selfArea.pts);
     for(const d of g.districts||[])pts(d&&d.pts);
     for(const L of g.lands||[])pts(L&&L.pts);
@@ -358,6 +359,8 @@ function create(canvas, mini, hooks){
     return [x0,x1,y0,y1];
   }
   function fitExtent(){
+    if(st.geo.localSite)return st.geo.localSite.bounds;
+    if(st.geo.exploration)return st.geo.exploration.bounds;
     const host=st.geo.hostArea;
     if(host&&[host.x,host.y,host.w,host.h].every(Number.isFinite)&&host.w>0&&host.h>0)return [host.x,host.x+host.w,host.y,host.y+host.h];
     // Fit any standalone room to its actual geometry, without changing map units.
@@ -381,6 +384,7 @@ function create(canvas, mini, hooks){
   function fitPad(){ return contentExtent()?1.12:1.16; }
   function compactOverviewScale(base){
     const g=st.geo||{};
+    if(g.exploration)return base;
     if(!st.node?.host||!['world','region'].includes(st.kind)||g.parentContext||g.selfArea)return base;
     if(!contentExtent())return base; // Out-of-frame outliers must not redefine this map's view.
     // Detailed terrain needs its full geographic view, even with few POIs.
@@ -421,7 +425,7 @@ function create(canvas, mini, hooks){
   /* ── 层级切换 ── */
   function setPath(node, path){
     st.node = node; st.path = path||[]; st.kind = node.renderKind || node.kind || 'world';
-    st.geo = node.geo || {}; st.sel = null; st.hover = null;st.hits=[];st.edgeHits=[];
+    st.geo = node.geo || {}; st.sel = null; st.hover = null;st.hits=[];st.edgeHits=[];st.entryHints=[];
     refreshMarks();
     fit(false);
     st.cam.s = st.tgt.s * 1.55;      // 入场“下坠”感
@@ -461,7 +465,8 @@ function create(canvas, mini, hooks){
     ctx.restore();
 
     ctx.save();
-    if(st.node.host&&st.node.sceneStatus!=='ready') overviewMap(g);
+    if(g.exploration) explorationMap(g.exploration);
+    else if(st.node.host&&st.node.sceneStatus!=='ready') overviewMap(g);
     else if(g.overviewShapes||g.overviewRoutes) overviewMap(g);
     else if(st.kind==='world') worldMap(g);
     else if(st.kind==='region')regionMap(g);
@@ -470,6 +475,7 @@ function create(canvas, mini, hooks){
     else if(st.kind==='building')buildingMap(g);
     else if(st.kind==='floor') floorMap(g);
     else                       roomMap(g);
+    if(g.bridgeSymbol&&!g.exploration){drawBridgeSymbol(g.bridgeSymbol);pushLabel(...g.bridgeSymbol.center,'桥面示意',canvasStyle?.labelColor||'#a7c5d7','area',true);}
     for(const route of g.corridorRoutes??[]){ctx.beginPath();route.points.forEach((p,i)=>i?ctx.lineTo(...p):ctx.moveTo(...p));ctx.strokeStyle=skinColor('road','stroke','rgba(127,212,255,.5)');ctx.lineWidth=1.2/st.cam.s;ctx.setLineDash([6/st.cam.s,4/st.cam.s]);ctx.stroke();ctx.setLineDash([]);}
     ctx.restore();
   }
@@ -484,6 +490,107 @@ function create(canvas, mini, hooks){
    * M6-05③：装饰只有材质。这里**不产生**任何可点击/可查询的实体 ——
    * 无名装饰不是地点，缺 shape 时也绝不补一个新地点出来。
    */
+  function drawBridgeSymbol(bridge){
+    const cam=st.cam.s,ink=canvasStyle?.labelColor||'#a7c5d7';
+    const trace=pts=>{ctx.beginPath();pts.forEach((p,i)=>i?ctx.lineTo(...p):ctx.moveTo(...p));};
+    ctx.save();ctx.lineJoin='round';ctx.lineCap='round';
+    if(bridge.river){
+      trace(bridge.river.points);ctx.strokeStyle=skinColor('water','stroke','rgba(75,151,183,.28)');ctx.lineWidth=bridge.river.width;ctx.stroke();
+      ctx.lineWidth=1/cam;ctx.strokeStyle=skinColor('water','stroke','rgba(75,133,157,.7)');
+      for(const bank of bridge.river.banks){trace(bank);ctx.stroke();}
+    }
+    trace(bridge.deck);ctx.closePath();ctx.fillStyle=canvasStyle?.background||'#0c1823';ctx.fill();
+    ctx.strokeStyle=hexA(ink,.9);ctx.lineWidth=1.8/cam;ctx.stroke();
+    const c=bridge.center,n=bridge.across,t=bridge.along;
+    ctx.strokeStyle=hexA(ink,.3);ctx.lineWidth=.8/cam;
+    for(let i=-bridge.half+14;i<bridge.half-8;i+=14){ctx.beginPath();ctx.moveTo(c[0]+n[0]*i-t[0]*bridge.halfWidth,c[1]+n[1]*i-t[1]*bridge.halfWidth);ctx.lineTo(c[0]+n[0]*i+t[0]*bridge.halfWidth,c[1]+n[1]*i+t[1]*bridge.halfWidth);ctx.stroke();}
+    ctx.restore();
+  }
+
+  function explorationMap(sketch){
+    const cam=st.cam.s,ink=canvasStyle?.labelColor||'#a7c5d7';
+    const trace=pts=>{ctx.beginPath();pts.forEach((p,i)=>i?ctx.lineTo(...p):ctx.moveTo(...p));};
+    ctx.save();ctx.lineJoin='round';ctx.lineCap='round';
+    // The context is an open map extent, never a joined hall/corridor outline.
+    for(const outline of sketch.surface?.outlines??[]){
+      trace(outline);ctx.closePath();ctx.fillStyle=hexA(ink,.045);ctx.fill();
+      ctx.strokeStyle=hexA(ink,.18);ctx.lineWidth=1/cam;ctx.setLineDash([2/cam,7/cam]);ctx.stroke();ctx.setLineDash([]);
+    }
+    const street=sketch.surface?.street;
+    if(street){
+      // A street is an open paved surface, not a route's dashed centreline.
+      // Frontage bands are cartographic texture, never buildings or hit targets.
+      for(const f of street.frontages??[]){
+        trace(f.pts);ctx.closePath();ctx.fillStyle=hexA(ink,.10);ctx.fill();ctx.lineWidth=1/cam;ctx.strokeStyle=hexA(ink,.34);ctx.stroke();
+      }
+      for(const r of street.ribbons){
+        trace(r.polygon);ctx.closePath();ctx.fillStyle=hexA(ink,.10);ctx.fill();
+      }
+      ctx.strokeStyle=hexA(ink,.10);ctx.lineWidth=.6/cam;
+      for(const p of street.paving??[]){trace(p);ctx.stroke();}
+      for(const r of street.ribbons)for(const edge of r.edges){
+        trace(edge);ctx.lineWidth=6/cam;ctx.strokeStyle=hexA(ink,.11);ctx.stroke();
+        ctx.lineWidth=1.3/cam;ctx.strokeStyle=hexA(ink,.6);ctx.stroke();
+      }
+      if(st.showLabels)pushLabel(street.label[0],street.label[1]-8/cam,street.name,ink,'area',true);
+    }
+    for(const e of sketch.passages){
+      if(!street){trace(e.points);ctx.strokeStyle=hexA(ink,.4);ctx.lineWidth=1/cam;ctx.setLineDash([4/cam,5/cam]);ctx.stroke();ctx.setLineDash([]);}
+      if(e.status==='blocked'||e.status==='closed'){const p=e.points[1];ctx.beginPath();ctx.moveTo(p[0]-5/cam,p[1]-5/cam);ctx.lineTo(p[0]+5/cam,p[1]+5/cam);ctx.moveTo(p[0]+5/cam,p[1]-5/cam);ctx.lineTo(p[0]-5/cam,p[1]+5/cam);ctx.stroke();}
+    }
+    for(const a of sketch.areas){
+      const active=st.hover?.id===a.id||st.sel?.id===a.id;
+      ctx.save();ctx.translate(a.x,a.y);
+      if(sketch.level==='regions'&&!a.mobile){
+        for(const poly of a.parts){
+          trace(poly);ctx.closePath();ctx.fillStyle=hexA(a.c,active?.47:.29);ctx.fill();
+          ctx.strokeStyle=hexA(a.c,active?1:.8);ctx.lineWidth=(active?2.3:1.5)/cam;
+          ctx.setLineDash(a.exact?[]:[7/cam,3/cam]);ctx.stroke();ctx.setLineDash([]);
+        }
+      }
+      else if(a.external){
+        ctx.strokeStyle=hexA(ink,active?1:.75);ctx.lineWidth=2/cam;
+        if(!street){ctx.beginPath();ctx.moveTo(0,-13);ctx.lineTo(0,13);ctx.stroke();}
+        const side=a.x<(street?.label[0]??0)?-1:1;
+        ctx.beginPath();ctx.moveTo(side*7,-5);ctx.lineTo(side*13,0);ctx.lineTo(side*7,5);ctx.stroke();
+      }
+      else if(a.symbol==='bridge')drawBridgeSymbol(a.bridge);
+      else if(a.mobile){
+        ctx.strokeStyle=hexA(ink,.8);ctx.lineWidth=1.3/cam;ctx.beginPath();ctx.moveTo(-15,0);ctx.lineTo(-9,8);ctx.lineTo(9,8);ctx.lineTo(15,0);ctx.closePath();ctx.stroke();
+        ctx.strokeRect(-8,-8,16,8);
+      }
+      else if(a.recorded){
+        for(const poly of a.parts){
+          trace(poly);ctx.closePath();ctx.fillStyle=hexA(a.c,.13);ctx.fill();
+          ctx.strokeStyle=hexA(ink,active?1:.8);ctx.lineWidth=(active?2:1.4)/cam;ctx.stroke();
+          ctx.save();ctx.clip();ctx.strokeStyle=hexA(ink,.17);ctx.lineWidth=7/cam;ctx.stroke();ctx.restore();
+        }
+        // The saved child map supplies the entrances, so the overview reads as
+        // a building on the shared site instead of a sealed floating tile.
+        for(const d of a.entrances??[]){
+          const vertical=['east','west'].includes(d.wall),dx=vertical?0:d.w/2,dy=vertical?d.w/2:0;
+          ctx.beginPath();ctx.moveTo(d.x-dx,d.y-dy);ctx.lineTo(d.x+dx,d.y+dy);ctx.strokeStyle=canvasStyle?.background||'#0c1823';ctx.lineWidth=7/cam;ctx.stroke();
+          ctx.strokeStyle=hexA(ink,.55);ctx.lineWidth=1/cam;ctx.beginPath();ctx.moveTo(d.x-dx,d.y-dy);ctx.lineTo(d.x-dx+(vertical?8:0),d.y-dy+(vertical?0:8));ctx.moveTo(d.x+dx,d.y+dy);ctx.lineTo(d.x+dx+(vertical?8:0),d.y+dy+(vertical?0:8));ctx.stroke();
+        }
+        for(const f of a.details??[]){const [x,y,x1,y1]=f.r;drawFurn(f,x,y,x1-x,y1-y,'127,168,182');}
+      } else {
+        // Unknown geometry stays open to the same field. Do not fabricate the
+        // old cross-shaped room or draw a separate parcel around the name.
+        for(const poly of a.parts){trace(poly);ctx.closePath();ctx.fillStyle=hexA(a.c,.09);ctx.fill();}
+        const p=a.parts.flat(),x0=Math.min(...p.map(p=>p[0])),x1=Math.max(...p.map(p=>p[0])),y0=Math.min(...p.map(p=>p[1]));
+        ctx.strokeStyle=hexA(ink,active?.8:.35);ctx.lineWidth=1/cam;ctx.setLineDash([3/cam,5/cam]);
+        ctx.beginPath();ctx.moveTo(x0,y0+16);ctx.lineTo(x0,y0);ctx.lineTo(x1,y0);ctx.lineTo(x1,y0+16);ctx.stroke();ctx.setLineDash([]);
+      }
+      ctx.restore();
+      const maxY=Math.max(...a.parts.flat().map(p=>p[1]));
+      const largest=a.parts.reduce((best,p)=>{const size=p=>Math.abs(p.reduce((sum,q,i)=>{const r=p[(i+1)%p.length];return sum+q[0]*r[1]-r[0]*q[1];},0));return size(p)>size(best)?p:best;},a.parts[0]);
+      const center=a.label??[largest.reduce((s,p)=>s+p[0],0)/largest.length,largest.reduce((s,p)=>s+p[1],0)/largest.length];
+      if(st.showLabels)pushLabel(a.x+(a.external?0:center[0]),a.y+(a.external||a.mobile||a.symbol==='bridge'?maxY+14/cam:center[1]-6/cam),(a.external?'往 ':'')+a.name,ink,'area',true,undefined,{nodeId:a.nodeId,name:a.name});
+      if(st.showLabels&&sketch.level==='regions'&&a.childCount)pushLabel(a.x+center[0],a.y+center[1]+20/cam,a.childCount+' 处下属地点',ink,'sub',true);
+    }
+    ctx.restore();
+  }
+
   function overviewMap(g){
     const r=worldViewRect(st.cam,st.vw,st.vh,1.12), cam=st.cam.s;
     // 建成区 role 是 schema 枚举；没声明 role 就不加质感，不猜这块地是不是城市。
@@ -498,9 +605,7 @@ function create(canvas, mini, hooks){
       ctx.fillStyle=confirmed?'rgba(67,224,255,.07)':'rgba(127,212,255,.05)';ctx.fill();
       ctx.strokeStyle=confirmed?'rgba(67,224,255,.60)':'rgba(127,212,255,.42)';
       ctx.lineWidth=1.3/cam;ctx.setLineDash(confirmed?[]:[7/cam,5/cam]);ctx.stroke();ctx.setLineDash([]);
-      const cx=sa.pts.reduce((a,p)=>a+p[0],0)/sa.pts.length, cy=sa.pts.reduce((a,p)=>a+p[1],0)/sa.pts.length;
-      pushLabel(cx,cy-7,sa.name||'当前场所','#bcd6ee','name',true);
-      pushLabel(cx,cy+11,confirmed?'范围（已确认）':'范围示意 · 未标定','rgba(140,170,200,.75)','sub',true);
+      // 当前场所的名字已在标题栏；边界内留给实际地形、子地点和通行关系。
     }
     // ② zone 填色
     for(const shape of g.overviewShapes||[]){
@@ -770,6 +875,18 @@ function create(canvas, mini, hooks){
 
   /* ── L2 城市 ── */
   function cityMap(g){
+    if(g.localSite){
+      const p=g.localSite.polygon,ink=canvasStyle?.labelColor||'#9fb6c8';
+      ctx.save();ctx.beginPath();p.forEach((v,i)=>i?ctx.lineTo(...v):ctx.moveTo(...v));ctx.closePath();
+      ctx.fillStyle=hexA(ink,.075);ctx.fill();ctx.strokeStyle=hexA(ink,.42);ctx.lineWidth=1.3/st.cam.s;ctx.stroke();ctx.clip();
+      // Stone paving is surface texture, not roads or registered objects.
+      ctx.strokeStyle=hexA(ink,.14);ctx.lineWidth=.7/st.cam.s;
+      for(let y=-136,row=0;y<136;y+=22,row++){
+        ctx.beginPath();ctx.moveTo(-220,y);ctx.lineTo(220,y);ctx.stroke();
+        for(let x=-220+(row%2)*26;x<220;x+=52){ctx.beginPath();ctx.moveTo(x,y);ctx.lineTo(x,y+22);ctx.stroke();}
+      }
+      ctx.restore();
+    }
     if(g.wallPoints?.length){ctx.save();ctx.beginPath();smooth(ctx,g.wallPoints,true);ctx.strokeStyle='rgba(120,190,255,.13)';ctx.lineWidth=6/st.cam.s;ctx.stroke();ctx.strokeStyle='rgba(170,225,255,.5)';ctx.lineWidth=1.8/st.cam.s;ctx.setLineDash([12/st.cam.s,5/st.cam.s]);ctx.stroke();ctx.restore();}
     // 河流
     if(g.river){
@@ -786,8 +903,8 @@ function create(canvas, mini, hooks){
       const on = st.filter.size===0 || st.filter.has(d.id);
       ctx.save(); ctx.globalAlpha = on?1:.16;
       ctx.beginPath();d.pts.forEach((p,i)=>i?ctx.lineTo(...p):ctx.moveTo(...p));ctx.closePath();
-      ctx.fillStyle = hexA(d.c,.10); ctx.fill();
-      ctx.lineWidth=1.6/st.cam.s; ctx.strokeStyle=hexA(d.c,.42); ctx.stroke();
+      ctx.fillStyle = hexA(d.c,d.displayOnly ? .055 : .10); ctx.fill();
+      ctx.lineWidth=(d.displayOnly?1:1.6)/st.cam.s; ctx.strokeStyle=hexA(d.c,d.displayOnly ? .25 : .42); ctx.stroke();
       ctx.setLineDash([4/st.cam.s,5/st.cam.s]);
       ctx.lineWidth=4/st.cam.s; ctx.strokeStyle=hexA(d.c,.10); ctx.stroke();
       ctx.setLineDash([]);
@@ -812,13 +929,42 @@ function create(canvas, mini, hooks){
       ctx.restore();
       let cx=0,cy=0; d.pts.forEach(p=>{ cx+=p[0]; cy+=p[1]; });
       cx/=d.pts.length; cy/=d.pts.length;
-      pushLabel(cx, cy-7, d.name, d.c, 'name', true);
-      pushLabel(cx, cy+11, '街区 · 范围示意', 'rgba(140,170,200,.72)', 'sub', true);
+      if(d.displayOnly){
+        // A few paving / quay marks communicate the locality's purpose without
+        // inventing clickable stalls, doors, buildings, or a new watercourse.
+        const xs=d.pts.map(p=>p[0]),ys=d.pts.map(p=>p[1]),x0=Math.min(...xs),x1=Math.max(...xs),y0=Math.min(...ys),y1=Math.max(...ys);
+        ctx.save();ctx.beginPath();d.pts.forEach((p,i)=>i?ctx.lineTo(...p):ctx.moveTo(...p));ctx.closePath();ctx.clip();
+        for(const f of d.fabric??[]){
+          ctx.beginPath();f.pts.forEach((p,i)=>i?ctx.lineTo(...p):ctx.moveTo(...p));ctx.closePath();
+          ctx.fillStyle=hexA(d.c,.17);ctx.fill();ctx.strokeStyle=hexA(d.c,.4);ctx.lineWidth=.9/st.cam.s;ctx.stroke();
+        }
+        ctx.strokeStyle=hexA(d.c,.18);ctx.lineWidth=.8/st.cam.s;
+        if(d.role==='plaza'){
+          const w=x1-x0,h=y1-y0;
+          ctx.strokeRect(x0+w*.29,y0+h*.31,w*.40,h*.37);
+          for(let y=y0+h*.32;y<y0+h*.68;y+=24){ctx.beginPath();ctx.moveTo(x0+w*.30,y);ctx.lineTo(x0+w*.68,y);ctx.stroke();}
+        }else if(d.role==='quay'){
+          ctx.strokeStyle=hexA(d.c,.4);
+          for(let k=0;k<4;k++){ctx.beginPath();ctx.moveTo(x0+12,y1-10-k*8);ctx.lineTo(x1-12,y1-10-k*8);ctx.stroke();}
+        }else if(d.role==='market'){
+          for(const f of d.fabric??[]){const a=f.pts[0],b=f.pts[1];ctx.beginPath();ctx.moveTo(a[0],a[1]+8);ctx.lineTo(b[0],b[1]+8);ctx.stroke();}
+        }
+        ctx.restore();
+      }
+      const label=d.site??[cx,cy];
+      if(d.id!==st.node.containerLocationId)pushLabel(label[0],label[1]-7,d.name,d.c,'name',true);
+      if(!d.displayOnly&&d.id!==st.node.containerLocationId)pushLabel(cx,cy+11,'街区 · 范围示意','rgba(140,170,200,.72)','sub',true);
     });
-    ctx.save();ctx.strokeStyle=skinColor('road','stroke','rgba(150,205,255,.26)');ctx.lineWidth=1.4/st.cam.s;ctx.setLineDash([6/st.cam.s,5/st.cam.s]);
-    for(const road of g.avenues||[]){ctx.beginPath();ctx.moveTo(...road.from);ctx.lineTo(...road.to);ctx.stroke();}
-    ctx.setLineDash([]);
-    for(const b of g.cityBuildings||[]){ctx.beginPath();rrect(ctx,b.x,b.y,b.w,b.h,2);ctx.fillStyle=skinColor('floorWall','fill','rgba(127,212,255,.12)');ctx.fill();ctx.strokeStyle=skinColor('floorWall','stroke','rgba(127,212,255,.6)');ctx.stroke();}
+    ctx.save();ctx.lineCap='round';ctx.lineJoin='round';
+    // Stroke the whole network in passes so junctions join, with no seams or
+    // end caps across their shared road surface. Preserve saved road widths.
+    for(const pass of [0,1,2])for(const road of g.avenues||[]){
+      const width=Math.max(road.width||0,10/st.cam.s);
+      ctx.beginPath();ctx.moveTo(...road.from);ctx.lineTo(...road.to);
+      ctx.lineWidth=width+(pass===0?5/st.cam.s:pass===1?2/st.cam.s:0);
+      ctx.strokeStyle=pass===0?hexA(canvasStyle?.labelColor||'#a7c5d7',.13):pass===1?hexA(canvasStyle?.labelColor||'#a7c5d7',.48):canvasStyle?.background||'#0c1823';ctx.stroke();
+    }
+    for(const b of g.cityBuildings||[]){ctx.beginPath();rrect(ctx,b.x,b.y,b.w,b.h,2);ctx.fillStyle=b.c?hexA(b.c,.18):skinColor('floorWall','fill','rgba(127,212,255,.12)');ctx.fill();ctx.strokeStyle=b.c?hexA(b.c,.7):skinColor('floorWall','stroke','rgba(127,212,255,.6)');ctx.lineWidth=1.2/st.cam.s;ctx.stroke();for(const r of b.interior??[]){ctx.strokeStyle=hexA(b.c,.45);ctx.lineWidth=.8/st.cam.s;ctx.strokeRect(r.x,r.y,r.w,r.h);}}
     ctx.restore();
     // 环路 / 放射大道 / 环形城墙：
     // 这三段读的是 `g.rings` / `g.radials` / `g.walls` —— 仓库里**没有任何生产方**会产出它们
@@ -958,8 +1104,7 @@ function create(canvas, mini, hooks){
   function floorMap(g){
     const seed = hash(st.node.id);
     const rooms=g.rooms||[];
-    const planTop=rooms.length?Math.min(...rooms.map(r=>r.y)):-280;
-    if(g.hostArea){const r=g.hostArea;ctx.save();ctx.beginPath();rrect(ctx,r.x,r.y,r.w,r.h,6);ctx.fillStyle=skinColor('floorWall','fill','rgba(67,224,255,.06)');ctx.fill();ctx.strokeStyle=skinColor('floorWall','stroke','rgba(67,224,255,.4)');ctx.lineWidth=1.3/st.cam.s;ctx.stroke();ctx.restore();pushLabel(r.x+r.w/2,r.y+r.h-12/st.cam.s,r.name||st.node.name,'#7fd4ff','sub',true);}
+    if(g.hostArea){const r=g.hostArea;ctx.save();ctx.beginPath();rrect(ctx,r.x,r.y,r.w,r.h,6);ctx.fillStyle=skinColor('floorWall','fill','rgba(67,224,255,.06)');ctx.fill();ctx.strokeStyle=skinColor('floorWall','stroke','rgba(67,224,255,.4)');ctx.lineWidth=1.3/st.cam.s;ctx.stroke();ctx.restore();}
     // 走廊
     const c = g.corridor;
     if(!g.hostArea&&c.w>0&&c.h>0){
@@ -1044,7 +1189,7 @@ function create(canvas, mini, hooks){
       // M6-06③：副标题只写**真实字段**。旧代码在这里硬写「禁书区 · 上锁」——
       // 那是示例世界的文案，会被原样印到任何世界的图上。现在有 status 用 status，
       // 没有就写中性描述，绝不为哪个房间编一个剧情状态。
-      if(r!==g.hostArea){pushLabel(x+w/2, y+h/2 - 4, r.name, !!r.live?C.cyan:'#a8bdd6', !!r.live?'live':'name', true);
+      if(r!==g.hostArea&&!r.isContainer){pushLabel(x+w/2, y+h/2 - 4, r.name, !!r.live?C.cyan:'#a8bdd6', !!r.live?'live':'name', true);
       pushLabel(x+w/2, y+h-13, r.status || (r.kind==='vehicle'?'车厢内部':r.role==='garden'?'园林 · 示意':r.role==='outdoor'?'室外 · 示意':r.kind==='exit'?'通道':'房间'), 'rgba(140,170,200,.75)','sub', true);}
     });
 
@@ -1080,20 +1225,7 @@ function create(canvas, mini, hooks){
     });
     ctx.restore();
 
-    // 图签；幅面尺寸留在数据中，不在地图上绘制尺寸线或宽度读数。
-    const mpp = st.node.host?(st.node.metric||1/st.node.transform.scale):(st.node.metric||0.085);
-    const measureWidth=st.node.host?st.node.transform.bounds.w*st.node.transform.scale:940;
-    const measureRight=measureWidth/2;
-    // 图签
-    const stampX=st.node.host?measureRight-228:296,stampY=st.node.host?planTop-62:-302;
-    ctx.save();
-    ctx.beginPath(); rrect(ctx,stampX,stampY,228,50,4);
-    ctx.fillStyle=canvasStyle?.labelBackground||'rgba(8,14,24,.82)'; ctx.fill();
-    ctx.strokeStyle=skinColor('floorWall','stroke','rgba(120,200,255,.35)'); ctx.lineWidth=1/st.cam.s; ctx.stroke();
-    ctx.restore();
-    pushLabel(stampX+114, stampY+5, (st.path[st.path.length-2]||{}).name || '建筑图', '#bcd6ee', 'name', true);
-    pushLabel(stampX+114, stampY+18, st.node.host?`空间示意 · 单位 ${st.node.metric?'m':'格'}`:`比例 1:${Math.round(0.085/mpp*140)} · ATLAS 制图`, 'rgba(140,170,200,.85)', 'sub', true);
-    pushLabel(stampX+114, stampY+31, st.node.host?st.node.name:`地点 ${st.node.id} · ${st.node.name}`, 'rgba(140,170,200,.85)', 'sub', true);
+
   }
   /**
    * M6-06②：通用室内陈设。
@@ -1422,7 +1554,7 @@ function create(canvas, mini, hooks){
    * 坐标对齐设备像素网格，单帧线数硬上限 2000。
    */
   function grid(){
-    if(!st.showGrid) return;
+    if(!st.showGrid||st.geo.exploration) return;
     const cam=st.cam;
     // NaN / 零缩放防护：算不出可信步长就不画网格，绝不进死循环。
     if(!Number.isFinite(cam.s)||cam.s<=0||!Number.isFinite(cam.x)||!Number.isFinite(cam.y)
@@ -1433,7 +1565,7 @@ function create(canvas, mini, hooks){
   }
 
   /** `rank` 越小越优先（0 = 选中/悬停）。不传就按标签种类给默认优先级。 */
-  function pushLabel(x,y,text,color,kind,world,rank){ if(st.showLabels) st.labels.push({x,y,text,color,kind,scr:!world,rank}); }
+  function pushLabel(x,y,text,color,kind,world,rank,entry){ if(st.showLabels) st.labels.push({x,y,text,color,kind,scr:!world,rank,entry}); }
 
   /* ══════════ 标记（屏幕空间） ══════════ */
   function collectMarks(){
@@ -1635,7 +1767,7 @@ function create(canvas, mini, hooks){
   function labelRank(l){
     if(Number.isFinite(l.rank))return l.rank;
     if(l.kind==='live')return 1;
-    if(l.kind==='name')return 2;
+    if(l.kind==='name'||l.kind==='area')return 2;
     return 4;
   }
   function drawLabels(){
@@ -1648,9 +1780,9 @@ function create(canvas, mini, hooks){
     }).filter(e=>e.sx>-40&&e.sx<=st.vw+40&&e.sy>-30&&e.sy<=st.vh+30)
       .sort((a,b)=>a.rank-b.rank||a.i-b.i);
     for(const {l,sx,sy} of items){
-      ctx.font=(l.kind==='sub'?'400 11px ':l.kind==='live'?'600 12px ':'500 11px ')+F.sans;
-      const tw=ctx.measureText(l.text).width+12, th=l.kind==='live'?20:17;
-      const spot=placeLabel(occupied,sx,sy,tw,th);
+      ctx.font=(l.kind==='sub'?'400 11px ':l.kind==='live'?'600 12px ':l.kind==='area'?(st.geo.exploration?.level==='regions'?'600 14px ':'500 12px '):'500 11px ')+F.sans;
+      const tw=ctx.measureText(l.text).width+12, th=l.entry?24:l.kind==='live'?20:17;
+      const spot=placeLabel(occupied,sx,sy,tw+(l.entry?30:0),th);
       if(!spot)continue;   // 放不下就收纳：宁可少写一个字，也不挪 marker 或叠成一团
       // M6-10②：「让位」是要付代价的 —— 挪方位就得拉引线，读者得追着线才知道它属于谁。
       // 副标题是等级最低的标签，不配让别人付这个代价：首选位占不到就直接收纳，
@@ -1662,8 +1794,17 @@ function create(canvas, mini, hooks){
         ctx.beginPath(); ctx.moveTo(sx,sy); ctx.lineTo(spot.lx,spot.ly);
         ctx.strokeStyle=hexA((canvasStyle?.labelColor||l.color),.5); ctx.lineWidth=1; ctx.stroke();
       }
-      const cx=spot.box.x+spot.box.w/2;
-      if(l.kind==='live'){
+      const cx=spot.box.x+(l.entry?30:0)+tw/2;
+      if(l.entry){
+        const x=spot.box.x+14,y=spot.box.y+7;
+        const m={...l.entry,id:l.entry.nodeId,key:l.entry.nodeId,type:'poi',silent:true,iconEntry:true,node:{id:l.entry.nodeId,known:true}};
+        drawMark(ctx,m,x,y,st.t||0,st.hover?.id===m.id,st.sel?.id===m.id);
+        st.hits.push({m,x,y,r:18});
+        (st.entryHints??=[]).push({...l.entry,x:x-20,y:y-20});
+      }
+      if(l.kind==='area'){
+        ctx.font=(st.geo.exploration?.level==='regions'?'600 14px ':'500 12px ')+F.sans;ctx.fillStyle=canvasStyle?.labelColor||l.color;ctx.fillText(l.text,cx,spot.box.y);
+      } else if(l.kind==='live'){
         ctx.font='600 11.5px '+F.sans;
         const w=ctx.measureText(l.text).width;
         ctx.beginPath();
@@ -1792,6 +1933,11 @@ function create(canvas, mini, hooks){
       else { const W=st.geo.walls; const p=T(W.x,W.y); mctx.strokeRect(p[0],p[1],W.w*s,W.h*s);
         (st.geo.shelves||[]).forEach(sh=>{ const q=T(sh.r[0],sh.r[1]); mctx.fillStyle='rgba(255,194,71,.3)'; mctx.fillRect(q[0],q[1],(sh.r[2]-sh.r[0])*s,(sh.r[3]-sh.r[1])*s); }); }
     }
+    if(st.geo.localSite){
+      mctx.beginPath();st.geo.localSite.polygon.forEach(([x,y],i)=>{const q=T(x,y);i?mctx.lineTo(...q):mctx.moveTo(...q);});mctx.closePath();
+      mctx.strokeStyle=canvasStyle?.labelColor||'#9fb6c8';mctx.stroke();
+      for(const b of st.geo.cityBuildings??[]){const q=T(b.x,b.y);mctx.fillStyle=hexA(b.c,.3);mctx.fillRect(q[0],q[1],b.w*s,b.h*s);}
+    }
     // Overview routes and footprints use the same transform on the minimap.
     for(const shape of st.geo.overviewShapes||[]){
       mctx.beginPath();shape.pts.forEach((p,i)=>{const q=T(p[0],p[1]);i?mctx.lineTo(q[0],q[1]):mctx.moveTo(q[0],q[1]);});mctx.closePath();
@@ -1813,7 +1959,11 @@ function create(canvas, mini, hooks){
     }
     mctx.setLineDash([]);
     // 标记
-    st.marks.forEach(m=>{ const q=T(m.x,m.y); mctx.beginPath(); mctx.arc(q[0],q[1],2.2,0,7);
+    for(const poly of st.geo.exploration?.surface?.outlines??[]){mctx.beginPath();poly.forEach(([x,y],i)=>{const q=T(x,y);i?mctx.lineTo(...q):mctx.moveTo(...q);});mctx.closePath();mctx.fillStyle=hexA(canvasStyle?.labelColor||'#a7c5d7',.06);mctx.fill();mctx.strokeStyle=hexA(canvasStyle?.labelColor||'#a7c5d7',.5);mctx.stroke();}
+    for(const a of st.geo.exploration?.areas??[])if(a.recorded||st.geo.exploration.level==='regions')for(const poly of a.parts){mctx.beginPath();poly.forEach(([x,y],i)=>{const q=T(x+a.x,y+a.y);i?mctx.lineTo(...q):mctx.moveTo(...q);});mctx.closePath();if(st.geo.exploration.level==='regions'){mctx.fillStyle=hexA(a.c,.35);mctx.fill();}mctx.strokeStyle=a.c||canvasStyle?.labelColor||'#a7c5d7';mctx.stroke();}
+    for(const a of st.geo.exploration?.areas??[])if(a.bridge){const b=a.bridge;if(b.river){mctx.beginPath();b.river.points.forEach(([x,y],i)=>{const q=T(x+a.x,y+a.y);i?mctx.lineTo(...q):mctx.moveTo(...q);});mctx.strokeStyle='rgba(75,151,183,.6)';mctx.stroke();}mctx.beginPath();b.deck.forEach(([x,y],i)=>{const q=T(x+a.x,y+a.y);i?mctx.lineTo(...q):mctx.moveTo(...q);});mctx.closePath();mctx.strokeStyle=canvasStyle?.labelColor||'#a7c5d7';mctx.stroke();}
+    if(st.geo.bridgeSymbol){mctx.beginPath();st.geo.bridgeSymbol.deck.forEach(([x,y],i)=>{const q=T(x,y);i?mctx.lineTo(...q):mctx.moveTo(...q);});mctx.closePath();mctx.stroke();}
+    (st.geo.exploration?[]:st.marks).forEach(m=>{ const q=T(m.x,m.y); mctx.beginPath(); mctx.arc(q[0],q[1],2.2,0,7);
       mctx.fillStyle=canvasStyle?.markerColors[m.type]||m.c||({char:C.cyan,item:C.amber,poi:C.violet,sig:C.green,exit:C.blue}[m.type]||C.cyan); mctx.fill(); });
     // 视口框
     const [ax,ay]=S2W(0,0), [bx,by]=S2W(st.vw,st.vh);
@@ -1838,7 +1988,7 @@ function create(canvas, mini, hooks){
 
     ctx.setTransform(st.dpr,0,0,st.dpr,0,0);
     ctx.clearRect(0,0,st.vw,st.vh);
-    st.labels=[];st.edgeHits=[];st.hits=[];st.utilitySymbols=[];st.utilityBoxes=[];
+    st.labels=[];st.entryHints=[];st.edgeHits=[];st.hits=[];st.utilitySymbols=[];st.utilityBoxes=[];
 
     ctx.save();
     ctx.translate(st.vw/2, st.vh/2);
@@ -1852,7 +2002,12 @@ function create(canvas, mini, hooks){
     grid();
     drawUtilities();
 
-    if(st.showMarks){
+    if(st.geo.exploration){
+      drawLabels();edgeFade();ctx.save();ctx.font='400 11px '+F.sans;ctx.textAlign='left';ctx.textBaseline='bottom';ctx.fillStyle=canvasStyle?.labelColor||'#a7c5d7';ctx.globalAlpha=.75;
+      ctx.fillText('单击地点图标进入地图；双击轮廓也可进入',18,st.vh-34);ctx.globalAlpha=.55;
+      ctx.fillText(st.geo.exploration.note,18,st.vh-18);ctx.restore();
+    }
+    else if(st.showMarks){
       if(st.showLinks)relationLayer();
       if(st.mode==='heat') heatLayer();
       if(st.mode==='flow') flowLayer(st.t);
@@ -1863,6 +2018,7 @@ function create(canvas, mini, hooks){
       edgeFade();
     } else edgeFade();
 
+    if(st.geo.localSite){ctx.save();ctx.font='400 11px '+F.sans;ctx.fillStyle=canvasStyle?.labelColor||'#a7c5d7';ctx.globalAlpha=.6;ctx.fillText(st.geo.localSite.note,18,st.vh-18);ctx.restore();}
     drawMini();
     if(hooks.onFrame) hooks.onFrame(st);
     if(!once)frameId=requestAnimationFrame(frame);
@@ -1873,20 +2029,21 @@ function create(canvas, mini, hooks){
     let best=null, bd=1e9;
     // M6-10①：命中用**和绘制同一个** markScreenPos（含同样的视口裁剪），
     // 保证"画出来的点点得中、点得中的一定画着"。
-    const markHits=st.showMarks?visibleMarkHits():[];
+    const markHits=st.geo.exploration?st.hits:st.showMarks?visibleMarkHits():[];
     markHits.concat(st.edgeHits).forEach(h=>{
       const d=Math.hypot(h.x-mx,h.y-my);
       if(d<h.r+7 && d<bd){ bd=d; best=h.m; }
     });
-    if(best)return best;
+    if(best)return best.node&&['poi','exit','vehicle'].includes(best.type)?{...best,iconEntry:true}:best;
     const [wx,wy]=S2W(mx,my),g=st.geo;
     const inside=(pts)=>{let yes=false;for(let i=0,j=pts.length-1;i<pts.length;j=i++){const a=pts[i],b=pts[j];if((a[1]>wy)!==(b[1]>wy)&&wx<(b[0]-a[0])*(wy-a[1])/(b[1]-a[1])+a[0])yes=!yes;}return yes;};
+    for(const a of g.exploration?.areas??[]){if(a.parts.some(poly=>inside(poly.map(([x,y])=>[x+a.x,y+a.y]))))return {type:'poi',id:a.id,placeId:a.nodeId,name:a.name,node:{id:a.nodeId,known:true},sub:a.recorded?'区域略图':'内部未探明'};}
     let target=null;
     if(st.kind==='city')target=(g.districts||[]).find(d=>inside(d.pts));
     else if(st.kind==='floor')target=(g.rooms||[]).find(r=>wx>=r.x&&wx<=r.x+r.w&&wy>=r.y&&wy<=r.y+r.h);
     else if(st.kind==='building')target=(g.wings||[]).find(r=>wx>=r.x-r.w/2&&wx<=r.x+r.w/2&&wy>=r.y-r.h/2&&wy<=r.y+r.h/2);
     else if(st.kind==='district')target=(g.buildings||[]).find(r=>wx>=r.c[0]-r.w/2&&wx<=r.c[0]+r.w/2&&wy>=r.c[1]-r.h/2&&wy<=r.c[1]+r.h/2);
-    if(target){const node=findChild(target.childId||target.id);return {type:'poi',id:target.id,name:target.name,node};}
+    if(target){const node=findChild(target.childId||target.id);return {type:'poi',id:target.id,placeId:node?.id??target.id,name:target.name,node};}
     return null;
   }
   function bind(){
@@ -1931,6 +2088,7 @@ function create(canvas, mini, hooks){
       st.sel = m;
       if(hooks.onSelect) hooks.onSelect(m);
     });
+    listen(canvas,'dblclick',e=>{const r=canvas.getBoundingClientRect(),m=hitTest(e.clientX-r.left,e.clientY-r.top);if(m?.node&&hooks.onEnter)hooks.onEnter(m);});
     listen(canvas,'wheel',e=>{
       e.preventDefault();
       const r=canvas.getBoundingClientRect();
@@ -2012,6 +2170,7 @@ function create(canvas, mini, hooks){
      * 这里只提供它算不出来的部分：相机尺度与尺度质量。
      */
     scaleQuality(){
+      if(st.geo.exploration||st.geo.localSite)return {schematic:true,calibrated:false,quality:'layout',estimated:true,cssPixelsPerUnit:null,metersPerUnit:null};
       const camS=st.cam.s, metric=st.node?.metric;
       const calibrated=Number.isFinite(metric)&&metric>0;
       const quality=st.node?.transform?.metricQuality??st.node?.transform?.scaleQuality??null;
