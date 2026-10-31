@@ -24,7 +24,17 @@ export function projectLocalSiteMaps(nodes,locations,{maps=[]}={}){
    const source=buildings.find(b=>b.id===m.id),ratio=Math.max(.65,Math.min(1.6,(source?.w??1)/(source?.h??1)));
    const w=side%2?136:94,h=w/ratio;
    placements.set(m.id,{x:cx,y:cy});
-   out.push({id:m.id,name:m.name,x:cx-w/2,y:cy-h/2,w,h,c:colors[i%colors.length],quality:'symbolic',displayOnly:true});
+   const child=(n.children??[]).find(c=>c.containerLocationId===m.id);
+   const rooms=(child?.geo?.rooms??[]).filter(r=>[r.x,r.y,r.w,r.h].every(Number.isFinite)&&r.w>0&&r.h>0);
+   if(!rooms.length&&child?.geo?.hostArea)rooms.push(child.geo.hostArea);
+   const interior=[];
+   if(rooms.length){
+    const x0=Math.min(...rooms.map(r=>r.x)),y0=Math.min(...rooms.map(r=>r.y));
+    const rw=Math.max(...rooms.map(r=>r.x+r.w))-x0,rh=Math.max(...rooms.map(r=>r.y+r.h))-y0;
+    const s=Math.min((w-24)/rw,(h-24)/rh);
+    if(Number.isFinite(s)&&s>0)for(const r of rooms)interior.push({x:cx+(r.x-x0-rw/2)*s,y:cy+(r.y-y0-rh/2)*s,w:r.w*s,h:r.h*s});
+   }
+   out.push({id:m.id,name:m.name,x:cx-w/2,y:cy-h/2,w,h,interior,c:colors[i%colors.length],quality:'symbolic',displayOnly:true});
   });
   n.marks=(n.marks??[]).map(m=>{
    const p=placements.get(m.id)??placements.get(m.locationId);
@@ -32,7 +42,7 @@ export function projectLocalSiteMaps(nodes,locations,{maps=[]}={}){
   });
   const xs=out.flatMap(b=>[b.x,b.x+b.w]),ys=out.flatMap(b=>[b.y,b.y+b.h]);
   n.geo={...g,districts:[],avenues:[],cityBuildings:out,localSite:{
-   polygon:[[-178,-113],[-118,-136],[149,-136],[190,-91],[172,115],[110,134],[-155,122],[-192,76]],
+   polygon:[[-208,-98],[-118,-136],[149,-136],[220,-91],[220,96],[110,136],[-175,122],[-220,76]],
    bounds:[Math.min(-330,...xs)-35,Math.max(330,...xs)+35,Math.min(-260,...ys)-35,Math.max(260,...ys)+55],
    note:'广场略图 · 建筑外形与相对分布为示意',displayOnly:true}};
  }

@@ -882,8 +882,8 @@ function create(canvas, mini, hooks){
       // Stone paving is surface texture, not roads or registered objects.
       ctx.strokeStyle=hexA(ink,.14);ctx.lineWidth=.7/st.cam.s;
       for(let y=-136,row=0;y<136;y+=22,row++){
-        ctx.beginPath();ctx.moveTo(-192,y);ctx.lineTo(190,y);ctx.stroke();
-        for(let x=-192+(row%2)*26;x<190;x+=52){ctx.beginPath();ctx.moveTo(x,y);ctx.lineTo(x,y+22);ctx.stroke();}
+        ctx.beginPath();ctx.moveTo(-220,y);ctx.lineTo(220,y);ctx.stroke();
+        for(let x=-220+(row%2)*26;x<220;x+=52){ctx.beginPath();ctx.moveTo(x,y);ctx.lineTo(x,y+22);ctx.stroke();}
       }
       ctx.restore();
     }
@@ -964,7 +964,7 @@ function create(canvas, mini, hooks){
       ctx.lineWidth=width+(pass===0?5/st.cam.s:pass===1?2/st.cam.s:0);
       ctx.strokeStyle=pass===0?hexA(canvasStyle?.labelColor||'#a7c5d7',.13):pass===1?hexA(canvasStyle?.labelColor||'#a7c5d7',.48):canvasStyle?.background||'#0c1823';ctx.stroke();
     }
-    for(const b of g.cityBuildings||[]){ctx.beginPath();rrect(ctx,b.x,b.y,b.w,b.h,2);ctx.fillStyle=b.c?hexA(b.c,.18):skinColor('floorWall','fill','rgba(127,212,255,.12)');ctx.fill();ctx.strokeStyle=b.c?hexA(b.c,.7):skinColor('floorWall','stroke','rgba(127,212,255,.6)');ctx.lineWidth=1.2/st.cam.s;ctx.stroke();}
+    for(const b of g.cityBuildings||[]){ctx.beginPath();rrect(ctx,b.x,b.y,b.w,b.h,2);ctx.fillStyle=b.c?hexA(b.c,.18):skinColor('floorWall','fill','rgba(127,212,255,.12)');ctx.fill();ctx.strokeStyle=b.c?hexA(b.c,.7):skinColor('floorWall','stroke','rgba(127,212,255,.6)');ctx.lineWidth=1.2/st.cam.s;ctx.stroke();for(const r of b.interior??[]){ctx.strokeStyle=hexA(b.c,.45);ctx.lineWidth=.8/st.cam.s;ctx.strokeRect(r.x,r.y,r.w,r.h);}}
     ctx.restore();
     // 环路 / 放射大道 / 环形城墙：
     // 这三段读的是 `g.rings` / `g.radials` / `g.walls` —— 仓库里**没有任何生产方**会产出它们
@@ -1932,6 +1932,11 @@ function create(canvas, mini, hooks){
       else if(st.kind==='building'){ (st.geo.wings||[]).forEach(g2=>{ const p=T(g2.x-g2.w/2,g2.y-g2.h/2); mctx.strokeRect(p[0],p[1],g2.w*s,g2.h*s); }); }
       else { const W=st.geo.walls; const p=T(W.x,W.y); mctx.strokeRect(p[0],p[1],W.w*s,W.h*s);
         (st.geo.shelves||[]).forEach(sh=>{ const q=T(sh.r[0],sh.r[1]); mctx.fillStyle='rgba(255,194,71,.3)'; mctx.fillRect(q[0],q[1],(sh.r[2]-sh.r[0])*s,(sh.r[3]-sh.r[1])*s); }); }
+    }
+    if(st.geo.localSite){
+      mctx.beginPath();st.geo.localSite.polygon.forEach(([x,y],i)=>{const q=T(x,y);i?mctx.lineTo(...q):mctx.moveTo(...q);});mctx.closePath();
+      mctx.strokeStyle=canvasStyle?.labelColor||'#9fb6c8';mctx.stroke();
+      for(const b of st.geo.cityBuildings??[]){const q=T(b.x,b.y);mctx.fillStyle=hexA(b.c,.3);mctx.fillRect(q[0],q[1],b.w*s,b.h*s);}
     }
     // Overview routes and footprints use the same transform on the minimap.
     for(const shape of st.geo.overviewShapes||[]){
