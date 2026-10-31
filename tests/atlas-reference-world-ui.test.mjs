@@ -146,6 +146,22 @@ test('地图沿用地点图标，无进入文字按钮，单击图标进入细�
  assert.match(w.document.getElementById('map').getAttribute('aria-label'),/单击地点图标/);
 });
 
+test('存档城市地点图标带 placeId 仍单击进入，街区轮廓单击保持查看详情',async t=>{
+ const city={mapId:'city-map',name:'枫镇',containerLocationId:'C',containerLocationKind:'city',parentMapId:'world',points:[{entityId:'L',kind:'location',name:'枫巷',x:50,y:50,mapId:'city-map'}]};
+ const lane={mapId:'lane-map',name:'枫巷',containerLocationId:'L',containerLocationKind:'other',parentMapId:'city-map',points:[]};
+ const block={mapId:'block-map',name:'旧街区',containerLocationId:'D',containerLocationKind:'district',parentMapId:'city-map',points:[]};
+ const scene={units:'cells',layout:{kind:'city',bounds:{x:0,y:0,w:100,h:100},districts:[{id:'D',name:'旧街区',polygon:[[0,0],[100,0],[100,100],[0,100]]}],roads:[],pins:[{id:'L',entityId:'L',name:'枫巷',type:'location',x:50,y:50}]}};
+ const catalog=[['C','枫镇','city','world'],['L','枫巷','other','city-map'],['D','旧街区','district','city-map']].map(([entityId,name,locationKind,mapId])=>({entityId,entityKind:'location',name,locationKind,mapId}));
+ const data=projectReferenceData({mapView:view([WORLD,city,lane,block]),sceneView:view([{mapId:'city-map',scene}]),catalogView:view(catalog),viewMode:'author'});
+ const {w,preview,calls}=withUI(t,{data});preview.go('city-map');preview.map.setPaused(true);preview.map.resize();
+ const hit=preview.map.state.hits.find(h=>h.m.id==='L');assert.ok(hit);assert.equal(hit.m.placeId,'L');
+ const canvas=w.document.getElementById('map');canvas.dispatchEvent(new w.MouseEvent('click',{clientX:hit.x,clientY:hit.y}));await tick();
+ assert.equal(preview.state.nodeId,'lane-map');assert.deepEqual(calls.build,[]);
+ preview.go('city-map');preview.map.resize();const s=preview.map.state,p=s.geo.districts[0].pts[0];
+ canvas.dispatchEvent(new w.MouseEvent('click',{clientX:(p[0]+25-s.cam.x)*s.cam.s+s.vw/2,clientY:(p[1]+25-s.cam.y)*s.cam.s+s.vh/2}));await tick();
+ assert.equal(preview.state.nodeId,'city-map','点轮廓不能触发图标的单击进入规则');
+});
+
 test('楼层用原生选择器导航；未明楼层房间保留入口，导航不会偷偷请求生成',async t=>{
  const upper={mapId:'upper-map',name:'二楼',kind:'interior',containerLocationId:'upper',containerLocationKind:'floor',parentMapId:'bld-map',points:[]};
  const pantry={mapId:'pantry-map',name:'厨房',kind:'interior',containerLocationId:'pantry',containerLocationKind:'room',parentMapId:'bld-map',points:[]};

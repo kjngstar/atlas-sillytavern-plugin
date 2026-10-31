@@ -2029,7 +2029,7 @@ function create(canvas, mini, hooks){
       const d=Math.hypot(h.x-mx,h.y-my);
       if(d<h.r+7 && d<bd){ bd=d; best=h.m; }
     });
-    if(best)return best;
+    if(best)return best.node&&['poi','exit','vehicle'].includes(best.type)?{...best,iconEntry:true}:best;
     const [wx,wy]=S2W(mx,my),g=st.geo;
     const inside=(pts)=>{let yes=false;for(let i=0,j=pts.length-1;i<pts.length;j=i++){const a=pts[i],b=pts[j];if((a[1]>wy)!==(b[1]>wy)&&wx<(b[0]-a[0])*(wy-a[1])/(b[1]-a[1])+a[0])yes=!yes;}return yes;};
     for(const a of g.exploration?.areas??[]){if(a.parts.some(poly=>inside(poly.map(([x,y])=>[x+a.x,y+a.y]))))return {type:'poi',id:a.id,placeId:a.nodeId,name:a.name,node:{id:a.nodeId,known:true},sub:a.recorded?'区域略图':'内部未探明'};}
@@ -2038,7 +2038,7 @@ function create(canvas, mini, hooks){
     else if(st.kind==='floor')target=(g.rooms||[]).find(r=>wx>=r.x&&wx<=r.x+r.w&&wy>=r.y&&wy<=r.y+r.h);
     else if(st.kind==='building')target=(g.wings||[]).find(r=>wx>=r.x-r.w/2&&wx<=r.x+r.w/2&&wy>=r.y-r.h/2&&wy<=r.y+r.h/2);
     else if(st.kind==='district')target=(g.buildings||[]).find(r=>wx>=r.c[0]-r.w/2&&wx<=r.c[0]+r.w/2&&wy>=r.c[1]-r.h/2&&wy<=r.c[1]+r.h/2);
-    if(target){const node=findChild(target.childId||target.id);return {type:'poi',id:target.id,name:target.name,node};}
+    if(target){const node=findChild(target.childId||target.id);return {type:'poi',id:target.id,placeId:node?.id??target.id,name:target.name,node};}
     return null;
   }
   function bind(){
