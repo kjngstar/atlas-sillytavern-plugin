@@ -5,6 +5,7 @@ import { projectMapContext } from './atlas-map-context.mjs';
 import { projectSpaceNavigation } from './atlas-space-navigation.mjs';
 import { projectExplorationMaps } from './atlas-exploration-map.mjs';
 import { cityLocality } from './atlas-street-map.mjs';
+import { projectLocalSiteMaps } from './atlas-local-site-map.mjs';
 
 /** Descriptive categories, independent of the actual parent/child map tree. */
 const MAP_CATEGORY_NAMES = {
@@ -225,7 +226,8 @@ export function referenceGeometry(map, document, {viewMode='author',visibleLocat
     geo={districts:(layout.districts??[]).filter(d=>d.polygon?.length>=3&&d.polygon.every(finite)).map((d,i)=>cityLocality({id:d.id,name:d.name,c:COLORS[i%COLORS.length],quality:['confirmed','exact'].includes(knownAreas.get(d.id))?knownAreas.get(d.id):d.quality,site:finite(d.site)?xy(d.site):null,pts:d.polygon.map(xy)},{template:typeof layout.structureKey==='string'&&!calibrated,hasBuildings:(layout.buildings??[]).some(b=>!b.decorative&&b.districtId===d.id)})),
       river:river?Array.from({length:41},(_,i)=>{const y=(river.height??b.h)*i/40;return xy({x:river.cx+Math.sin((y/(river.height||b.h)*2-.35)*Math.PI)*river.amplitude,y});}):null,
       riverWidth:river?.width?river.width*scale:null,wallPoints:(layout.wall??[]).filter(finite).map(xy),
-      cityBuildings:(layout.buildings??[]).filter(p=>!p.decorative).map(r=>({...rect(r),id:r.id,name:r.name})),
+      templateCity:typeof layout.structureKey==='string'&&!calibrated,
+      cityBuildings:(layout.buildings??[]).filter(p=>!p.decorative).map(r=>({...rect(r),id:r.id,name:r.name,quality:r.quality})),
       avenues:(layout.roads??[]).filter(r=>finite(r.from??r.a)&&finite(r.to??r.b)).map(r=>({id:r.id,name:r.name,quality:r.quality??'layout',width:Number.isFinite(r.width)&&r.width>0?r.width*scale:null,from:xy(r.from??r.a),to:xy(r.to??r.b)})),pois:[]};
   } else if(layout?.kind==='overview') {
     // A SQL overview already contains validated geometry. Keep its paths and
@@ -452,6 +454,7 @@ export function projectReferenceData({state={},mapView,sceneView,catalogView,tas
   }
   projectMapContext(nodes,out.LOCATIONS,{inTransit});
   projectSpaceNavigation(nodes,out.LOCATIONS,{scenes});
+  projectLocalSiteMaps(nodes,out.LOCATIONS,{maps});
   projectExplorationMaps(nodes,out.LOCATIONS,{maps,viewMode});
   const mapAt=id=>locationMap.get(id)?.childMapIds[0]??locationMap.get(id)?.mapId??null;
   out.CAST=catalog.filter(c=>c.entityKind==='character').map((c,i)=>{const p=pointIndex.get(c.entityId);return {id:c.entityId,name:c.name,initial:Array.from(c.name??'人').at(-1)||'人',role:p?.isProtagonist?'主角':'人物',c:COLORS[i%COLORS.length],
