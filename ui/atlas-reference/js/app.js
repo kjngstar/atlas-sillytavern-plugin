@@ -172,7 +172,7 @@ function frameChrome(st){
  syncMapIcons(st);
  const kind=st.node.containerLocationKind??st.kind,level=st.geo.exploration?.level??(['world','region','city'].includes(kind)?'regions':'detail');
  const levelText=st.geo.exploration?.surface?.street?'街巷略图 · 路面宽度与形状为示意':st.geo.districts?.some(d=>d.displayOnly)?'城镇略图 · 地点轮廓为示意':{regions:'区域总览 · 进入地点查看下层地图',layout:'地点略图 · 进入地点展开布局',detail:'详细布局'}[level];
- const levelEl=$('#mapLevel');if(levelEl&&levelEl.textContent!==levelText)levelEl.textContent=levelText;
+ const levelEl=$('#mapLevel');if(levelEl){levelEl.hidden=!!st.geo.localSite;if(levelEl.textContent!==levelText)levelEl.textContent=levelText;}
  // M6-07②：比例尺的尺度依据由地图层给出（真实相机尺度 + 这个尺度可不可信）；
  // 74px 线长与换算公式只在 ui-model.fixedScale 里写一次 —— 这里不重复实现。
  const q=typeof map.scaleQuality==='function'?map.scaleQuality():null;

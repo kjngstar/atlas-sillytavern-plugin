@@ -32,9 +32,12 @@ test('明确尺度、真实路线、确认轮廓及多分区城市不套用广�
 });
 test('有内部地图的图标继续指向同一子图；未知内部的地点只留标记',()=>{
  const f=fixture(),map={mapId:'child',name:'修表铺',parentMapId:'square',containerLocationId:'clock',containerLocationKind:'building',points:[]};
- const n=projectReferenceData({mapView:view([f.map,map]),sceneView:view([{mapId:'square',scene:f.scene}]),catalogView:view(f.catalog),viewMode:'author'}).ROOT;
+ const childScene={units:'meters',layout:{kind:'floor',bounds:{x:0,y:0,w:6,h:8},rooms:[{id:'W',name:'工作间',x:0,y:0,w:6,h:8}],corridor:{x:0,y:0,w:0,h:0}}};
+ const n=projectReferenceData({mapView:view([f.map,map]),sceneView:view([{mapId:'square',scene:f.scene},{mapId:'child',scene:childScene}]),catalogView:view(f.catalog),viewMode:'author'}).ROOT;
  assert.equal(n.marks.find(m=>m.id==='clock').node.id,'child');
  assert.equal(n.marks.find(m=>m.id==='weaver').node,null);
+ const room=n.geo.cityBuildings.find(b=>b.id==='clock').interior[0];assert.ok(Math.abs(room.w/room.h-6/8)<1e-8);
+ assert.deepEqual(n.geo.cityBuildings.find(b=>b.id==='weaver').interior,[]);
 });
 test('室内画布不再添加父地点和自身的标题框，保留子房间名称',()=>{
  const source=readFileSync(new URL('../ui/atlas-reference/js/map.js',import.meta.url),'utf8');
