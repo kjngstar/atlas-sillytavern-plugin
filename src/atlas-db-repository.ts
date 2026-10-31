@@ -3,7 +3,7 @@ import {buildSqlForegroundRequest} from './atlas-sql-model-context.ts';
 import {LAYOUT_CONTEXT_FRAME_KEY, buildSqlLayoutTask, computeMapLayoutSignature, unknownLayoutEntityRefs} from './atlas-sql-layout-task.ts';
 import { planFunctionalAreaProjections } from './atlas-functional-areas.ts';
 import { planLayoutEvidence, parseLayoutEvidence, attachLayoutEvidence, type LayoutExcerpt, type LayoutEvidenceRejection } from './atlas-layout-evidence.ts';
-import { combineSpatialRequest, materializeSpatialDrafts, withOriginalSpatialSources } from './atlas-spatial-planning.ts';
+import { combineSpatialRequest, materializeSpatialDrafts, plannedSceneLocationIds, withOriginalSpatialSources } from './atlas-spatial-planning.ts';
 import {applySqlLegacyImport} from './atlas-sql-legacy-import.ts';
 /**
  * atlas-db-repository.ts — 业务存储唯一入口（B05–B09 / B17–B19 / E06 / E09）。
@@ -2159,7 +2159,8 @@ export function createSqlRepository(options: RepositoryOptions) {
         groupResults.push(imported.result);allIssues.push(...imported.issues);
       }
       if(input.sceneMaps||input.mapCalibration||input.mapBackground||input.mapProfile){
-        const mapGroup=compileSqlSceneMaps({db:candidateDb,branchId,turnId,clockS:clockBefore,makeId,ensureScenes:input.sceneMaps,calibration:input.mapCalibration,povName:input.povName,background:input.mapBackground,profile:input.mapProfile});
+        const plannedLocationIds=input.legacyImport?pageAllRows(tables,'locations',branchId).filter(l=>l.status==='active').map(l=>String(l.id)):plannedSceneLocationIds(combinedDrafts,combinedRefs);
+        const mapGroup=compileSqlSceneMaps({db:candidateDb,branchId,turnId,clockS:clockBefore,makeId,ensureScenes:input.sceneMaps,calibration:input.mapCalibration,povName:input.povName,background:input.mapBackground,profile:input.mapProfile,plannedLocationIds});
         if(mapGroup){
           const mapResult=applyGroups(candidateDb,[mapGroup],{branchId,turnId,attemptId:'scene-maps',validate:true});
           if(mapResult.journalIssues.length||mapResult.groups.some(group=>group.status==='rejected'||group.status==='blocked'))
@@ -2216,7 +2217,7 @@ export function createSqlRepository(options: RepositoryOptions) {
       };
       if(Array.isArray(input.layoutMaps)&&input.layoutMaps.length)applyFunctionalAreas(input.layoutMaps,true);
       const layoutInput=worldBuildWindow&&Array.isArray(input.layoutMaps)?{...input,layoutMaps:input.layoutMaps.filter(mapId=>!worldBuildMapReady(candidateDb,branchId,mapId))}:input;
-      let layoutTask=layoutInput.layoutMaps?buildSqlLayoutTask(candidateDb,branchId,layoutInput,turnId,layoutReport):null;
+      let layoutTask=layoutInput.layoutMaps?buildSqlLayoutTask(candidateDb,branchId,layoutInput,turnId,layoutReport,{eagerLocationIds:plannedSceneLocationIds(combinedDrafts,combinedRefs)}):null;
       drainLayoutReport();
       // Freeze the target set, then combine compatible maps inside its capacity.
       const pendingLayoutIds=layoutTask?[...layoutTask.mapIds,...layoutTask.remainingLocationIds]:[];

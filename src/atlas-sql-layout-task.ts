@@ -598,7 +598,7 @@ export function buildSqlLayoutTask(
   input: TurnInput,
   turnId: string,
   report?: { issues: PlanIssue[] },
-  options?: { canonicalRefs?: boolean; combinedSpatial?: boolean },
+  options?: { canonicalRefs?: boolean; combinedSpatial?: boolean; eagerLocationIds?:readonly string[] },
 ): LayoutTask<ModelBatchRequest> | null {
   const tables = createTableReadPort(db);
   const derived = deriveLayoutSites(tables, branchId);
@@ -633,12 +633,13 @@ export function buildSqlLayoutTask(
     // Parent geography is assembled first; remote interiors are generated only
     // when explicitly requested. Single-child overview wrappers need no model.
     const activePath=new Set<string>();
-    for(const locationId of occupied){
+    const eager=new Set(options?.eagerLocationIds??[]);
+    for(const locationId of [...occupied,...eager]){
       let id:string|null=locationId;const seen=new Set<string>();
       while(id&&!seen.has(id)){seen.add(id);const entry=mapByContainer.get(id);if(entry)activePath.add(entry.mapId);id=parentOf(id);}
     }
     chosen=entries.filter(entry=>activePath.has(entry.mapId)
-      ? occupiedSet.has(String(entry.container?.id))||entry.own.length>0&&(entry.kind!=='overview'||entry.own.length>1)
+      ? occupiedSet.has(String(entry.container?.id))||eager.has(String(entry.container?.id))||entry.own.length>0&&(entry.kind!=='overview'||entry.own.length>1)
       : entry.container===null&&entry.own.length>1);
     chosen.sort((a,b)=>depth(a)-depth(b)||byId(a.mapId,b.mapId));
   } else if (Array.isArray(input.layoutMaps)) {

@@ -8,6 +8,26 @@ import { stableHexHash } from './atlas-hash.ts';
 
 export const COMBINED_SPATIAL_OPS=['location.upsert','route.propose','map.estimate','map.layout.request','noop'] as const;
 
+/** Only a substantive same-response layout can promote an unoccupied marker.
+ * The normal layout compiler still validates every constraint before saving it.
+ */
+export function plannedSceneLocationIds(drafts:readonly ModelOperation[],refs:readonly RefEntry[]):string[]{
+ const scope=createRefScope(refs.flatMap(ref=>[ref,{...ref,alias:ref.id}])),ids=new Set<string>();
+ for(const draft of drafts){
+  const data=draft.data??{},spec=data.spec;
+  if(draft.op!=='map.layout.request'||typeof data.container_ref!=='string'||!spec||typeof spec!=='object'||Array.isArray(spec))continue;
+  const s=spec as Record<string,unknown>;
+  if(!resolveLayoutSpecRefs(s,scope).ok)continue;
+  const spaces=['rooms','zones','districts','buildings'].flatMap(k=>Array.isArray(s[k])?s[k] as Record<string,unknown>[]:[]);
+  if(spaces.some(r=>!r||typeof r.id!=='string'||!resolveRef(r.id,'location',scope).entry))continue;
+  const geometry=data.kind==='floor'?Array.isArray(s.rooms)&&s.rooms.some(r=>r&&typeof r==='object'&&Number.isFinite(r.w)&&r.w>0&&Number.isFinite(r.h)&&r.h>0):
+    ['zones','districts','buildings','features','links'].some(k=>Array.isArray(s[k])&&(s[k] as unknown[]).length>0);
+  if(!geometry)continue;
+  const ref=resolveRef(data.container_ref,'location',scope);if(ref.entry)ids.add(ref.entry.id);
+ }
+ return [...ids].sort();
+}
+
 function append(request:ModelBatchRequest,system:string,content:string):ModelBatchRequest{
   const messages=request.messages.map(message=>({...message}));
   messages[0].content+='\n'+system;
@@ -26,7 +46,7 @@ export function withOriginalSpatialSources(request:ModelBatchRequest,sources:rea
 
 export function combineSpatialRequest(request:ModelBatchRequest,layout:LayoutTask<ModelBatchRequest>|null):ModelBatchRequest{
   const result=append(request,
-    '本次同时完成地理结构与布局规划，只输出本次允许的JSONL操作。先声明地点/路线/尺寸，再输出map.layout.request；不用另等一轮模型。已有几何、确认尺寸和锁定事实保持。',
+    '本次同时完成地理结构与布局规划，只输出本次允许的JSONL操作。先声明地点/路线/尺寸，再输出map.layout.request；不用另等一轮模型。已有几何、确认尺寸和锁定事实保持。只有外观、招牌、路过或远望且内部未定义的地点，只在父图留标记，不提交其内部布局。NPC实际所在地点、明确进入的地点、已有房间关系或内部尺寸陈设的地点照常直接规划布局；不能因主角没进入而推迟NPC或明确内部的布局。禁止为外观地点凭空补房间来获得子图。',
     '【合批布局协议】已有地图用ref；本批新地点或尚无地图的容器，用data.container_ref指向该地点的现有引用或同批new:引用，省略ref。地点引用不能写进地图ref。程序先保存合法实体并建立容器图，再解析这些布局草案；声明失败的依赖不能使用。容器region/natural/other用overview，city/district用city，building/floor/room/vehicle用floor。新增房间的父图与子图分别给约束，复用同一地点引用与尺寸；未知内部不造房间。不输出完整scene或几何坐标。'+
     '\n引用方式示例（不登记示例地点，尺寸使用真实资料）：{"op":"map.layout.request","data":{"container_ref":"new:room","kind":"floor","spec":{"rooms":[{"id":"new:room","w":3,"h":3}]}}}；该new:room必须由同批location.upsert合法声明。'+
     '\n【本批已有地图的布局目录与约束；目录引用全部是稳定ID】\n'+(layout?.request.messages[1].content??'当前无待更新的已有地图；本批新增结构需要布局时使用container_ref。'));

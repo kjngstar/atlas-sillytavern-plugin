@@ -23,6 +23,7 @@ import { readSceneFrame } from '../vendor/atlas-spatial/index.mjs';
 import { computeMapLayoutSignature, computeMapLayoutSignatures, LAYOUT_CONTEXT_FRAME_KEY } from './atlas-sql-layout-task.ts';
 import { resolveSpatialProfile } from './atlas-spatial-profile.ts';
 import { projectRouteGeometry } from './atlas-db-views.ts';
+import { sceneExpansionLocationIds } from './atlas-scene-expansion.ts';
 
 const POLICY = 'world-build-v2';
 const DISCOVERY_PAGE = 64;
@@ -219,6 +220,7 @@ function discover(ctx: WorldBuildExecutionContext, job: WorldBuildJobV1, previou
   if ([...byId.values()].some(entry => entry.workKind === 'settlement-plan' && entry.status === 'pending')) return [...byId.values()];
   const maps = pageAllRows(tables, 'maps', branchId).filter(row => row['status'] === 'active' && (job.kind!=='initialize'||ownedTurns.has(str(row['created_turn_id']))));
   const signatures=computeMapLayoutSignatures(tables,branchId);
+  const expanded=sceneExpansionLocationIds({locations,characters});
   const historical=job.kind==='lore-incremental'?readWorldBuildJobs(readProgressRows(tables,branchId)).values.filter(old=>old.id!==job.id).flatMap(old=>readWorldBuildTargets(readProgressRows(tables,branchId),old.id).values):[];
   for (const map of maps) {
     const id = str(map['id']), containerId = str(map['container_location_id']);
@@ -232,7 +234,7 @@ function discover(ctx: WorldBuildExecutionContext, job: WorldBuildJobV1, previou
     const entry = target(job, 'map-layout', id, stableHexHash(JSON.stringify([id, members, detail.tier])), depth);
     if(job.kind==='lore-incremental'&&historical.some(old=>old.workKind==='map-layout'&&old.subjectId===id&&old.inputSignature===entry.inputSignature)
       &&worldBuildMapReady(ctx.db,branchId,id,signatures))continue;
-    if (policy.interiorPolicy === 'on-confirmed-entry') { entry.requirement = 'deferred-interior'; entry.status = 'waiting-for-entry'; }
+    if (policy.interiorPolicy === 'on-confirmed-entry'&&!expanded.has(containerId)&&!normalizeFrame(map['frame_json']).atlasScene) { entry.requirement = 'deferred-interior'; entry.status = 'waiting-for-entry'; }
     add(entry);
   }
   add(target(job, 'route-reconcile', branchId, stableHexHash(job.id)));
