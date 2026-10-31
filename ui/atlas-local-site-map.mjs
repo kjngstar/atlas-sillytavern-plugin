@@ -5,6 +5,14 @@ export function projectLocalSiteMaps(nodes,locations,{maps=[]}={}){
  const exact=q=>['confirmed','exact'].includes(q);
  for(const n of nodes.values()){
   const g=n.geo??{},map=saved.get(n.id);
+  // With one locality and no registered road, the city packer's two default
+  // strokes connect nothing. Do not draw a long road over that locality's name.
+  if(g.templateCity&&g.districts?.length===1&&!g.cityBuildings?.length&&!map?.routes?.length
+   &&!exact(n.transform?.metricQuality)&&!exact(n.transform?.scaleQuality)&&!exact(g.districts[0].quality)
+   &&(g.avenues??[]).every(r=>r.quality==='layout'&&(r.id==='avenue'||r.id===`road:${g.districts[0].id}`))){
+   n.geo={...g,avenues:[]};
+   continue;
+  }
   if(!g.templateCity||!['district','other'].includes(n.containerLocationKind)||!/(?:广场|\bplaza|\bsquare)$/iu.test(n.name))continue;
   if(g.districts?.length!==1||g.districts[0].id!==n.containerLocationId||g.districts[0].quality!=='layout')continue;
   if(g.river?.length||g.wallPoints?.length||map?.routes?.length||exact(n.transform?.metricQuality)||exact(n.transform?.scaleQuality))continue;
@@ -12,7 +20,7 @@ export function projectLocalSiteMaps(nodes,locations,{maps=[]}={}){
   if(!marks.length||marks.some(m=>exact(m.quality))||(map?.points??[]).some(p=>exact(p.area?.quality)||exact(p.markerQuality)))continue;
   const buildings=g.cityBuildings??[];
   if(!buildings.length||buildings.some(b=>b.quality!=='layout'||Math.abs(b.y-buildings[0].y)>1e-6))continue;
-  if((g.avenues??[]).some(r=>r.id!=='avenue'&&r.id!==`road:${n.containerLocationId}`))continue;
+  if((g.avenues??[]).some(r=>r.quality!=='layout'||r.id!=='avenue'&&r.id!==`road:${n.containerLocationId}`))continue;
   // The packer's estimated row is not geographic evidence. Display the known
   // places around an open square, with no invented roads or child maps.
   const colors=['#8aa7b3','#b6a27b','#9995b5','#8fa48e'];

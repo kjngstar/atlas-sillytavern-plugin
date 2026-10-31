@@ -30,6 +30,14 @@ test('明确尺度、真实路线、确认轮廓及多分区城市不套用广�
   const f=fixture();change(f);assert.equal(project(f).geo.localSite,undefined);
  }
 });
+test('上层单区域城市不画没有路线依据的模板长条，已登记或确认的路和多区域城市保留',()=>{
+ const base=()=>{const f=fixture();f.map.containerLocationKind='city';f.map.containerLocationId='town';f.scene.layout.buildings=[];return f;};
+ const f=base(),before=JSON.stringify(f),n=project(f);
+ assert.equal(n.geo.avenues.length,0);assert.equal(n.geo.districts.length,1);assert.equal(JSON.stringify(f),before);
+ for(const change of [f=>f.map.routes.push({id:'real'}),f=>f.scene.layout.roads[0].quality='confirmed',f=>f.scene.layout.roads[0].id='known-street',f=>f.scene.layout.districts.push({...f.scene.layout.districts[0],id:'D'})]){
+  const keep=base();change(keep);assert.equal(project(keep).geo.avenues.length,1);
+ }
+});
 test('有内部地图的图标继续指向同一子图；未知内部的地点只留标记',()=>{
  const f=fixture(),map={mapId:'child',name:'修表铺',parentMapId:'square',containerLocationId:'clock',containerLocationKind:'building',points:[]};
  const childScene={units:'meters',layout:{kind:'floor',bounds:{x:0,y:0,w:6,h:8},rooms:[{id:'W',name:'工作间',x:0,y:0,w:6,h:8}],corridor:{x:0,y:0,w:0,h:0}}};
