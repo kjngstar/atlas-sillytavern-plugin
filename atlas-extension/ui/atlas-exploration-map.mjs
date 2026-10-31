@@ -38,6 +38,7 @@ export function projectExplorationMaps(nodes,locations,{maps=[],viewMode='player
  const source=new Map([...nodes].map(([id,n])=>[id,{...n,geo:structuredClone(n.geo)}]));
  for(const n of nodes.values()){
   const g=n.geo??{};
+  if(g.localSite)continue;
   const level=mapDetailLevel(n);
   const direct=(n.children??[]).filter(c=>c.known!==false&&!c.unclassified&&(viewMode==='author'||!c.containerLocationId||visible.has(c.containerLocationId)));
   const calibrated=n.metric>0&&!['layout','estimated','uncalibrated'].includes(n.transform?.metricQuality??n.transform?.scaleQuality);

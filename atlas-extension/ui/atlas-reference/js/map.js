@@ -359,6 +359,7 @@ function create(canvas, mini, hooks){
     return [x0,x1,y0,y1];
   }
   function fitExtent(){
+    if(st.geo.localSite)return st.geo.localSite.bounds;
     if(st.geo.exploration)return st.geo.exploration.bounds;
     const host=st.geo.hostArea;
     if(host&&[host.x,host.y,host.w,host.h].every(Number.isFinite)&&host.w>0&&host.h>0)return [host.x,host.x+host.w,host.y,host.y+host.h];
@@ -874,6 +875,18 @@ function create(canvas, mini, hooks){
 
   /* ── L2 城市 ── */
   function cityMap(g){
+    if(g.localSite){
+      const p=g.localSite.polygon,ink=canvasStyle?.labelColor||'#9fb6c8';
+      ctx.save();ctx.beginPath();p.forEach((v,i)=>i?ctx.lineTo(...v):ctx.moveTo(...v));ctx.closePath();
+      ctx.fillStyle=hexA(ink,.075);ctx.fill();ctx.strokeStyle=hexA(ink,.42);ctx.lineWidth=1.3/st.cam.s;ctx.stroke();ctx.clip();
+      // Stone paving is surface texture, not roads or registered objects.
+      ctx.strokeStyle=hexA(ink,.14);ctx.lineWidth=.7/st.cam.s;
+      for(let y=-136,row=0;y<136;y+=22,row++){
+        ctx.beginPath();ctx.moveTo(-192,y);ctx.lineTo(190,y);ctx.stroke();
+        for(let x=-192+(row%2)*26;x<190;x+=52){ctx.beginPath();ctx.moveTo(x,y);ctx.lineTo(x,y+22);ctx.stroke();}
+      }
+      ctx.restore();
+    }
     if(g.wallPoints?.length){ctx.save();ctx.beginPath();smooth(ctx,g.wallPoints,true);ctx.strokeStyle='rgba(120,190,255,.13)';ctx.lineWidth=6/st.cam.s;ctx.stroke();ctx.strokeStyle='rgba(170,225,255,.5)';ctx.lineWidth=1.8/st.cam.s;ctx.setLineDash([12/st.cam.s,5/st.cam.s]);ctx.stroke();ctx.restore();}
     // 河流
     if(g.river){
@@ -939,8 +952,8 @@ function create(canvas, mini, hooks){
         ctx.restore();
       }
       const label=d.site??[cx,cy];
-      pushLabel(label[0],label[1]-7,d.name,d.c,'name',true);
-      if(!d.displayOnly)pushLabel(cx,cy+11,'街区 · 范围示意','rgba(140,170,200,.72)','sub',true);
+      if(d.id!==st.node.containerLocationId)pushLabel(label[0],label[1]-7,d.name,d.c,'name',true);
+      if(!d.displayOnly&&d.id!==st.node.containerLocationId)pushLabel(cx,cy+11,'街区 · 范围示意','rgba(140,170,200,.72)','sub',true);
     });
     ctx.save();ctx.lineCap='round';ctx.lineJoin='round';
     // Stroke the whole network in passes so junctions join, with no seams or
@@ -951,7 +964,7 @@ function create(canvas, mini, hooks){
       ctx.lineWidth=width+(pass===0?5/st.cam.s:pass===1?2/st.cam.s:0);
       ctx.strokeStyle=pass===0?hexA(canvasStyle?.labelColor||'#a7c5d7',.13):pass===1?hexA(canvasStyle?.labelColor||'#a7c5d7',.48):canvasStyle?.background||'#0c1823';ctx.stroke();
     }
-    for(const b of g.cityBuildings||[]){ctx.beginPath();rrect(ctx,b.x,b.y,b.w,b.h,2);ctx.fillStyle=skinColor('floorWall','fill','rgba(127,212,255,.12)');ctx.fill();ctx.strokeStyle=skinColor('floorWall','stroke','rgba(127,212,255,.6)');ctx.stroke();}
+    for(const b of g.cityBuildings||[]){ctx.beginPath();rrect(ctx,b.x,b.y,b.w,b.h,2);ctx.fillStyle=b.c?hexA(b.c,.18):skinColor('floorWall','fill','rgba(127,212,255,.12)');ctx.fill();ctx.strokeStyle=b.c?hexA(b.c,.7):skinColor('floorWall','stroke','rgba(127,212,255,.6)');ctx.lineWidth=1.2/st.cam.s;ctx.stroke();}
     ctx.restore();
     // 环路 / 放射大道 / 环形城墙：
     // 这三段读的是 `g.rings` / `g.radials` / `g.walls` —— 仓库里**没有任何生产方**会产出它们
@@ -1091,8 +1104,7 @@ function create(canvas, mini, hooks){
   function floorMap(g){
     const seed = hash(st.node.id);
     const rooms=g.rooms||[];
-    const planTop=rooms.length?Math.min(...rooms.map(r=>r.y)):-280;
-    if(g.hostArea){const r=g.hostArea;ctx.save();ctx.beginPath();rrect(ctx,r.x,r.y,r.w,r.h,6);ctx.fillStyle=skinColor('floorWall','fill','rgba(67,224,255,.06)');ctx.fill();ctx.strokeStyle=skinColor('floorWall','stroke','rgba(67,224,255,.4)');ctx.lineWidth=1.3/st.cam.s;ctx.stroke();ctx.restore();pushLabel(r.x+r.w/2,r.y+r.h-12/st.cam.s,r.name||st.node.name,'#7fd4ff','sub',true);}
+    if(g.hostArea){const r=g.hostArea;ctx.save();ctx.beginPath();rrect(ctx,r.x,r.y,r.w,r.h,6);ctx.fillStyle=skinColor('floorWall','fill','rgba(67,224,255,.06)');ctx.fill();ctx.strokeStyle=skinColor('floorWall','stroke','rgba(67,224,255,.4)');ctx.lineWidth=1.3/st.cam.s;ctx.stroke();ctx.restore();}
     // 走廊
     const c = g.corridor;
     if(!g.hostArea&&c.w>0&&c.h>0){
@@ -1213,20 +1225,7 @@ function create(canvas, mini, hooks){
     });
     ctx.restore();
 
-    // 图签；幅面尺寸留在数据中，不在地图上绘制尺寸线或宽度读数。
-    const mpp = st.node.host?(st.node.metric||1/st.node.transform.scale):(st.node.metric||0.085);
-    const measureWidth=st.node.host?st.node.transform.bounds.w*st.node.transform.scale:940;
-    const measureRight=measureWidth/2;
-    // 图签
-    const stampX=st.node.host?measureRight-228:296,stampY=st.node.host?planTop-62:-302;
-    ctx.save();
-    ctx.beginPath(); rrect(ctx,stampX,stampY,228,50,4);
-    ctx.fillStyle=canvasStyle?.labelBackground||'rgba(8,14,24,.82)'; ctx.fill();
-    ctx.strokeStyle=skinColor('floorWall','stroke','rgba(120,200,255,.35)'); ctx.lineWidth=1/st.cam.s; ctx.stroke();
-    ctx.restore();
-    pushLabel(stampX+114, stampY+5, (st.path[st.path.length-2]||{}).name || '建筑图', '#bcd6ee', 'name', true);
-    pushLabel(stampX+114, stampY+18, st.node.host?`空间示意 · 单位 ${st.node.metric?'m':'格'}`:`比例 1:${Math.round(0.085/mpp*140)} · ATLAS 制图`, 'rgba(140,170,200,.85)', 'sub', true);
-    pushLabel(stampX+114, stampY+31, st.node.host?st.node.name:`地点 ${st.node.id} · ${st.node.name}`, 'rgba(140,170,200,.85)', 'sub', true);
+
   }
   /**
    * M6-06②：通用室内陈设。
@@ -2014,6 +2013,7 @@ function create(canvas, mini, hooks){
       edgeFade();
     } else edgeFade();
 
+    if(st.geo.localSite){ctx.save();ctx.font='400 11px '+F.sans;ctx.fillStyle=canvasStyle?.labelColor||'#a7c5d7';ctx.globalAlpha=.6;ctx.fillText(st.geo.localSite.note,18,st.vh-18);ctx.restore();}
     drawMini();
     if(hooks.onFrame) hooks.onFrame(st);
     if(!once)frameId=requestAnimationFrame(frame);
@@ -2165,7 +2165,7 @@ function create(canvas, mini, hooks){
      * 这里只提供它算不出来的部分：相机尺度与尺度质量。
      */
     scaleQuality(){
-      if(st.geo.exploration)return {schematic:true,calibrated:false,quality:'layout',estimated:true,cssPixelsPerUnit:null,metersPerUnit:null};
+      if(st.geo.exploration||st.geo.localSite)return {schematic:true,calibrated:false,quality:'layout',estimated:true,cssPixelsPerUnit:null,metersPerUnit:null};
       const camS=st.cam.s, metric=st.node?.metric;
       const calibrated=Number.isFinite(metric)&&metric>0;
       const quality=st.node?.transform?.metricQuality??st.node?.transform?.scaleQuality??null;
