@@ -515,8 +515,22 @@ function create(canvas, mini, hooks){
       trace(outline);ctx.closePath();ctx.fillStyle=hexA(ink,.045);ctx.fill();
       ctx.strokeStyle=hexA(ink,.18);ctx.lineWidth=1/cam;ctx.setLineDash([2/cam,7/cam]);ctx.stroke();ctx.setLineDash([]);
     }
+    const street=sketch.surface?.street;
+    if(street){
+      // A street is an open paved surface, not a route's dashed centreline.
+      // Frontage bands are cartographic texture, never buildings or hit targets.
+      for(const r of street.ribbons){
+        trace(r.points);ctx.lineWidth=r.width+38;ctx.strokeStyle=hexA(ink,.055);ctx.stroke();
+        trace(r.polygon);ctx.closePath();ctx.fillStyle=hexA(ink,.10);ctx.fill();
+      }
+      for(const r of street.ribbons)for(const edge of r.edges){
+        trace(edge);ctx.lineWidth=6/cam;ctx.strokeStyle=hexA(ink,.11);ctx.stroke();
+        ctx.lineWidth=1.3/cam;ctx.strokeStyle=hexA(ink,.6);ctx.stroke();
+      }
+      if(st.showLabels)pushLabel(street.label[0],street.label[1]-8/cam,street.name,ink,'area',true);
+    }
     for(const e of sketch.passages){
-      trace(e.points);ctx.strokeStyle=hexA(ink,.4);ctx.lineWidth=1/cam;ctx.setLineDash([4/cam,5/cam]);ctx.stroke();ctx.setLineDash([]);
+      if(!street){trace(e.points);ctx.strokeStyle=hexA(ink,.4);ctx.lineWidth=1/cam;ctx.setLineDash([4/cam,5/cam]);ctx.stroke();ctx.setLineDash([]);}
       if(e.status==='blocked'||e.status==='closed'){const p=e.points[1];ctx.beginPath();ctx.moveTo(p[0]-5/cam,p[1]-5/cam);ctx.lineTo(p[0]+5/cam,p[1]+5/cam);ctx.moveTo(p[0]+5/cam,p[1]-5/cam);ctx.lineTo(p[0]-5/cam,p[1]+5/cam);ctx.stroke();}
     }
     for(const a of sketch.areas){
@@ -531,8 +545,9 @@ function create(canvas, mini, hooks){
       }
       else if(a.external){
         ctx.strokeStyle=hexA(ink,active?1:.75);ctx.lineWidth=2/cam;
-        ctx.beginPath();ctx.moveTo(0,-13);ctx.lineTo(0,13);ctx.stroke();
-        ctx.beginPath();ctx.moveTo(-7,-5);ctx.lineTo(-13,0);ctx.lineTo(-7,5);ctx.stroke();
+        if(!street){ctx.beginPath();ctx.moveTo(0,-13);ctx.lineTo(0,13);ctx.stroke();}
+        const side=a.x<(street?.label[0]??0)?-1:1;
+        ctx.beginPath();ctx.moveTo(side*7,-5);ctx.lineTo(side*13,0);ctx.lineTo(side*7,5);ctx.stroke();
       }
       else if(a.symbol==='bridge')drawBridgeSymbol(a.bridge);
       else if(a.mobile){
@@ -897,12 +912,35 @@ function create(canvas, mini, hooks){
       ctx.restore();
       let cx=0,cy=0; d.pts.forEach(p=>{ cx+=p[0]; cy+=p[1]; });
       cx/=d.pts.length; cy/=d.pts.length;
-      pushLabel(cx, cy-7, d.name, d.c, 'name', true);
-      pushLabel(cx, cy+11, '街区 · 范围示意', 'rgba(140,170,200,.72)', 'sub', true);
+      if(d.displayOnly){
+        // A few paving / quay marks communicate the locality's purpose without
+        // inventing clickable stalls, doors, buildings, or a new watercourse.
+        const xs=d.pts.map(p=>p[0]),ys=d.pts.map(p=>p[1]),x0=Math.min(...xs),x1=Math.max(...xs),y0=Math.min(...ys),y1=Math.max(...ys);
+        ctx.save();ctx.beginPath();d.pts.forEach((p,i)=>i?ctx.lineTo(...p):ctx.moveTo(...p));ctx.closePath();ctx.clip();
+        ctx.strokeStyle=hexA(d.c,.18);ctx.lineWidth=.8/st.cam.s;
+        if(d.role==='plaza'){
+          for(let y=y0+22;y<y1;y+=24){ctx.beginPath();ctx.moveTo(x0,y);ctx.lineTo(x1,y);ctx.stroke();}
+        }else if(d.role==='quay'){
+          for(let k=0;k<4;k++){ctx.beginPath();ctx.moveTo(x0+12,y1-10-k*8);ctx.lineTo(x1-12,y1-10-k*8);ctx.stroke();}
+        }else if(d.role==='market'){
+          const w=(x1-x0)*.22,h=(y1-y0)*.14;
+          for(let i=0;i<3;i++)for(let j=0;j<2;j++)ctx.strokeRect(x0+(x1-x0)*(.17+j*.43),y0+(y1-y0)*(.18+i*.23),w,h);
+        }
+        ctx.restore();
+      }
+      const label=d.site??[cx,cy];
+      pushLabel(label[0],label[1]-7,d.name,d.c,'name',true);
+      if(!d.displayOnly)pushLabel(cx,cy+11,'街区 · 范围示意','rgba(140,170,200,.72)','sub',true);
     });
-    ctx.save();ctx.strokeStyle=skinColor('road','stroke','rgba(150,205,255,.26)');ctx.lineWidth=1.4/st.cam.s;ctx.setLineDash([6/st.cam.s,5/st.cam.s]);
-    for(const road of g.avenues||[]){ctx.beginPath();ctx.moveTo(...road.from);ctx.lineTo(...road.to);ctx.stroke();}
-    ctx.setLineDash([]);
+    ctx.save();ctx.lineCap='round';ctx.lineJoin='round';
+    // Stroke the whole network in passes so junctions join, with no seams or
+    // end caps across their shared road surface. Preserve saved road widths.
+    for(const pass of [0,1,2])for(const road of g.avenues||[]){
+      const width=Math.max(road.width||0,10/st.cam.s);
+      ctx.beginPath();ctx.moveTo(...road.from);ctx.lineTo(...road.to);
+      ctx.lineWidth=width+(pass===0?5/st.cam.s:pass===1?2/st.cam.s:0);
+      ctx.strokeStyle=pass===0?hexA(canvasStyle?.labelColor||'#a7c5d7',.13):pass===1?hexA(canvasStyle?.labelColor||'#a7c5d7',.48):canvasStyle?.background||'#0c1823';ctx.stroke();
+    }
     for(const b of g.cityBuildings||[]){ctx.beginPath();rrect(ctx,b.x,b.y,b.w,b.h,2);ctx.fillStyle=skinColor('floorWall','fill','rgba(127,212,255,.12)');ctx.fill();ctx.strokeStyle=skinColor('floorWall','stroke','rgba(127,212,255,.6)');ctx.stroke();}
     ctx.restore();
     // 环路 / 放射大道 / 环形城墙：

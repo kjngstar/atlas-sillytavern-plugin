@@ -4,7 +4,7 @@ export function mapSymbolKind(node,location){
  const kind=location?.entityKind??node.containerLocationKind;
  if(location?.mobility==='mobile'||['building','floor','room','vehicle','city','district','region','world'].includes(kind))return null;
  const name=String(location?.name??node.name??'').trim();
- return /(?:桥|\bbridge)$/iu.test(name)?'bridge':null;
+ return /(?:桥|\bbridge)$/iu.test(name)?'bridge':/(?:街|路|巷|弄|\b(?:street|road|lane|alley))$/iu.test(name)?'street':null;
 }
 
 export function bridgeMapSymbol(geo,{thumbnail=false}={}){
