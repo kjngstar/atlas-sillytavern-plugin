@@ -40,7 +40,7 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 var define_ATLAS_BUILD_INFO_default;
 var init_define_ATLAS_BUILD_INFO = __esm({
   "<define:__ATLAS_BUILD_INFO__>"() {
-    define_ATLAS_BUILD_INFO_default = { pluginVersion: "0.9.100", buildId: "build-b9dd5e0265a8a4ac", buildCommit: "6e3e919c8ac6d648cc484fa40e96f1596cbb3f10", buildDirty: false };
+    define_ATLAS_BUILD_INFO_default = { pluginVersion: "0.9.100", buildId: "build-4b3d09c266a29ed3", buildCommit: "15b2a477c21d23d36c752f8c10f023bfc8e65033", buildDirty: false };
   }
 });
 
@@ -4361,6 +4361,14 @@ var init_atlas_spatial_profile = __esm({
   }
 });
 
+// src/atlas-scene-expansion.ts
+var init_atlas_scene_expansion = __esm({
+  "src/atlas-scene-expansion.ts"() {
+    "use strict";
+    init_define_ATLAS_BUILD_INFO();
+  }
+});
+
 // src/atlas-sql-scene-maps.ts
 var init_atlas_sql_scene_maps = __esm({
   "src/atlas-sql-scene-maps.ts"() {
@@ -4373,6 +4381,7 @@ var init_atlas_sql_scene_maps = __esm({
     init_atlas_spatial_frame();
     init_atlas_spatial_profile();
     init_atlas_db_runtime();
+    init_atlas_scene_expansion();
   }
 });
 
@@ -5507,6 +5516,7 @@ var init_atlas_world_build_execution = __esm({
     init_atlas_sql_layout_task();
     init_atlas_spatial_profile();
     init_atlas_db_views();
+    init_atlas_scene_expansion();
   }
 });
 
@@ -12233,6 +12243,7 @@ init_atlas_db_runtime();
 init_atlas_hash();
 init_atlas_map_topology();
 init_atlas_runtime_limits();
+init_atlas_scene_expansion();
 
 // src/atlas-sql-chat.ts
 init_atlas_sql_model_context();

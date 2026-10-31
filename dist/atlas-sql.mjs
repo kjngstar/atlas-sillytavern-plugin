@@ -2572,6 +2572,7 @@ var init_atlas_ops_prompts = __esm({
         "同一新人物只声明一次：name、身份、role 和 location_ref 放在同一条 character.upsert 的 data 中。不要再用相同 new: 别名拆一条定位操作；已有主角使用目录中的正式引用。",
         "地点包含关系、人物粗位置与精确坐标分开处理。学校内但教室未知，就只给学校引用。",
         '明确的楼层使用 kind="floor"，房间使用 kind="room"；不要把楼层登记为 other。若正文只说明某建筑的一间大厅，通常直接将大厅挂建筑，无需额外发明楼层容器。',
+        "只见外观、招牌或路过的地点先登记父图标记，不为它编造房间、楼层或内部陈设。NPC实际所在地点、已进入的地点，以及资料明确的房间关系和内部布局继续登记并生成布局；是否展开内部与是否登记地点是两件事。",
         "心理/倾向可以依据人物设定合理更新，并保持简短。",
         "正文明确建立或改变人物关系时用 relation.upsert 保存；只有同场出现不证明互相认识。明确的消息、公告或传言用 information.propose 登记，公开发布写 secrecy=public 与 spread_at_ref，明确告知谁写 recipient_ref；地点有风声不等于主角已听见。不要把每句闲聊变成传言，也不要把秘密设成公开。",
         "已完成行为用 event.propose 的 activity={kind:dialogue/meal/rest/sleep/travel/combat/other,completed:true} 和 time_hint={elapsed_s:明确秒数} 或 {min_s,nominal_s,max_s}。未完成计划用completed:false，不能推进时间。已完成赶路可引用真实subject_ref人物和route_ref路线，由程序按距离及人物能力计算耗时。",
@@ -2583,6 +2584,7 @@ var init_atlas_ops_prompts = __esm({
         "每张图的角色由程序给定，不得改写：overview（根图/地区/自然）填 zones/links/features/surface；city（城市/街区）填 districts/buildings/enclosure；floor（建筑/楼层/房间/载具）填 rooms/contents/actors/items。",
         "三种包含关系要分开：地点在容器内部（contained）→ 归入容器子图；只是相邻（adjacent）→ 用 routes 表达邻接；移动载具停靠（anchor）→ 用 anchor_ref。不要把载具当成固定建筑，也不要给相邻地区编造包含关系。",
         "城内地点归入城市子图，周边地点通过实际邻接/路线表达。移动载具不当作固定建筑。",
+        "仅有外部信息且内部未定义的地点只在父图保留标记，不提交内部布局来填空。NPC实际落点、已进入的地点和资料明确的内部位置仍直接生成布局，不受主角是否到访限制。",
         "连接两地的道路、官道和航线优先用 route.propose 登记两个真实端点，不创建一块与城市并列的道路区域，也不以 road_texture 代替通行路线。只有正文确有独立路段场景或途中设施时才另外建地点，并同时登记连接关系。",
         "马车、船等载具用 kind=vehicle、mobility=mobile；车厢内部可有子图，但外部载具位置属于停靠地点或已有路线/旅程。anchor_ref 必须是实际停靠地点，绝不能指向载具自身；不能只建车厢而遗漏已明确的外部位置。资料没有行进起止时间或进度时不要编造旅程百分比。",
         "资料标题和地图名称不是额外地理实体，例如同一国家的地图标题与国家本身合用一个地点身份，避免套出没有意义的重复层级。城市的相对大小只按资料依据给出；帝都/普通城市身份不等于已知实测面积。",
@@ -2630,9 +2632,9 @@ function orderRequired(refs) {
   const unique = /* @__PURE__ */ new Map();
   for (const ref2 of refs) {
     const kind = ref2?.kind;
-    const id = typeof ref2?.id === "string" ? ref2.id.trim() : "";
-    if (!kind || !id || !order.has(kind)) continue;
-    unique.set(`${kind}\0${id}`, { kind, id });
+    const id2 = typeof ref2?.id === "string" ? ref2.id.trim() : "";
+    if (!kind || !id2 || !order.has(kind)) continue;
+    unique.set(`${kind}\0${id2}`, { kind, id: id2 });
   }
   return [...unique.values()].sort((left, right) => {
     const leftOrder = order.get(left.kind) ?? 0;
@@ -2652,10 +2654,10 @@ function scanKnownRefs(tables, branchId, options) {
     let ordinal = 0;
     for (const row3 of rows4) {
       ordinal += 1;
-      const id = String(row3.id);
-      const key = `${kind}\0${id}`;
+      const id2 = String(row3.id);
+      const key = `${kind}\0${id2}`;
       if (present.has(key)) continue;
-      const entry = { alias: `${prefix}${ordinal}`, id, kind, rowRev: typeof row3.row_rev === "number" ? row3.row_rev : null };
+      const entry = { alias: `${prefix}${ordinal}`, id: id2, kind, rowRev: typeof row3.row_rev === "number" ? row3.row_rev : null };
       present.set(key, entry);
       refs.push(entry);
     }
@@ -2694,7 +2696,7 @@ function collectKnownRefs(tables, branchId, options) {
   return scanKnownRefs(tables, branchId, options).refs;
 }
 function collectEntityRefs(tables, branchId, refs = collectKnownRefs(tables, branchId)) {
-  const aliasOf = (id) => id === null || id === void 0 ? null : refs.find((ref2) => ref2.id === id)?.alias ?? null;
+  const aliasOf = (id2) => id2 === null || id2 === void 0 ? null : refs.find((ref2) => ref2.id === id2)?.alias ?? null;
   return refs.map((ref2) => {
     const table = CATALOG.find((entry) => entry[2] === ref2.kind)?.[0];
     const row3 = table ? tables.selectOne(table, branchId, ref2.id) : null;
@@ -2940,11 +2942,11 @@ function checkSceneDocument(doc) {
       const list3 = shape[key];
       if (!Array.isArray(list3)) continue;
       for (let i = 0; i < list3.length; i++) {
-        const id = list3[i]?.id;
-        if (typeof id !== "string" || !id) continue;
+        const id2 = list3[i]?.id;
+        if (typeof id2 !== "string" || !id2) continue;
         const path = "$.layout." + key + "[" + i + "].id";
-        if (seen.has(id)) issues.push(diagnostic("SCENE_ID_DUPLICATE", path, "概览局部 ID 必须唯一：" + id + " 已在 " + seen.get(id) + " 使用"));
-        else seen.set(id, path);
+        if (seen.has(id2)) issues.push(diagnostic("SCENE_ID_DUPLICATE", path, "概览局部 ID 必须唯一：" + id2 + " 已在 " + seen.get(id2) + " 使用"));
+        else seen.set(id2, path);
       }
     }
   }
@@ -3042,7 +3044,7 @@ function placeConnectedRooms({ rooms, edges, bounds, obstacles = [], previous = 
     }
     return true;
   };
-  for (const p of placed.values()) for (const id of adj.get(p.id)) if (placed.has(id) && !sharedRoomWall(p, placed.get(id))) return { ok: false, code: "LOCK_CONFLICT" };
+  for (const p of placed.values()) for (const id2 of adj.get(p.id)) if (placed.has(id2) && !sharedRoomWall(p, placed.get(id2))) return { ok: false, code: "LOCK_CONFLICT" };
   if (ordered4.some((r) => r.w > bounds.w + EPS || r.h > bounds.h + EPS) || ordered4.reduce((n, r) => n + r.w * r.h, 0) > bounds.w * bounds.h + EPS) return { ok: false, code: "ROOM_CONNECTION_NO_SPACE" };
   const values = (low, high, seeds) => {
     const out = [...seeds, low, high, (low + high) / 2];
@@ -3050,7 +3052,7 @@ function placeConnectedRooms({ rooms, edges, bounds, obstacles = [], previous = 
     return [...new Set(out.filter((v) => v >= low - EPS && v <= high + EPS).map((v) => Math.round(v * 1e7) / 1e7))];
   };
   function candidates(r) {
-    const neighbors = [...adj.get(r.id)].map((id) => placed.get(id)).filter(Boolean), out = [];
+    const neighbors = [...adj.get(r.id)].map((id2) => placed.get(id2)).filter(Boolean), out = [];
     if (!neighbors.length) {
       if (relative) return [{ ...r, x: 0, y: 0 }];
       const xs = [bounds.x, bounds.x + bounds.w - r.w, (bounds.w - r.w) / 2 + bounds.x], ys = [bounds.y, bounds.y + bounds.h - r.h, (bounds.h - r.h) / 2 + bounds.y];
@@ -3092,7 +3094,7 @@ function placeConnectedRooms({ rooms, edges, bounds, obstacles = [], previous = 
       return false;
     }
     const pending = ordered4.filter((r2) => !placed.has(r2.id)).sort((a, b) => {
-      const n = (r2) => [...adj.get(r2.id)].filter((id) => placed.has(id)).length;
+      const n = (r2) => [...adj.get(r2.id)].filter((id2) => placed.has(id2)).length;
       return n(b) - n(a) || adj.get(b.id).size - adj.get(a.id).size || b.w * b.h - a.w * a.h || a.id.localeCompare(b.id, "en");
     });
     const r = pending[0];
@@ -3184,10 +3186,10 @@ function floor(spec, previous = null) {
     const component = [start];
     visited.add(start.id);
     for (let i = 0; i < component.length; i++) for (const edge of edges) {
-      const id = edge.from === component[i].id ? edge.to : edge.to === component[i].id ? edge.from : null;
-      if (id && !visited.has(id)) {
-        visited.add(id);
-        component.push(specs.find((r) => r.id === id));
+      const id2 = edge.from === component[i].id ? edge.to : edge.to === component[i].id ? edge.from : null;
+      if (id2 && !visited.has(id2)) {
+        visited.add(id2);
+        component.push(specs.find((r) => r.id === id2));
       }
     }
     let proposal = null;
@@ -3329,7 +3331,7 @@ var init_foundation = __esm({
     contains = (a, b) => b.x >= a.x - 1e-8 && b.y >= a.y - 1e-8 && b.x + b.w <= a.x + a.w + 1e-8 && b.y + b.h <= a.y + a.h + 1e-8;
     pointInside = (r, p) => p.x >= r.x && p.x <= r.x + r.w && p.y >= r.y && p.y <= r.y + r.h;
     polygon = (r) => [[r.x, r.y], [r.x + r.w, r.y], [r.x + r.w, r.y + r.h], [r.x, r.y + r.h]];
-    issue = (id, code) => ({ id, code });
+    issue = (id2, code) => ({ id: id2, code });
     ordered = (values) => [...values].sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
     screen = (p, c) => ({ x: p.x * c.s + c.x, y: p.y * c.s + c.y });
     world = (p, c) => ({ x: (p.x - c.x) / c.s, y: (p.y - c.y) / c.s });
@@ -3663,11 +3665,11 @@ function floorOnce(spec, previous = null) {
     }
     if (parents.has(b.roomId)) {
       const hops = [];
-      let id = b.roomId;
-      while (parents.get(id)) {
-        const e = parents.get(id);
+      let id2 = b.roomId;
+      while (parents.get(id2)) {
+        const e = parents.get(id2);
         hops.unshift(e);
-        id = e.from;
+        id2 = e.from;
       }
       let cursor = a, valid = true;
       for (const e of hops) {
@@ -3755,10 +3757,10 @@ function city(spec, previous = null) {
   }).filter((x) => x !== null).sort((a, b) => a - b);
   const gates = open ? [] : [{ id: "gate-west", name: "西城门", x: horizontalIntersections[0], y: centerY }, { id: "gate-east", name: "东城门", x: horizontalIntersections.at(-1), y: centerY }];
   const hubs = [pt(w * 0.31, centerY), pt(w * 0.77, centerY)], roads = [], segments = [], buildings = [], issues = [];
-  const addRoad = (id, a, b) => {
-    const road = { id, a, b, width: lane };
+  const addRoad = (id2, a, b) => {
+    const road = { id: id2, a, b, width: lane };
     roads.push(road);
-    segments.push(...(wet ? splitWater(a, b, river) : [{ a, b, kind: "road" }]).map((s, i) => ({ ...s, id: id + ":" + i, roadId: id, width: lane })));
+    segments.push(...(wet ? splitWater(a, b, river) : [{ a, b, kind: "road" }]).map((s, i) => ({ ...s, id: id2 + ":" + i, roadId: id2, width: lane })));
   };
   addRoad("avenue", open ? hubs[0] : pt(gates[0].x, centerY), open ? hubs[1] : pt(gates[1].x, centerY));
   for (const d of districts) addRoad("road:" + d.id, hubs[d.bank === "west" ? 0 : 1], d.site);
@@ -4165,9 +4167,9 @@ function overview(spec, previous = null) {
     pins.push({ id: pin.id, name: pin.name ?? null, type: typeof pin.type === "string" ? pin.type : typeof pin.kind === "string" ? pin.kind : "location", x: pin.x, y: pin.y, quality: pin.quality === "exact" ? "exact" : "layout" });
   }
   const blockingPolygons = [];
-  for (const [id, polygon2] of shapePolygon) {
-    const zone = zonesIn.find((z) => z.id === id);
-    if (zone && BLOCKING_ROLES.has(String(zone.role))) blockingPolygons.push({ id, polygon: polygon2 });
+  for (const [id2, polygon2] of shapePolygon) {
+    const zone = zonesIn.find((z) => z.id === id2);
+    if (zone && BLOCKING_ROLES.has(String(zone.role))) blockingPolygons.push({ id: id2, polygon: polygon2 });
   }
   const routes = [];
   for (const link of linksIn) {
@@ -4198,10 +4200,10 @@ function overview(spec, previous = null) {
     routes.push({ id: link.id, kind: "route", mapId: spec.mapId ?? null, path: [a, mid, b], quality: "estimated", dashed: true, progress: null, uncertain: crosses2, fromLocationId: link.fromLocationId ?? null, toLocationId: link.toLocationId ?? null, structureKey });
   }
   const clearZones = [];
-  for (const [id, polygon2] of shapePolygon) {
-    const zone = zonesIn.find((z) => z.id === id);
+  for (const [id2, polygon2] of shapePolygon) {
+    const zone = zonesIn.find((z) => z.id === id2);
     if (!zone || !URBAN_ROLES.has(String(zone.role))) continue;
-    clearZones.push({ id, polygon: polygon2 });
+    clearZones.push({ id: id2, polygon: polygon2 });
   }
   const clearPoints = [...locked];
   const clearRoutes = routes.map((r) => r.path);
@@ -4550,11 +4552,11 @@ function deletionSet(s, key) {
       continue;
     }
     if (k !== key) continue;
-    if (!Array.isArray(v) || !v.every((id) => typeof id === "string" && id)) {
+    if (!Array.isArray(v) || !v.every((id2) => typeof id2 === "string" && id2)) {
       s.issues.push(diagnostic("DELETE_SHAPE_INVALID", "$.deletes." + k, "删除列表必须是字符串 ID 数组", { severity: "warning" }));
       continue;
     }
-    for (const id of v) out.add(id);
+    for (const id2 of v) out.add(id2);
   }
   return out;
 }
@@ -4583,8 +4585,8 @@ function dimensions(raw) {
   if (!finite(raw.w) || !finite(raw.h) || raw.w <= 0 || raw.h <= 0) throw new Error("DIMENSION_INVALID");
   return { w: raw.w, h: raw.h };
 }
-function trustedLock(ctx, type, id) {
-  const v = ctx.locks?.[type]?.[id];
+function trustedLock(ctx, type, id2) {
+  const v = ctx.locks?.[type]?.[id2];
   return v && finite(v.x) && finite(v.y) ? { x: v.x, y: v.y } : null;
 }
 function finish(s, ctx, layoutFn) {
@@ -4610,9 +4612,9 @@ function finish(s, ctx, layoutFn) {
   if (checks.length) return { ok: false, status: "failed", scene: null, kept: previous ? clone(previous) : null, issues: [...s.issues, ...checks] };
   return { ok: true, status: s.issues.length ? "partial" : "generated", scene, issues: s.issues, guard: { scope: s.scope, mapId: s.map.id, inputSignature }, metricProposal: s.metricProposal, deletedContents };
 }
-function rectLockOf(ctx, id) {
+function rectLockOf(ctx, id2) {
   for (const key of ["rooms", "buildings"]) {
-    const v = ctx?.locks?.[key]?.[id];
+    const v = ctx?.locks?.[key]?.[id2];
     if (v && finite(v.x) && finite(v.y) && finite(v.w) && finite(v.h) && v.w > 0 && v.h > 0) return { x: v.x, y: v.y, w: v.w, h: v.h };
   }
   return null;
@@ -4667,7 +4669,7 @@ function generateFloorOnce(value, context2) {
     const actualRooms = new Set(s.spec.rooms.map((r) => r.id));
     s.spec.roomConnections = (ctx.roomConnections ?? []).filter((edge) => actualRooms.has(edge.from) && actualRooms.has(edge.to));
     s.spec.externalConnections = (ctx.roomConnections ?? []).filter((edge) => actualRooms.has(edge.from) !== actualRooms.has(edge.to)).map((edge) => actualRooms.has(edge.from) ? edge : { ...edge, from: edge.to, to: edge.from });
-    s.spec.externalRoomIds = [.../* @__PURE__ */ new Set([...(ctx.externalRoomIds ?? []).filter((id) => actualRooms.has(id)), ...s.spec.externalConnections.map((edge) => edge.from)])];
+    s.spec.externalRoomIds = [.../* @__PURE__ */ new Set([...(ctx.externalRoomIds ?? []).filter((id2) => actualRooms.has(id2)), ...s.spec.externalConnections.map((edge) => edge.from)])];
     if (s.spec.singleRoom && ctx.entryDoors?.length) s.spec.entryDoors = clone(ctx.entryDoors).map((d) => {
       const room = s.spec.rooms[0], size = d.sourceRoomSize;
       if (size && d.quality !== "confirmed") return { ...d, x: d.x * room.w / size.w, y: d.y * room.h / size.h };
@@ -4688,9 +4690,9 @@ function generateFloorOnce(value, context2) {
     });
     if (ledger.length && (s.spec.singleRoom || s.spec.hostRoom)) {
       const home = s.spec.hostRoom?.id ?? s.spec.rooms[0]?.id;
-      const own = (id) => {
-        const parsed = parseSpaceLocalId(id);
-        return parsed?.locationId === s.map.containerLocationId ? parsed.contentId : id;
+      const own = (id2) => {
+        const parsed = parseSpaceLocalId(id2);
+        return parsed?.locationId === s.map.containerLocationId ? parsed.contentId : id2;
       };
       s.input.contents = (s.input.contents ?? []).map((row3) => plain(row3) ? { ...row3, id: own(row3.id) } : row3);
       s.input.items = (s.input.items ?? []).map((row3) => plain(row3) ? { ...row3, on: own(row3.on) } : row3);
@@ -4702,8 +4704,8 @@ function generateFloorOnce(value, context2) {
       const supported = new Set((s.input.items ?? []).filter((row3) => s.known.items.has(row3.id) && !existingItems.has(row3.id)).map((row3) => row3.on));
       const unknown = (s.input.contents ?? []).filter((row3) => plain(row3) && !registered.has(row3.id) && row3.additional !== true && !supported.has(row3.id));
       if (unknown.length) return { ...failure("FURNISHING_ID_UNREGISTERED", "$.contents", "已有空间的陈设必须沿用账本 ID；只有显式 additional=true 才追加新陈设", { kept: s.previous ? clone(s.previous) : null }), issues: unknown.map((row3) => diagnostic("FURNISHING_ID_UNREGISTERED", "$.contents", "该陈设不是既有空间身份，不能因换图重复生成；请复用 furnishingInventory 的 ID 或明确新增依据", { entityId: row3.id })) };
-      const requested = new Set((s.input.contents ?? []).map((row3) => plain(row3) ? row3.id : null).filter((id) => typeof id === "string"));
-      const requestedItems = new Set((s.input.items ?? []).map((row3) => plain(row3) && typeof row3.id === "string" ? row3.id : null).filter((id) => !!id));
+      const requested = new Set((s.input.contents ?? []).map((row3) => plain(row3) ? row3.id : null).filter((id2) => typeof id2 === "string"));
+      const requestedItems = new Set((s.input.items ?? []).map((row3) => plain(row3) && typeof row3.id === "string" ? row3.id : null).filter((id2) => !!id2));
       const seeded = [], seededItems = [];
       for (const entry of ledger) {
         const parsed = parseSpaceLocalId(entry.localId);
@@ -4828,8 +4830,8 @@ function generateOverviewOnce(value, context2) {
       s.spec.surface = "mixed";
     } else s.spec.surface = s.input.surface;
     if (s.input.width !== void 0 || s.input.height !== void 0) s.issues.push(diagnostic("EXTENT_OVERRIDDEN", "$.width", "概览幅面由程序按地图框架给定，模型提供的 width/height 已忽略", { severity: "warning" }));
-    const pointOf = (id) => {
-      const p = ctx.locks?.points?.[id];
+    const pointOf = (id2) => {
+      const p = ctx.locks?.points?.[id2];
       return p && finite(p.x) && finite(p.y) ? { x: p.x, y: p.y } : null;
     };
     s.spec.zones = collectAndMerge(s, "zones", "locations", (r) => {
@@ -4919,7 +4921,7 @@ var init_generation = __esm({
     same = (a, b) => stable(normalizeScope(a)) === stable(normalizeScope(b));
     MERGEABLE_KEYS = ["rooms", "contents", "actors", "items", "districts", "buildings", "zones", "links", "features"];
     FLOOR_FURNITURE_TYPES = ["shelf", "desk", "bench", "reading", "stairs", "table", "chair", "bed", "cabinet", "doorway", "light", "decor"];
-    proxyPlacement = (ctx, id) => ctx.placement?.[id] === "proxy" ? { placement: "proxy" } : {};
+    proxyPlacement = (ctx, id2) => ctx.placement?.[id2] === "proxy" ? { placement: "proxy" } : {};
   }
 });
 
@@ -4927,25 +4929,25 @@ var init_generation = __esm({
 function collectMapLocations({ mapRow, maps = [], locations = [] } = {}) {
   if (!mapRow?.id) return [];
   const branchId = mapRow.branch_id;
-  const active = (row3) => row3?.branch_id === branchId && (row3.status ?? "active") === "active";
-  const rows4 = locations.filter(active), byId9 = new Map(rows4.map((row3) => [String(row3.id), row3]));
+  const active2 = (row3) => row3?.branch_id === branchId && (row3.status ?? "active") === "active";
+  const rows4 = locations.filter(active2), byId9 = new Map(rows4.map((row3) => [String(row3.id), row3]));
   const holders = /* @__PURE__ */ new Map();
   for (const map of [...maps, mapRow]) {
-    if (!active(map) || !map.container_location_id) continue;
-    const id = String(map.container_location_id), set = holders.get(id) ?? /* @__PURE__ */ new Set();
+    if (!active2(map) || !map.container_location_id) continue;
+    const id2 = String(map.container_location_id), set = holders.get(id2) ?? /* @__PURE__ */ new Set();
     set.add(String(map.id));
-    holders.set(id, set);
+    holders.set(id2, set);
   }
   const ownerOf = (row3) => {
-    let id = row3.parent_location_id ? String(row3.parent_location_id) : null;
+    let id2 = row3.parent_location_id ? String(row3.parent_location_id) : null;
     const seen = /* @__PURE__ */ new Set([String(row3.id)]);
-    while (id && !seen.has(id)) {
-      seen.add(id);
-      const candidates = holders.get(id);
+    while (id2 && !seen.has(id2)) {
+      seen.add(id2);
+      const candidates = holders.get(id2);
       if (candidates?.size === 1) return [...candidates][0];
       if (candidates?.size > 1) return null;
-      const parent = byId9.get(id);
-      id = parent?.parent_location_id ? String(parent.parent_location_id) : null;
+      const parent = byId9.get(id2);
+      id2 = parent?.parent_location_id ? String(parent.parent_location_id) : null;
     }
     return null;
   };
@@ -5299,7 +5301,7 @@ function filterSceneForView(scene, { scope, visibleLocations = [], visibleCharac
     d.layout = Object.fromEntries((keys[saved.kind] ?? []).filter((k) => saved[k] !== void 0).map((k) => [k, saved[k]]));
   }
   const s = d.layout;
-  const allowed = (id, type) => author || (type === "person" ? C : type === "item" ? I : L).has(id);
+  const allowed = (id2, type) => author || (type === "person" ? C : type === "item" ? I : L).has(id2);
   const name = (p) => ({ ...p, name: names[p.id] ?? p.name ?? "" });
   if (s.kind === "floor") {
     s.rooms = s.rooms.filter((r) => allowed(r.id, "location")).map(name);
@@ -5326,7 +5328,7 @@ function filterSceneForView(scene, { scope, visibleLocations = [], visibleCharac
     const districts = new Set(s.districts.map((d2) => d2.id));
     s.buildings = s.buildings.filter((b) => districts.has(b.districtId) && (b.decorative || allowed(b.id, "location"))).map(name);
     if (!author) {
-      s.roads = s.roads.filter((r) => r.id === "avenue" || [...districts].some((id) => r.id === "road:" + id));
+      s.roads = s.roads.filter((r) => r.id === "avenue" || [...districts].some((id2) => r.id === "road:" + id2));
       const roads = new Set(s.roads.map((r) => r.id));
       s.segments = s.segments.filter((r) => roads.has(r.roadId));
     }
@@ -5338,7 +5340,7 @@ function filterSceneForView(scene, { scope, visibleLocations = [], visibleCharac
       if (r.hidden === true) return false;
       const endpoints = [r.fromLocationId, r.toLocationId].filter((v) => typeof v === "string" && v);
       if (!endpoints.length) return false;
-      return endpoints.every((id) => L.has(id));
+      return endpoints.every((id2) => L.has(id2));
     });
     const visibleZones = new Set(s.shapes.map((x) => x.id));
     s.features = (s.features ?? []).filter((f) => author || !f.zoneId || visibleZones.has(f.zoneId));
@@ -5740,11 +5742,11 @@ function createPainter(canvas, state, C, width, height) {
       for (let x = 0.6; x < s.bounds.w; x += 1.7) line([{ x, y: s.corridor.y + 0.1 }, { x, y: s.corridor.y + s.corridor.h - 0.1 }], "#8ec9ee0c", 0.65);
     }
     for (let i = 0; i < s.rooms.length; i++) {
-      const r = s.rooms[i], color = palette[i % palette.length], active = r.id === focus;
+      const r = s.rooms[i], color = palette[i % palette.length], active2 = r.id === focus;
       ctx.save();
-      ctx.shadowColor = active ? color : "#000000";
-      ctx.shadowBlur = active ? 12 : 8;
-      rounded(r, gradient(r, alpha(color, active ? 0.17 : 0.1), alpha(color, 0.025)), alpha(color, active ? 0.78 : 0.32), active ? 1.65 : 0.85, 0.22);
+      ctx.shadowColor = active2 ? color : "#000000";
+      ctx.shadowBlur = active2 ? 12 : 8;
+      rounded(r, gradient(r, alpha(color, active2 ? 0.17 : 0.1), alpha(color, 0.025)), alpha(color, active2 ? 0.78 : 0.32), active2 ? 1.65 : 0.85, 0.22);
       ctx.restore();
       ctx.save();
       clipRect(r);
@@ -5952,7 +5954,7 @@ function createPainter(canvas, state, C, width, height) {
       }
     }
     for (const b of s.buildings) {
-      const index = s.districts.findIndex((d) => d.id === b.districtId), color = palette[index % palette.length], active = state.selected?.id === b.id || state.hover?.id === b.id;
+      const index = s.districts.findIndex((d) => d.id === b.districtId), color = palette[index % palette.length], active2 = state.selected?.id === b.id || state.hover?.id === b.id;
       if (b.decorative) {
         rounded(b, alpha(color, 0.11), alpha(color, 0.17), 0.5, 3);
         const cols2 = b.w > 40 ? 2 : 1, rows4 = b.h > 35 ? 2 : 1;
@@ -5963,9 +5965,9 @@ function createPainter(canvas, state, C, width, height) {
         }
       } else {
         ctx.save();
-        ctx.shadowColor = active ? C.cyan : color;
-        ctx.shadowBlur = active ? 12 : 5;
-        rounded(b, gradient(b, alpha(color, 0.25), alpha(color, 0.07)), active ? C.cyan : alpha(color, 0.55), 1, 3);
+        ctx.shadowColor = active2 ? C.cyan : color;
+        ctx.shadowBlur = active2 ? 12 : 5;
+        rounded(b, gradient(b, alpha(color, 0.25), alpha(color, 0.07)), active2 ? C.cyan : alpha(color, 0.55), 1, 3);
         ctx.restore();
         line([{ x: b.x + b.w / 2, y: b.y + 5 }, { x: b.x + b.w / 2, y: b.y + b.h - 5 }], alpha(color, 0.35), 0.7);
         const q = center(b);
@@ -6335,11 +6337,11 @@ function createSpatialRenderer({ canvas, onSelect = () => {
       schedule();
       return true;
     },
-    selectById(id) {
-      return select(entities().find((e) => e.id === id) || null);
+    selectById(id2) {
+      return select(entities().find((e) => e.id === id2) || null);
     },
-    focus(id) {
-      const e = entities().find((e2) => e2.id === id);
+    focus(id2) {
+      const e = entities().find((e2) => e2.id === id2);
       if (!e) return false;
       select(e);
       const p = finite(e.x) ? e.w ? center(e) : e : null;
@@ -6412,10 +6414,10 @@ function buildLayoutContext({ scope, mapRow, maps = [], locations = [], characte
     if (mapRow?.branch_id !== scope.branchId) return failure("MAP_BRANCH_MISMATCH", "$.mapRow", "地图与当前分支不匹配");
     const frame = typeof mapRow.frame_json === "string" ? JSON.parse(mapRow.frame_json) : mapRow.frame_json, mpp = mapRow.meters_per_cell;
     if (!plain(frame)) return failure("FRAME_INVALID", "$.mapRow.frame_json", "需要完整地图框架");
-    const active = (rows4) => rows4.filter((r) => r.branch_id === scope.branchId && r.status === "active");
-    const ls = active(locations), cs = active(characters);
+    const active2 = (rows4) => rows4.filter((r) => r.branch_id === scope.branchId && r.status === "active");
+    const ls = active2(locations), cs = active2(characters);
     const rs = routes.filter((r) => r.branch_id === scope.branchId && r.status !== "closed");
-    const its = active(items).filter((i) => !i.holder_character_id && !i.container_item_id);
+    const its = active2(items).filter((i) => !i.holder_character_id && !i.container_item_id);
     const calibrated = finite(mpp) && mpp > 0;
     const scale = calibrated ? mpp : 1;
     const members = collectMapLocations({ mapRow, maps, locations: ls });
@@ -6477,7 +6479,7 @@ function buildLayoutContext({ scope, mapRow, maps = [], locations = [], characte
     const roomIds = new Set(members.filter((l) => l.kind === "room").map((l) => l.id));
     const memberIds = new Set(members.filter((l) => ["room", "other"].includes(l.kind)).map((l) => l.id));
     const roomConnections = rs.filter((r) => memberIds.has(r.from_location_id) && memberIds.has(r.to_location_id) && (roomIds.has(r.from_location_id) || roomIds.has(r.to_location_id)) && r.from_location_id !== r.to_location_id && ["adjacent", "door", "estimated"].includes(r.kind) && r.status === "open").map((r) => ({ id: r.id, from: r.from_location_id, to: r.to_location_id }));
-    const externalRoomIds = rs.filter((r) => r.status === "open" && (r.from_location_id === containerId || r.to_location_id === containerId)).flatMap((r) => [r.from_location_id, r.to_location_id]).filter((id) => memberIds.has(id));
+    const externalRoomIds = rs.filter((r) => r.status === "open" && (r.from_location_id === containerId || r.to_location_id === containerId)).flatMap((r) => [r.from_location_id, r.to_location_id]).filter((id2) => memberIds.has(id2));
     let entryDoors = [], parentGroups = [];
     const parent = maps.find((m) => m.branch_id === scope.branchId && m.id !== mapRow.id && m.id === ls.find((l) => l.id === containerId)?.map_id);
     if (parent) {
@@ -6515,7 +6517,7 @@ var init_host_context = __esm({
 
 // vendor/atlas-spatial/space-projection.mjs
 function projectChildFurnishing(spec, ctx) {
-  const aliases = /* @__PURE__ */ new Map(), key = (room, id) => room + "\0" + id;
+  const aliases = /* @__PURE__ */ new Map(), key = (room, id2) => room + "\0" + id2;
   for (const [room, canonical] of Object.entries(ctx.childCanonical ?? {})) {
     for (const entry of canonical?.furnishing ?? []) {
       const parsed = parseSpaceLocalId(entry.localId);
@@ -6525,13 +6527,13 @@ function projectChildFurnishing(spec, ctx) {
   if (ctx.autoPlan) for (const row3 of spec.contents ?? []) {
     if (Object.hasOwn(ctx.childCanonical ?? {}, row3.roomId) && !parseSpaceLocalId(row3.id)) aliases.set(key(row3.roomId, row3.id), spaceLocalId(row3.roomId, row3.id));
   }
-  if (ctx.autoPlan && Array.isArray(spec.deletes?.contents)) spec.deletes.contents = spec.deletes.contents.map((id) => {
-    const targets = [...aliases].filter(([k]) => k.endsWith("\0" + id)).map(([, v]) => v);
-    return targets.length === 1 ? targets[0] : id;
+  if (ctx.autoPlan && Array.isArray(spec.deletes?.contents)) spec.deletes.contents = spec.deletes.contents.map((id2) => {
+    const targets = [...aliases].filter(([k]) => k.endsWith("\0" + id2)).map(([, v]) => v);
+    return targets.length === 1 ? targets[0] : id2;
   });
   const content = (row3) => {
-    const id = aliases.get(key(row3.roomId, row3.id));
-    return id ? { ...row3, id } : row3;
+    const id2 = aliases.get(key(row3.roomId, row3.id));
+    return id2 ? { ...row3, id: id2 } : row3;
   };
   spec.contents = (spec.contents ?? []).map(content);
   spec.actors = (spec.actors ?? []).map((row3) => ({ ...row3, ...row3.near ? { near: aliases.get(key(row3.roomId, row3.near)) ?? row3.near } : {} }));
@@ -6662,9 +6664,9 @@ function compileSceneGroup({ request, scope, currentScope, mapRow, locations, ch
     if (result.scene.layout.kind === "city") {
       const positions = new Map(locations.map((l) => [l.id, l]));
       for (const mutation7 of mutations) if (mutation7.table === "locations") positions.set(mutation7.rowId, mutation7.after);
-      const anchor = (id) => {
+      const anchor = (id2) => {
         const seen = /* @__PURE__ */ new Set();
-        let row3 = positions.get(id);
+        let row3 = positions.get(id2);
         while (row3 && !seen.has(row3.id)) {
           seen.add(row3.id);
           if (row3.mobility === "mobile") {
@@ -8679,11 +8681,11 @@ function createTableReadPort(db) {
         return decoded2.row;
       });
     },
-    selectOne(table, branchId, id) {
+    selectOne(table, branchId, id2) {
       if (!isKnownTable(table)) return null;
       const pks = pkColumns(table);
       const where = pks.map((c) => `${c} = ?`).join(" AND ");
-      const params = pks.includes("branch_id") ? [branchId, id] : [id];
+      const params = pks.includes("branch_id") ? [branchId, id2] : [id2];
       const rows4 = queryBound(db, `SELECT * FROM ${table} WHERE ${where} LIMIT 1`, params);
       if (rows4.length === 0) return null;
       const decoded2 = decodeRow(table, rows4[0], { allowExtra: true });
@@ -9115,8 +9117,8 @@ function createRefScope(seed = []) {
     declare(entry) {
       register(entry);
     },
-    byId(id) {
-      const raw = typeof id === "string" ? id.trim() : "";
+    byId(id2) {
+      const raw = typeof id2 === "string" ? id2.trim() : "";
       if (raw.length === 0) return null;
       return byId9.get(raw) ?? null;
     }
@@ -9171,10 +9173,10 @@ function declareRefs(ops, ctx) {
     const opName = typeof value?.op === "string" ? value.op : "";
     const kind = kindFromOp(opName) ?? hints.get(alias) ?? "mention";
     const rawId = makeId(kind, op.opId, alias);
-    const id = typeof rawId === "string" && rawId.trim().length > 0 ? rawId.trim() : defaultMakeId(ctx.anchor, alias, op.opId, kind);
-    const entry = { alias, id, kind, rowRev: null, declaredByOpId: op.opId };
+    const id2 = typeof rawId === "string" && rawId.trim().length > 0 ? rawId.trim() : defaultMakeId(ctx.anchor, alias, op.opId, kind);
+    const entry = { alias, id: id2, kind, rowRev: null, declaredByOpId: op.opId };
     declared.push(entry);
-    aliasById.set(alias, id);
+    aliasById.set(alias, id2);
   }
   return { declared, aliasById, issues };
 }
@@ -9290,9 +9292,9 @@ function collectLocalIds(spec) {
     for (const row3 of rows4) {
       if (row3 === null || typeof row3 !== "object") continue;
       for (const field of fields) {
-        const id = row3[field];
-        if (typeof id !== "string") continue;
-        const trimmed = id.trim();
+        const id2 = row3[field];
+        if (typeof id2 !== "string") continue;
+        const trimmed = id2.trim();
         if (trimmed.length === 0) continue;
         pool.add(trimmed);
         const bare = newAliasOf(trimmed);
@@ -9944,8 +9946,8 @@ function normalizeLayoutSpec(data, op) {
           ]
         };
       }
-      const id = entry["id"];
-      if (typeof id !== "string" || id.trim() === "" || id.length > MAX_LAYOUT_SPEC_ID_CHARS) {
+      const id2 = entry["id"];
+      if (typeof id2 !== "string" || id2.trim() === "" || id2.length > MAX_LAYOUT_SPEC_ID_CHARS) {
         return {
           ok: false,
           spec: null,
@@ -9959,7 +9961,7 @@ function normalizeLayoutSpec(data, op) {
           ]
         };
       }
-      if (seenIds.has(id)) {
+      if (seenIds.has(id2)) {
         return {
           ok: false,
           spec: null,
@@ -9967,13 +9969,13 @@ function normalizeLayoutSpec(data, op) {
             issue2(
               "ENUM_INVALID",
               `${path}.id`,
-              `map.layout.request: spec.${key} has duplicate id ${JSON.stringify(id)}`,
+              `map.layout.request: spec.${key} has duplicate id ${JSON.stringify(id2)}`,
               { severity: "error", retryable: true, opId: op?.opId, line: op?.line }
             )
           ]
         };
       }
-      seenIds.add(id);
+      seenIds.add(id2);
       if (kind === "overview") {
         const rejected = overviewEntryIssue(key, entry, path, op);
         if (rejected) return { ok: false, spec: null, issues: [rejected] };
@@ -11788,7 +11790,7 @@ function updateMentionCandidates(input) {
     });
     const existing = exact ?? (compatible.length === 1 ? compatible[0] : null);
     if (!existing) {
-      const id2 = makeId("mention", contextKey.length > 0 ? contextKey : normalized, `mention:${normalized}:${observation.kindHint ?? "unknown"}`);
+      const id3 = makeId("mention", contextKey.length > 0 ? contextKey : normalized, `mention:${normalized}:${observation.kindHint ?? "unknown"}`);
       const row3 = createRow(
         "mention_candidates",
         {
@@ -11806,22 +11808,22 @@ function updateMentionCandidates(input) {
           promoted_entity_id: null,
           status: "watching"
         },
-        { branchId, id: id2, turnId, clockS: input.clockS, nowWallMs: input.nowWallMs, rulesetVersion: input.rulesetVersion }
+        { branchId, id: id3, turnId, clockS: input.clockS, nowWallMs: input.nowWallMs, rulesetVersion: input.rulesetVersion }
       );
       mutations.push({
         table: "mention_candidates",
-        rowId: id2,
+        rowId: id3,
         before: null,
         after: row3,
-        sourceOpIds: [`mention.observe:${id2}`],
+        sourceOpIds: [`mention.observe:${id3}`],
         basis: basisFor(turnId, `首次提及「${name}」（${observation.kindHint ?? "unknown"}）`, summary.length > 0 || sourceKeys.length > 0)
       });
-      projected.set(id2, row3);
-      createdInBatch.add(id2);
+      projected.set(id3, row3);
+      createdInBatch.add(id3);
       created += 1;
       continue;
     }
-    const id = String(existing.id);
+    const id2 = String(existing.id);
     const recent = uniqueStrings(stringList(existing.recent_turn_ids_json), MENTION_RECENT_TURNS_LIMIT);
     const alreadyCounted = observation.alreadyCountedThisTurn === true || recent.includes(turnId);
     const distinctBefore = Math.max(1, Number(existing.distinct_turn_count ?? 1) || 1);
@@ -11844,30 +11846,30 @@ function updateMentionCandidates(input) {
     };
     mutations.push({
       table: "mention_candidates",
-      rowId: id,
+      rowId: id2,
       before: existing,
       after,
-      sourceOpIds: [`mention.observe:${id}`],
+      sourceOpIds: [`mention.observe:${id2}`],
       basis: basisFor(
         turnId,
         `${alreadyCounted ? "同一楼重试" : "再次提及"}「${name}」：distinct_turn_count=${distinctTurnCount}`,
         summary.length > 0 || lorebookAfter.length > 0
       )
     });
-    projected.set(id, after);
+    projected.set(id2, after);
     updated += 1;
-    if (String(after.status) === "promoted" && !promoted.includes(id)) promoted.push(id);
+    if (String(after.status) === "promoted" && !promoted.includes(id2)) promoted.push(id2);
   }
   const watchingRows = reader.watchingCandidates(branchId);
   const watchingIds = new Set(watchingRows.map((row3) => String(row3.id)));
   const watchingAfter = [];
   for (const row3 of watchingRows) {
-    const id = String(row3.id);
-    const after = projected.get(id) ?? row3;
+    const id2 = String(row3.id);
+    const after = projected.get(id2) ?? row3;
     if (String(after.status) === "watching") watchingAfter.push(after);
   }
-  for (const [id, row3] of projected) {
-    if (watchingIds.has(id)) continue;
+  for (const [id2, row3] of projected) {
+    if (watchingIds.has(id2)) continue;
     if (String(row3.status) === "watching") watchingAfter.push(row3);
   }
   const over = watchingAfter.length - MENTION_CANDIDATE_LIMIT;
@@ -11887,7 +11889,7 @@ function updateMentionCandidates(input) {
     });
     for (const row3 of evictable) {
       if (evicted.length >= over) break;
-      const id = String(row3.id);
+      const id2 = String(row3.id);
       const after = {
         ...row3,
         // 淘汰也记到当前 turn：变更属于本楼，回退时一并恢复（不是「悄悄消失」）。
@@ -11896,14 +11898,14 @@ function updateMentionCandidates(input) {
       };
       mutations.push({
         table: "mention_candidates",
-        rowId: id,
+        rowId: id2,
         before: row3,
         after,
-        sourceOpIds: [`mention.evict:${id}`],
+        sourceOpIds: [`mention.evict:${id2}`],
         basis: basisFor(turnId, `候选上限 ${MENTION_CANDIDATE_LIMIT} 回收：「${String(row3.name ?? "")}」长期未出现且无重要依据`, false)
       });
-      projected.set(id, after);
-      evicted.push(id);
+      projected.set(id2, after);
+      evicted.push(id2);
     }
     const remaining = watchingAfter.length - evicted.length;
     issues.push(
@@ -12439,9 +12441,9 @@ function str2(value) {
 }
 function furnishingOriginKey(locationId, localId) {
   const location2 = str2(locationId);
-  const id = str2(localId);
-  if (id.startsWith("space:")) return id;
-  return id === "" ? "" : `space:${location2}:furn:${id.replace(/^furn:/, "")}`;
+  const id2 = str2(localId);
+  if (id2.startsWith("space:")) return id2;
+  return id2 === "" ? "" : `space:${location2}:furn:${id2.replace(/^furn:/, "")}`;
 }
 function resolveFurnishingRef(canonical, ref2) {
   const issues = [];
@@ -12782,9 +12784,9 @@ function basisFor2(ctx, op, extra = {}) {
     certainty: extra.certainty ?? (ctx.phase === "observe" ? "confirmed" : "inferred")
   };
 }
-function entityKeyMutation(ctx, op, id, kind) {
-  const existing = ctx.tables.selectOne("entity_keys", ctx.branchId, id);
-  return mutation("entity_keys", id, existing, { branch_id: ctx.branchId, id, kind }, op, basisFor2(ctx, op));
+function entityKeyMutation(ctx, op, id2, kind) {
+  const existing = ctx.tables.selectOne("entity_keys", ctx.branchId, id2);
+  return mutation("entity_keys", id2, existing, { branch_id: ctx.branchId, id: id2, kind }, op, basisFor2(ctx, op));
 }
 function ensureAliases(value, op, path) {
   if (value === void 0) return { value: null, issues: [] };
@@ -12856,8 +12858,8 @@ function ensureLocationRef(data, field, op, issues, target2, targetField, expect
   }
   target2[targetField] = resolved.entry.id;
 }
-function declaredRef(alias, id, kind, opId) {
-  return { alias, id, kind, rowRev: null, declaredByOpId: opId };
+function declaredRef(alias, id2, kind, opId) {
+  return { alias, id: id2, kind, rowRev: null, declaredByOpId: opId };
 }
 function normalizeName(name) {
   return name.trim().replace(/\s+/g, " ").toLowerCase();
@@ -13825,9 +13827,9 @@ function mergeLayoutConstraints(baseSpec, incoming, strict) {
     }
     for (const raw of rows4) {
       if (!isPlainObject4(raw)) continue;
-      const id = String(raw["id"]);
-      const existing = byId9.get(id);
-      byId9.set(id, existing ? mergeRow(existing, raw, `spec.${collection2}[${id}]`, strict, conflicts) : { ...raw });
+      const id2 = String(raw["id"]);
+      const existing = byId9.get(id2);
+      byId9.set(id2, existing ? mergeRow(existing, raw, `spec.${collection2}[${id2}]`, strict, conflicts) : { ...raw });
     }
     out[collection2] = [...byId9.values()];
   }
@@ -13934,16 +13936,16 @@ function compileMapLayoutRequest(op, ctx) {
   result.issues.push(...refs.issues);
   if (!refs.ok || !refs.spec) return result;
   const resolvedSpec = refs.spec;
-  for (const id of collectLocationRefs(resolvedSpec)) {
-    const row3 = ctx.tables.selectOne("locations", ctx.branchId, id);
+  for (const id2 of collectLocationRefs(resolvedSpec)) {
+    const row3 = ctx.tables.selectOne("locations", ctx.branchId, id2);
     if (!row3) continue;
     const owner = row3["map_id"] === null || row3["map_id"] === void 0 ? "" : String(row3["map_id"]);
-    if (owner !== "" && owner !== mapId && id !== before.container_location_id) {
+    if (owner !== "" && owner !== mapId && id2 !== before.container_location_id) {
       result.issues.push(
         issue7(
           LAYOUT_REQUEST_CONFLICT,
           "$.data.spec",
-          `实体 ${id} 属于另一张图（${owner}），不能出现在 ${mapId} 的布局里：父图/子图引用不可混用。`,
+          `实体 ${id2} 属于另一张图（${owner}），不能出现在 ${mapId} 的布局里：父图/子图引用不可混用。`,
           op
         )
       );
@@ -13995,7 +13997,7 @@ function compileMapLayoutRequest(op, ctx) {
   const rebuild = spec["rebuild"] === true;
   const signature2 = signatureOf(canonicalJson({ policy: LAYOUT_SIGNATURE_POLICY_VERSION, kind, mapId, spec: merged.spec, rebuild }));
   const dependencies = [mapId, ...refs.dependencies];
-  for (const id of dependencies) if (!result.dependencies.includes(id)) result.dependencies.push(id);
+  for (const id2 of dependencies) if (!result.dependencies.includes(id2)) result.dependencies.push(id2);
   result.readSet.push({ table: "maps", rowId: mapId, rowRev: Number(before.row_rev ?? 1) });
   const savedSignature = saved && typeof saved["inputSignature"] === "string" ? String(saved["inputSignature"]) : null;
   if (savedSignature === signature2) return result;
@@ -14078,7 +14080,7 @@ function collectTaskRefs(tables, input) {
     addAll(neededLocations, [rowId({ id: route.from_location_id }), rowId({ id: route.to_location_id })]);
     if (route.map_id) neededMaps.add(String(route.map_id));
   }
-  const readOne = (table, id) => tables.selectOne(table, branchId, id);
+  const readOne = (table, id2) => tables.selectOne(table, branchId, id2);
   const readWhere = (table, where) => pageWhereRows(tables, table, branchId, where);
   const ancestorVisited = /* @__PURE__ */ new Set();
   const pendingAncestors = [...neededLocations];
@@ -14095,8 +14097,8 @@ function collectTaskRefs(tables, input) {
     }
     if (input.includeAncestors && row3.map_id !== null && row3.map_id !== void 0) neededMaps.add(String(row3.map_id));
   }
-  for (const id of [...neededLocations]) {
-    const row3 = readOne("locations", id);
+  for (const id2 of [...neededLocations]) {
+    const row3 = readOne("locations", id2);
     if (!row3) continue;
     if (row3.map_id !== null && row3.map_id !== void 0) neededMaps.add(String(row3.map_id));
     if (input.includeAncestors && row3.parent_location_id !== null && row3.parent_location_id !== void 0) {
@@ -14116,8 +14118,8 @@ function collectTaskRefs(tables, input) {
   if (containerHosts.length > 0) {
     for (const row3 of readWhere("maps", { container_location_id: containerHosts })) addAll(extraMaps, [rowId(row3)]);
   }
-  for (const id of containerHosts) {
-    const row3 = readOne("locations", id);
+  for (const id2 of containerHosts) {
+    const row3 = readOne("locations", id2);
     const mapId = row3?.map_id;
     if (mapId !== null && mapId !== void 0) neededMaps.add(String(mapId));
   }
@@ -14125,10 +14127,10 @@ function collectTaskRefs(tables, input) {
     const seenRoutes = /* @__PURE__ */ new Set();
     for (const column of ["from_location_id", "to_location_id"]) {
       for (const row3 of readWhere("routes", { [column]: containerHosts })) {
-        const id = rowId(row3);
-        if (id === null || seenRoutes.has(id)) continue;
-        seenRoutes.add(id);
-        extraRoutes.add(id);
+        const id2 = rowId(row3);
+        if (id2 === null || seenRoutes.has(id2)) continue;
+        seenRoutes.add(id2);
+        extraRoutes.add(id2);
         addAll(extraLocations, [
           row3.from_location_id === null || row3.from_location_id === void 0 ? null : String(row3.from_location_id),
           row3.to_location_id === null || row3.to_location_id === void 0 ? null : String(row3.to_location_id)
@@ -14154,16 +14156,16 @@ function collectTaskRefs(tables, input) {
       const sink = table === "characters" ? extraCharacters : extraItems;
       if (hosts.length > 0) for (const row3 of readWhere(table, { location_id: hosts })) addAll(sink, [rowId(row3)]);
       if (selectedMaps.length > 0) for (const row3 of readWhere(table, { map_id: selectedMaps })) addAll(sink, [rowId(row3)]);
-      for (const id of [...sink]) {
-        const row3 = readOne(table, id);
+      for (const id2 of [...sink]) {
+        const row3 = readOne(table, id2);
         if (!row3) continue;
         if (row3.location_id !== null && row3.location_id !== void 0) extraLocations.add(String(row3.location_id));
         if (row3.map_id !== null && row3.map_id !== void 0) extraMaps.add(String(row3.map_id));
       }
     }
   }
-  for (const id of selectedLocations()) {
-    const row3 = readOne("locations", id);
+  for (const id2 of selectedLocations()) {
+    const row3 = readOne("locations", id2);
     const mapId = row3?.map_id;
     if (mapId !== null && mapId !== void 0) neededMaps.add(String(mapId));
   }
@@ -14196,15 +14198,15 @@ function collectTaskRefs(tables, input) {
   for (const { table } of REF_TABLES) {
     const bucket = buckets[table];
     if (!bucket) continue;
-    const extras = [...bucket.extra].filter((id) => !bucket.needed.has(id)).sort(byId3);
+    const extras = [...bucket.extra].filter((id2) => !bucket.needed.has(id2)).sort(byId3);
     const keptExtras = [];
-    for (const id of extras) {
+    for (const id2 of extras) {
       if (budget <= 0) {
-        remainingIds.push(id);
+        remainingIds.push(id2);
         truncated += 1;
         continue;
       }
-      keptExtras.push(id);
+      keptExtras.push(id2);
       budget -= 1;
     }
     extraByTable.set(table, keptExtras);
@@ -14213,15 +14215,15 @@ function collectTaskRefs(tables, input) {
   const knownRefs = [];
   for (const { table, prefix, kind } of REF_TABLES) {
     const ordered4 = [...neededByTable.get(table) ?? []];
-    for (const id of extraByTable.get(table) ?? []) if (!ordered4.includes(id)) ordered4.push(id);
+    for (const id2 of extraByTable.get(table) ?? []) if (!ordered4.includes(id2)) ordered4.push(id2);
     const tableRows = [];
     let ordinal = 0;
-    for (const id of ordered4) {
-      const row3 = readOne(table, id);
+    for (const id2 of ordered4) {
+      const row3 = readOne(table, id2);
       if (!row3) continue;
       ordinal += 1;
       tableRows.push(row3);
-      knownRefs.push({ alias: `${prefix}${ordinal}`, id, kind, rowRev: rowRev(row3) });
+      knownRefs.push({ alias: `${prefix}${ordinal}`, id: id2, kind, rowRev: rowRev(row3) });
     }
     rows4[table] = tableRows;
   }
@@ -14279,8 +14281,8 @@ var init_atlas_sql_task_refs = __esm({
     ];
     rowId = (row3) => {
       if (!row3) return null;
-      const id = row3.id;
-      return typeof id === "string" && id ? id : id === null || id === void 0 ? null : String(id);
+      const id2 = row3.id;
+      return typeof id2 === "string" && id2 ? id2 : id2 === null || id2 === void 0 ? null : String(id2);
     };
     rowRev = (row3) => typeof row3.row_rev === "number" ? row3.row_rev : null;
     byId3 = (left, right) => left < right ? -1 : left > right ? 1 : 0;
@@ -14461,7 +14463,7 @@ function planSettlementFacilities(input) {
   const purposes = pooledPurposes(canonical);
   const target2 = SCALE_FACILITY_TARGET[scaleClass];
   const slots = slotSequence(purposes, scaleClass, target2);
-  const districts = (Array.isArray(input?.districtIds) ? input.districtIds : []).map(text2).filter((id) => id.length > 0).sort(byString);
+  const districts = (Array.isArray(input?.districtIds) ? input.districtIds : []).map(text2).filter((id2) => id2.length > 0).sort(byString);
   const existing = (Array.isArray(input?.existingLocations) ? input.existingLocations : []).filter((location2) => text2(location2?.id).length > 0).slice().sort((left, right) => byString(text2(left.id), text2(right.id)));
   const consumed = /* @__PURE__ */ new Set();
   if (settlementId.length === 0) {
@@ -14589,7 +14591,7 @@ function resolveLocationDetailTier(input) {
   return {
     tier,
     reasonCodes: reasons,
-    evidenceFactIds: [...evidence].filter((id) => id.length > 0).sort(byString)
+    evidenceFactIds: [...evidence].filter((id2) => id2.length > 0).sort(byString)
   };
 }
 function computeSourceCoverage(input) {
@@ -14710,9 +14712,9 @@ function isLegalPlacementLocation(location2) {
 }
 function selectPlacementCandidates(input) {
   const skipped = [];
-  const placed = new Set((input?.placed ?? []).map((record3) => text2(record3?.characterId)).filter((id) => id !== ""));
+  const placed = new Set((input?.placed ?? []).map((record3) => text2(record3?.characterId)).filter((id2) => id2 !== ""));
   const inTransit = new Set(
-    (input?.openJourneys ?? []).filter((journey) => ["moving", "paused", "blocked"].includes(text2(journey?.status).toLowerCase())).map((journey) => text2(journey?.mover_entity_id)).filter((id) => id !== "")
+    (input?.openJourneys ?? []).filter((journey) => ["moving", "paused", "blocked"].includes(text2(journey?.status).toLowerCase())).map((journey) => text2(journey?.mover_entity_id)).filter((id2) => id2 !== "")
   );
   const characters = (Array.isArray(input?.characters) ? input.characters : []).filter((character) => Boolean(character) && typeof character === "object").slice().sort((left, right) => {
     const rank = roleRank(left.importance) - roleRank(right.importance);
@@ -15102,16 +15104,16 @@ function discoverTargets(input) {
       break;
     }
     for (const row3 of page) {
-      const id = str4(row3.id);
+      const id2 = str4(row3.id);
       scannedRows += 1;
       if (!isActiveLocation(row3)) continue;
       if (!isWantedTarget(input.tables, input.branchId, focusSet, maxDepth, row3)) continue;
-      seen.add(id);
-      const previous = existing.get(id) ?? null;
+      seen.add(id2);
+      const previous = existing.get(id2) ?? null;
       if (needsEnqueue(previous, targetSignature(row3))) {
-        enqueueIds.push(id);
+        enqueueIds.push(id2);
       } else {
-        unchangedIds.push(id);
+        unchangedIds.push(id2);
       }
     }
     const last = page[page.length - 1];
@@ -15217,7 +15219,7 @@ function targetRowMutation(ctx, scopeKey3, before, locationId, signature2, statu
     { inputSignature: signature2, status, payload, ...lastServedSeq === void 0 ? {} : { lastServedSeq } }
   );
 }
-function unitRowMutation(ctx, scopeKey3, before, id, fields) {
+function unitRowMutation(ctx, scopeKey3, before, id2, fields) {
   const payload = {
     version: CONSTRUCTION_PAYLOAD_VERSION,
     targetIds: uniqueSorted(fields.targetIds).slice(0, UNIT_TARGET_LIMIT),
@@ -15227,13 +15229,13 @@ function unitRowMutation(ctx, scopeKey3, before, id, fields) {
   };
   if (fields.failureCode) payload.failureCode = fields.failureCode;
   if (fields.exhausted) payload.exhausted = true;
-  const bindings = Object.entries(fields.bindings ?? {}).filter(([alias, id2]) => alias.length > 0 && id2.length > 0);
+  const bindings = Object.entries(fields.bindings ?? {}).filter(([alias, id3]) => alias.length > 0 && id3.length > 0);
   if (bindings.length > 0) {
-    payload.bindings = Object.fromEntries(bindings.slice(0, 256).map(([alias, id2]) => [alias.slice(0, 128), String(id2).slice(0, 128)]));
+    payload.bindings = Object.fromEntries(bindings.slice(0, 256).map(([alias, id3]) => [alias.slice(0, 128), String(id3).slice(0, 128)]));
   }
   return progressRowMutation(
     ctx,
-    { id, scopeKey: scopeKey3, kind: "unit", subjectKey: id },
+    { id: id2, scopeKey: scopeKey3, kind: "unit", subjectKey: id2 },
     before,
     { inputSignature: fields.inputSignature, status: fields.status, lastServedSeq: fields.lastServedSeq, payload }
   );
@@ -15292,9 +15294,9 @@ function asStringArray2(value) {
 function asBindingMap(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
   const out = {};
-  for (const [alias, id] of Object.entries(value)) {
+  for (const [alias, id2] of Object.entries(value)) {
     const key = String(alias);
-    const target2 = String(id ?? "");
+    const target2 = String(id2 ?? "");
     if (key.length > 0 && target2.length > 0) out[key] = target2;
   }
   return out;
@@ -15366,13 +15368,13 @@ function planNextUnits(rows4, limit = 1, schedulerSeq = 0) {
 }
 function claimedTargets(units) {
   const claimed = /* @__PURE__ */ new Set();
-  for (const unit of units) for (const id of unit.targetIds) claimed.add(id);
+  for (const unit of units) for (const id2 of unit.targetIds) claimed.add(id2);
   return claimed;
 }
 function allocateTargets(input) {
   if (input.chosen) return { targetIds: [...input.chosen.targetIds], sourceChunkKeys: [...input.chosen.sourceChunkKeys], existingUnitId: input.chosen.unitId };
   const claimed = claimedTargets(input.existingUnits);
-  const targetIds = [...new Set(input.pendingTargetIds)].filter((id) => !claimed.has(id)).slice(0, UNIT_TARGET_LIMIT);
+  const targetIds = [...new Set(input.pendingTargetIds)].filter((id2) => !claimed.has(id2)).slice(0, UNIT_TARGET_LIMIT);
   return { targetIds, sourceChunkKeys: [], existingUnitId: null };
 }
 function planNextAllocation(rows4, pendingTargetIds, schedulerSeq) {
@@ -15472,7 +15474,7 @@ function decodeWorldBuildJob(value) {
   const root = rootOf(value, ctx, "job");
   if (!root) return { ok: false, issues: ctx.issues };
   ctx.version(root, "job", WORLD_BUILD_JOB_PAYLOAD_VERSION);
-  const id = ctx.requiredString(root, "id", "job");
+  const id2 = ctx.requiredString(root, "id", "job");
   const branchId = ctx.requiredString(root, "branchId", "job");
   const kind = ctx.enumValue(root, "kind", "job", WORLD_BUILD_JOB_KINDS);
   const status = ctx.enumValue(root, "status", "job", WORLD_BUILD_JOB_STATUSES);
@@ -15488,7 +15490,7 @@ function decodeWorldBuildJob(value) {
   if (ctx.issues.length > 0) return { ok: false, issues: ctx.issues };
   const job = {
     version: WORLD_BUILD_JOB_PAYLOAD_VERSION,
-    id,
+    id: id2,
     branchId,
     kind,
     status,
@@ -15523,7 +15525,7 @@ function decodeWorldBuildTarget(value) {
   const root = rootOf(value, ctx, "target");
   if (!root) return { ok: false, issues: ctx.issues };
   ctx.version(root, "target", WORLD_BUILD_TARGET_PAYLOAD_VERSION);
-  const id = ctx.requiredString(root, "id", "target");
+  const id2 = ctx.requiredString(root, "id", "target");
   const jobId = ctx.requiredString(root, "jobId", "target");
   const subjectId = ctx.nullableString(root, "subjectId", "target");
   const workKind = ctx.enumValue(root, "workKind", "target", WORLD_BUILD_WORK_KINDS);
@@ -15540,7 +15542,7 @@ function decodeWorldBuildTarget(value) {
   if (ctx.issues.length > 0) return { ok: false, issues: ctx.issues };
   const target2 = {
     version: WORLD_BUILD_TARGET_PAYLOAD_VERSION,
-    id,
+    id: id2,
     jobId,
     subjectId,
     workKind,
@@ -15792,7 +15794,7 @@ function decodeWorldFact(value) {
     }
     return item;
   };
-  const id = readString("id");
+  const id2 = readString("id");
   const subjectId = readString("subjectId");
   const predicate = readEnum("predicate", WORLD_FACT_PREDICATES);
   const layer = readEnum("layer", WORLD_FACT_LAYERS);
@@ -15840,7 +15842,7 @@ function decodeWorldFact(value) {
     ok: true,
     value: {
       version: 1,
-      id,
+      id: id2,
       subjectId,
       predicate,
       layer,
@@ -16527,10 +16529,10 @@ function buildBlocked(targetId, code, dependencyId, message) {
 }
 function initializationBarrier(input) {
   if (input.job.kind === "initialize") return null;
-  const active = (input.otherJobs ?? []).find(
+  const active2 = (input.otherJobs ?? []).find(
     (job) => job.id !== input.job.id && job.kind === "initialize" && (job.status === "pending" || job.status === "running")
   );
-  return active ?? null;
+  return active2 ?? null;
 }
 function layerOf(target2) {
   return WORLD_BUILD_WORK_LAYERS[target2.workKind] ?? 99;
@@ -16567,7 +16569,7 @@ function selectNextBuildUnits(input) {
     if (target2.status === "failed" && input.job.kind !== "retry-failed") {
       continue;
     }
-    const dependencies = (target2.dependencyIds ?? []).map((id) => byId9.get(id)).filter((dep) => Boolean(dep));
+    const dependencies = (target2.dependencyIds ?? []).map((id2) => byId9.get(id2)).filter((dep) => Boolean(dep));
     const failed = dependencies.find((dep) => dep.status === "failed" || dep.status === "blocked");
     if (failed) {
       blocked.push(buildBlocked(
@@ -16793,6 +16795,22 @@ var init_atlas_prompt_layers = __esm({
 });
 
 // src/atlas-spatial-planning.ts
+function plannedSceneLocationIds(drafts, refs) {
+  const scope = createRefScope(refs.flatMap((ref2) => [ref2, { ...ref2, alias: ref2.id }])), ids2 = /* @__PURE__ */ new Set();
+  for (const draft of drafts) {
+    const data = draft.data ?? {}, spec = data.spec;
+    if (draft.op !== "map.layout.request" || typeof data.container_ref !== "string" || !spec || typeof spec !== "object" || Array.isArray(spec)) continue;
+    const s = spec;
+    if (!resolveLayoutSpecRefs(s, scope).ok) continue;
+    const spaces = ["rooms", "zones", "districts", "buildings"].flatMap((k) => Array.isArray(s[k]) ? s[k] : []);
+    if (spaces.some((r) => !r || typeof r.id !== "string" || !resolveRef(r.id, "location", scope).entry)) continue;
+    const geometry = data.kind === "floor" ? Array.isArray(s.rooms) && s.rooms.some((r) => r && typeof r === "object" && Number.isFinite(r.w) && r.w > 0 && Number.isFinite(r.h) && r.h > 0) : ["zones", "districts", "buildings", "features", "links"].some((k) => Array.isArray(s[k]) && s[k].length > 0);
+    if (!geometry) continue;
+    const ref2 = resolveRef(data.container_ref, "location", scope);
+    if (ref2.entry) ids2.add(ref2.entry.id);
+  }
+  return [...ids2].sort();
+}
 function append(request, system, content) {
   const messages = request.messages.map((message) => ({ ...message }));
   messages[0].content += "\n" + system;
@@ -16816,7 +16834,7 @@ function withOriginalSpatialSources(request, sources) {
 function combineSpatialRequest(request, layout) {
   const result = append(
     request,
-    "本次同时完成地理结构与布局规划，只输出本次允许的JSONL操作。先声明地点/路线/尺寸，再输出map.layout.request；不用另等一轮模型。已有几何、确认尺寸和锁定事实保持。",
+    "本次同时完成地理结构与布局规划，只输出本次允许的JSONL操作。先声明地点/路线/尺寸，再输出map.layout.request；不用另等一轮模型。已有几何、确认尺寸和锁定事实保持。只有外观、招牌、路过或远望且内部未定义的地点，只在父图留标记，不提交其内部布局。NPC实际所在地点、明确进入的地点、已有房间关系或内部尺寸陈设的地点照常直接规划布局；不能因主角没进入而推迟NPC或明确内部的布局。禁止为外观地点凭空补房间来获得子图。",
     '【合批布局协议】已有地图用ref；本批新地点或尚无地图的容器，用data.container_ref指向该地点的现有引用或同批new:引用，省略ref。地点引用不能写进地图ref。程序先保存合法实体并建立容器图，再解析这些布局草案；声明失败的依赖不能使用。容器region/natural/other用overview，city/district用city，building/floor/room/vehicle用floor。新增房间的父图与子图分别给约束，复用同一地点引用与尺寸；未知内部不造房间。不输出完整scene或几何坐标。\n引用方式示例（不登记示例地点，尺寸使用真实资料）：{"op":"map.layout.request","data":{"container_ref":"new:room","kind":"floor","spec":{"rooms":[{"id":"new:room","w":3,"h":3}]}}}；该new:room必须由同批location.upsert合法声明。\n【本批已有地图的布局目录与约束；目录引用全部是稳定ID】\n' + (layout?.request.messages[1].content ?? "当前无待更新的已有地图；本批新增结构需要布局时使用container_ref。")
   );
   return { ...result, allowedOps: COMBINED_SPATIAL_OPS };
@@ -16970,28 +16988,28 @@ function resolveSpatialProfile(input) {
   const members = Array.isArray(input.members) ? input.members.filter(PLAIN) : [];
   const routes = Array.isArray(input.routes) ? input.routes.filter(PLAIN) : [];
   const unsupported = [];
-  const pushUnsupported = (id, kind, reason) => {
-    if (!id) return;
-    unsupported.push({ id, kind, reason });
+  const pushUnsupported = (id2, kind, reason) => {
+    if (!id2) return;
+    unsupported.push({ id: id2, kind, reason });
   };
   const INDOOR_KINDS = /* @__PURE__ */ new Set(["room", "floor", "vehicle"]);
   const OUTDOOR_KINDS = /* @__PURE__ */ new Set(["region", "natural", "other", "city", "district"]);
   const functionalIds = new Set(functionalAreaMembers(input.container, members, input.maps ?? []).map((member) => member.id));
   for (const member of members) {
-    const id = String(member.id ?? "");
+    const id2 = String(member.id ?? "");
     const kind = TEXT(member.kind);
     if (!kind) continue;
     if (kind === "vehicle" && member.mobility === "mobile" && asId2(member.anchor_location_id)) continue;
     if (kind === "floor" && (chosen.mode === "interior" || chosen.mode === "compound")) {
-      pushUnsupported(id, kind, "楼层由独立楼层入口展示，不作为同层平面房间或室外足迹");
+      pushUnsupported(id2, kind, "楼层由独立楼层入口展示，不作为同层平面房间或室外足迹");
     } else if (chosen.mode === "outdoor" && INDOOR_KINDS.has(kind)) {
-      pushUnsupported(id, kind, "室外档案不生成匿名室内房间：等该地点自己的室内图");
+      pushUnsupported(id2, kind, "室外档案不生成匿名室内房间：等该地点自己的室内图");
     } else if (chosen.mode === "interior" && OUTDOOR_KINDS.has(kind) && !functionalIds.has(member.id)) {
-      pushUnsupported(id, kind, "室内档案不把明确室外的成员塞进普通房间：它需要自己的室外/复合图");
+      pushUnsupported(id2, kind, "室内档案不把明确室外的成员塞进普通房间：它需要自己的室外/复合图");
     } else if (chosen.mode === "compound" && kind === "room") {
-      pushUnsupported(id, kind, "复合档案只画真实建筑足迹：房间留给建筑自己的室内图");
+      pushUnsupported(id2, kind, "复合档案只画真实建筑足迹：房间留给建筑自己的室内图");
     } else if (chosen.mode === "unknown" && INDOOR_KINDS.has(kind)) {
-      pushUnsupported(id, kind, "待确认场所只做中性示意：不把室内房间画进概览");
+      pushUnsupported(id2, kind, "待确认场所只做中性示意：不把室内房间画进概览");
     }
   }
   if (chosen.mode === "linear" && routes.length === 0) {
@@ -17273,18 +17291,18 @@ function computeMapLayoutSignatures(tables, branchId) {
 }
 function deriveLayoutSites(tables, branchId) {
   const issues = [];
-  const active = (table) => pageAllRows(tables, table, branchId).filter((row3) => row3.status === "active");
-  const locations = active("locations");
-  const characters = active("characters");
-  const items = active("items");
-  const maps = active("maps");
+  const active2 = (table) => pageAllRows(tables, table, branchId).filter((row3) => row3.status === "active");
+  const locations = active2("locations");
+  const characters = active2("characters");
+  const items = active2("items");
+  const maps = active2("maps");
   const routes = pageAllRows(tables, "routes", branchId);
   const locationById = /* @__PURE__ */ new Map();
   for (const row3 of locations) {
-    const id = asId3(row3.id);
-    if (id) locationById.set(id, row3);
+    const id2 = asId3(row3.id);
+    if (id2) locationById.set(id2, row3);
   }
-  const parentOf = (id) => asId3(locationById.get(id)?.parent_location_id);
+  const parentOf = (id2) => asId3(locationById.get(id2)?.parent_location_id);
   const entries = [];
   for (const map of maps) {
     const mapId = asId3(map.id);
@@ -17380,11 +17398,11 @@ function deriveLayoutSites(tables, branchId) {
       remaining.delete(queue[0]);
       let width = 0;
       for (let i = 0; i < queue.length; i++) {
-        const id = queue[i];
-        width += sizes[members.findIndex((row3) => String(row3.id) === id)][0];
+        const id2 = queue[i];
+        width += sizes[members.findIndex((row3) => String(row3.id) === id2)][0];
         for (const route of routes) {
           if (route.status === "closed" || route.map_id !== entry.mapId) continue;
-          const other = route.from_location_id === id ? route.to_location_id : route.to_location_id === id ? route.from_location_id : null;
+          const other = route.from_location_id === id2 ? route.to_location_id : route.to_location_id === id2 ? route.from_location_id : null;
           if (typeof other === "string" && remaining.delete(other)) queue.push(other);
         }
       }
@@ -17399,9 +17417,9 @@ function deriveLayoutSites(tables, branchId) {
     if (child.kind !== "floor" || child.spaceSize?.resolution.source !== "first-estimate" || finite3(child.map.meters_per_cell) && child.map.meters_per_cell > 0 || child.map.scale_locked || hasScene(child.map)) continue;
     const parent = entries.find((entry) => entry.mapId === child.container?.map_id && entry.kind === "floor");
     if (!parent || !child.container) continue;
-    const planned = baselineFloorRooms(parent.own, parent.extent, (id) => String(id), (id) => {
-      const known = locationSpaceSize({ maps, locations, locationId: id, branchId });
-      const nested = entries.find((entry) => entry.kind === "floor" && entry.container?.id === id && entry.own.length > 0);
+    const planned = baselineFloorRooms(parent.own, parent.extent, (id2) => String(id2), (id2) => {
+      const known = locationSpaceSize({ maps, locations, locationId: id2, branchId });
+      const nested = entries.find((entry) => entry.kind === "floor" && entry.container?.id === id2 && entry.own.length > 0);
       return known ?? (nested ? { widthM: nested.extent.width, heightM: nested.extent.height } : null);
     });
     const footprint = planned.find((room) => room.id === child.container.id);
@@ -17452,13 +17470,13 @@ function buildSqlLayoutTask(db, branchId, input, turnId, report, options) {
   }
   const entryByMap = new Map(entries.map((entry) => [entry.mapId, entry]));
   const parentEntry = (entry) => {
-    let id = asId3(entry.container?.parent_location_id);
+    let id2 = asId3(entry.container?.parent_location_id);
     const seen = /* @__PURE__ */ new Set();
-    while (id && !seen.has(id)) {
-      seen.add(id);
-      const parent = mapByContainer.get(id);
+    while (id2 && !seen.has(id2)) {
+      seen.add(id2);
+      const parent = mapByContainer.get(id2);
       if (parent && parent !== entry) return parent;
-      id = parentOf(id);
+      id2 = parentOf(id2);
     }
     const outer = entryByMap.get(String(entry.container?.map_id ?? ""));
     return outer !== entry ? outer : void 0;
@@ -17475,23 +17493,24 @@ function buildSqlLayoutTask(db, branchId, input, turnId, report, options) {
   };
   let chosen = [];
   if (input.layoutMaps === "active") {
-    const occupied = uniqueSorted2(characters.map((row3) => asId3(row3.location_id)).filter((id) => id !== null));
+    const occupied = uniqueSorted2(characters.map((row3) => asId3(row3.location_id)).filter((id2) => id2 !== null));
     const occupiedSet = new Set(occupied);
     const activePath = /* @__PURE__ */ new Set();
-    for (const locationId of occupied) {
-      let id = locationId;
+    const eager = new Set(options?.eagerLocationIds ?? []);
+    for (const locationId of [...occupied, ...eager]) {
+      let id2 = locationId;
       const seen = /* @__PURE__ */ new Set();
-      while (id && !seen.has(id)) {
-        seen.add(id);
-        const entry = mapByContainer.get(id);
+      while (id2 && !seen.has(id2)) {
+        seen.add(id2);
+        const entry = mapByContainer.get(id2);
         if (entry) activePath.add(entry.mapId);
-        id = parentOf(id);
+        id2 = parentOf(id2);
       }
     }
-    chosen = entries.filter((entry) => activePath.has(entry.mapId) ? occupiedSet.has(String(entry.container?.id)) || entry.own.length > 0 && (entry.kind !== "overview" || entry.own.length > 1) : entry.container === null && entry.own.length > 1);
+    chosen = entries.filter((entry) => activePath.has(entry.mapId) ? occupiedSet.has(String(entry.container?.id)) || eager.has(String(entry.container?.id)) || entry.own.length > 0 && (entry.kind !== "overview" || entry.own.length > 1) : entry.container === null && entry.own.length > 1);
     chosen.sort((a, b) => depth(a) - depth(b) || byId6(a.mapId, b.mapId));
   } else if (Array.isArray(input.layoutMaps)) {
-    const requested = input.layoutMaps.map((id) => String(id));
+    const requested = input.layoutMaps.map((id2) => String(id2));
     chosen = entries.filter((entry) => requested.includes(entry.mapId)).sort((a, b) => depth(a) - depth(b) || requested.indexOf(a.mapId) - requested.indexOf(b.mapId));
   }
   if (chosen.length === 0) return null;
@@ -17535,8 +17554,8 @@ function buildSqlLayoutTask(db, branchId, input, turnId, report, options) {
     const containerId = asId3(entry.map.container_location_id);
     if (containerId) focusLocations.push(containerId);
     for (const row3 of entry.own) {
-      const id = asId3(row3.id);
-      if (id) focusLocations.push(id);
+      const id2 = asId3(row3.id);
+      if (id2) focusLocations.push(id2);
     }
   }
   const catalogue = collectTaskRefs(tables, {
@@ -17553,7 +17572,7 @@ function buildSqlLayoutTask(db, branchId, input, turnId, report, options) {
     requiredRefs: input.requiredRefs
   });
   if (options?.canonicalRefs) for (const entry of catalogue.knownRefs) entry.alias = entry.id;
-  const ref2 = (id) => catalogue.knownRefs.find((item) => item.id === id)?.alias;
+  const ref2 = (id2) => catalogue.knownRefs.find((item) => item.id === id2)?.alias;
   if (catalogue.requiredBudgetExceeded) {
     report?.issues.push(...catalogue.issues.filter((item) => item.code === "REF_REQUIRED_BUDGET_EXCEEDED"));
     return null;
@@ -17578,22 +17597,22 @@ function buildSqlLayoutTask(db, branchId, input, turnId, report, options) {
       w: entry.spaceSize ? entry.spaceSize.resolution.widthM : entry.extent.width,
       h: entry.spaceSize ? entry.spaceSize.resolution.heightM : entry.extent.height,
       side: "north"
-    }] : entry.kind === "floor" ? baselineFloorRooms(entry.own, entry.extent, ref2, (id) => {
-      const known = locationSpaceSize({ maps: derived.maps, locations: derived.locations, locationId: id, branchId }) ?? derived.entries.find((e) => e.container?.id === id && e.kind === "floor")?.spaceSize?.resolution;
+    }] : entry.kind === "floor" ? baselineFloorRooms(entry.own, entry.extent, ref2, (id2) => {
+      const known = locationSpaceSize({ maps: derived.maps, locations: derived.locations, locationId: id2, branchId }) ?? derived.entries.find((e) => e.container?.id === id2 && e.kind === "floor")?.spaceSize?.resolution;
       return known ? { widthM: known.widthM, heightM: known.heightM } : null;
     }) : [];
     const local = entry.standalone && container ? [container] : container?.kind === "room" ? [container, ...entry.own] : entry.own;
     const localIds = new Set(local.map((row3) => String(row3.id)));
     const functionalAreas = entry.kind === "floor" ? functionalAreaMembers(container, entry.own, derived.maps) : [];
     for (const area of functionalAreas) localIds.add(String(area.id));
-    const physicalRoom = (id) => functionalAreas.some((area) => area.id === id) ? container?.id : id;
+    const physicalRoom = (id2) => functionalAreas.some((area) => area.id === id2) ? container?.id : id2;
     const childSpaces = entry.own.filter((row3) => !(container?.kind === "room" && row3.kind === "other")).map((row3) => {
-      const id = asId3(row3.id);
-      if (!id) return null;
-      const planned = derived.entries.find((e) => e.container?.id === id && e.kind === "floor")?.spaceSize?.resolution;
-      const known = locationSpaceSize({ maps: derived.maps, locations: derived.locations, locationId: id, branchId }) ?? (planned ? { widthM: planned.widthM, heightM: planned.heightM, source: "first-estimate", referenceId: id } : null);
-      const holder = derived.maps.find((map) => map.container_location_id === id && map.status === "active");
-      const canonicalRead = holder ? readSpaceCanonical2(holder.frame_json, id) : null;
+      const id2 = asId3(row3.id);
+      if (!id2) return null;
+      const planned = derived.entries.find((e) => e.container?.id === id2 && e.kind === "floor")?.spaceSize?.resolution;
+      const known = locationSpaceSize({ maps: derived.maps, locations: derived.locations, locationId: id2, branchId }) ?? (planned ? { widthM: planned.widthM, heightM: planned.heightM, source: "first-estimate", referenceId: id2 } : null);
+      const holder = derived.maps.find((map) => map.container_location_id === id2 && map.status === "active");
+      const canonicalRead = holder ? readSpaceCanonical2(holder.frame_json, id2) : null;
       const canonical = canonicalRead?.ok && !canonicalRead.deferred ? canonicalRead.canonical : null;
       const furnishing = (canonical?.furnishing ?? []).map((item) => ({
         id: item.localId,
@@ -17603,8 +17622,8 @@ function buildSqlLayoutTask(db, branchId, input, turnId, report, options) {
         h: item.heightM,
         ...item.itemId ? { item: ref2(item.itemId) } : {}
       }));
-      const nested = derived.locations.some((location2) => location2.parent_location_id === id && location2.status === "active" && (row3.kind !== "room" || location2.kind !== "other"));
-      return known ? { ref: ref2(id), name: row3.name, w: known.widthM, h: known.heightM, source: known.source, referenceId: known.referenceId, detailScope: nested ? "descendants" : "self", furnishing } : null;
+      const nested = derived.locations.some((location2) => location2.parent_location_id === id2 && location2.status === "active" && (row3.kind !== "room" || location2.kind !== "other"));
+      return known ? { ref: ref2(id2), name: row3.name, w: known.widthM, h: known.heightM, source: known.source, referenceId: known.referenceId, detailScope: nested ? "descendants" : "self", furnishing } : null;
     }).filter((item) => item !== null);
     const drawnParent = container ? derived.entries.find((e) => e.mapId === container.map_id) : null;
     const parentFrame = drawnParent ? normalizeFrame(drawnParent.map.frame_json) : null;
@@ -18844,19 +18863,19 @@ function worldCandidates(world3, skipped) {
   const archiveNames = /* @__PURE__ */ new Map();
   for (const entry of Array.isArray(world3.characters) ? world3.characters : []) {
     if (!isPlainObject7(entry)) continue;
-    const id = str5(entry.id);
-    if (id.length === 0) continue;
-    archiveNames.set(id, { name: str5(entry.name), description: str5(entry.description), role: str5(entry.role) });
+    const id2 = str5(entry.id);
+    if (id2.length === 0) continue;
+    archiveNames.set(id2, { name: str5(entry.name), description: str5(entry.description), role: str5(entry.role) });
   }
   const records = Array.isArray(world3.entityRecords) ? world3.entityRecords : [];
   for (const record3 of records) {
     if (!isPlainObject7(record3)) continue;
-    const id = str5(record3.id);
-    if (id.length === 0) continue;
+    const id2 = str5(record3.id);
+    if (id2.length === 0) continue;
     const type = str5(record3.type).toLowerCase();
     if (isCharacterType(type)) {
       const baseline = isPlainObject7(record3.baseline) ? record3.baseline : {};
-      archiveNames.set(id, { name: str5(record3.name), description: str5(baseline.description ?? baseline.summary), role: str5(baseline.role ?? archiveNames.get(id)?.role) });
+      archiveNames.set(id2, { name: str5(record3.name), description: str5(baseline.description ?? baseline.summary), role: str5(baseline.role ?? archiveNames.get(id2)?.role) });
     }
   }
   const states = Array.isArray(world3.characterStates) ? world3.characterStates : [];
@@ -18891,14 +18910,14 @@ function worldCandidates(world3, skipped) {
     });
   });
   let archiveIndex = 0;
-  for (const [id, archive] of [...archiveNames.entries()].sort((a, b) => a[0] < b[0] ? -1 : 1)) {
-    if (seenCharacters.has(id)) continue;
+  for (const [id2, archive] of [...archiveNames.entries()].sort((a, b) => a[0] < b[0] ? -1 : 1)) {
+    if (seenCharacters.has(id2)) continue;
     characters.push({
       kind: "character",
-      legacyId: `npc:${id}`,
+      legacyId: `npc:${id2}`,
       index: archiveIndex,
       origin: "$.world.characters",
-      raw: { id: `npc:${id}`, name: archive.name || id, description: archive.description, role: archive.role, locationId: null }
+      raw: { id: `npc:${id2}`, name: archive.name || id2, description: archive.description, role: archive.role, locationId: null }
     });
     archiveIndex += 1;
   }
@@ -18908,8 +18927,8 @@ function worldCandidates(world3, skipped) {
       skipped.push({ kind: "item", legacyId: "", reason: "WORLD_ENTITY_NOT_OBJECT" });
       continue;
     }
-    const id = str5(record3.id);
-    if (id.length === 0) {
+    const id2 = str5(record3.id);
+    if (id2.length === 0) {
       skipped.push({ kind: "item", legacyId: "", reason: "WORLD_ENTITY_ID_MISSING" });
       continue;
     }
@@ -18920,12 +18939,12 @@ function worldCandidates(world3, skipped) {
     const pointId = anchor ? str5(anchor.pointId) : "";
     items.push({
       kind: "item",
-      legacyId: `item:${id}`,
+      legacyId: `item:${id2}`,
       index: itemIndex,
       origin: `$.world.entityRecords[${itemIndex}]`,
       raw: {
-        id: `item:${id}`,
-        name: str5(record3.name) || id,
+        id: `item:${id2}`,
+        name: str5(record3.name) || id2,
         description: str5(baseline.description ?? baseline.summary),
         status: str5(baseline.status),
         holderCharacterId: str5(baseline.holderCharacterId ?? baseline.holder ?? baseline.owner) || null,
@@ -18998,14 +19017,14 @@ function collectEntityCandidates(raw, branchId) {
     records.forEach((record3, index) => {
       if (!isPlainObject7(record3)) return;
       if (!isFactionType(str5(record3.type).toLowerCase())) return;
-      const id = str5(record3.id);
+      const id2 = str5(record3.id);
       const baseline = isPlainObject7(record3.baseline) ? record3.baseline : {};
       factions.push({
         kind: "faction",
-        legacyId: id,
+        legacyId: id2,
         index,
         origin: `$.world.entityRecords[${index}]`,
-        raw: { id, name: str5(record3.name) || id, description: str5(baseline.description ?? baseline.summary) }
+        raw: { id: id2, name: str5(record3.name) || id2, description: str5(baseline.description ?? baseline.summary) }
       });
     });
   }
@@ -19291,9 +19310,9 @@ function mapRelationKind(value) {
   };
   return aliases[key] ?? "other";
 }
-function rowExists(db, table, branchId, id) {
-  if (id.length === 0) return false;
-  const rows4 = queryBound(db, `SELECT 1 AS present FROM ${table} WHERE branch_id = ? AND id = ? LIMIT 1`, [branchId, id]);
+function rowExists(db, table, branchId, id2) {
+  if (id2.length === 0) return false;
+  const rows4 = queryBound(db, `SELECT 1 AS present FROM ${table} WHERE branch_id = ? AND id = ? LIMIT 1`, [branchId, id2]);
   return rows4.length > 0;
 }
 function insertRow(db, table, input, ctx) {
@@ -19307,8 +19326,8 @@ function insertRow(db, table, input, ctx) {
   }
   runBound(db, buildInsertSql(table, encoded.columns), encoded.values);
 }
-function insertEntityKey(db, branchId, id, kind) {
-  const encoded = encodePartialRow("entity_keys", { branch_id: branchId, id, kind });
+function insertEntityKey(db, branchId, id2, kind) {
+  const encoded = encodePartialRow("entity_keys", { branch_id: branchId, id: id2, kind });
   if (!encoded.ok) {
     throw new AtlasDbError("CODEC_ENCODE_FAILED", `entity_keys 编码失败：${encoded.issues.map((i) => i.path).join(", ")}`, {
       issues: encoded.issues
@@ -19354,9 +19373,9 @@ function resolveMapRef(db, ctx, state, legacyMapId, mapsDoc, locationById) {
   if (cached !== void 0) return cached;
   const existing = queryOne(db, "SELECT id FROM maps WHERE branch_id = ? AND id = ? LIMIT 1", [ctx.branchId, legacyMapId]);
   if (existing) {
-    const id = String(existing.id);
-    state.cache.set(legacyMapId, id);
-    return id;
+    const id2 = String(existing.id);
+    state.cache.set(legacyMapId, id2);
+    return id2;
   }
   const frame = mapsFrame(mapsDoc, legacyMapId);
   const calibration = mapsCalibration(mapsDoc, legacyMapId);
@@ -19367,9 +19386,9 @@ function resolveMapRef(db, ctx, state, legacyMapId, mapsDoc, locationById) {
       [ctx.branchId]
     );
     if (root) {
-      const id = String(root.id);
-      state.cache.set(legacyMapId, id);
-      return id;
+      const id2 = String(root.id);
+      state.cache.set(legacyMapId, id2);
+      return id2;
     }
     if (rowExists(db, "maps", ctx.branchId, LEGACY_WORLD_MAP_ID)) {
       state.cache.set(legacyMapId, LEGACY_WORLD_MAP_ID);
@@ -19416,9 +19435,9 @@ function resolveMapRef(db, ctx, state, legacyMapId, mapsDoc, locationById) {
         [ctx.branchId, legacyMapId]
       );
       if (existingContainer) {
-        const id = String(existingContainer.id);
-        state.cache.set(legacyMapId, id);
-        return id;
+        const id2 = String(existingContainer.id);
+        state.cache.set(legacyMapId, id2);
+        return id2;
       }
       const mapId = ctx.makeId("map", "migration.container_map", `${ctx.branchId}:${legacyMapId}`);
       const created = withSavepoint(db, () => {
@@ -19651,20 +19670,20 @@ function migrateLegacyEntities(plan, raw, db, ctx) {
         issues.push(describeProblem(candidate.origin, `旧地点缺少名称：不编造地名，保留在 skipped`, "LEGACY_NAME_MISSING"));
         continue;
       }
-      const id = resolveCandidateId(candidate, ctx, issues);
+      const id2 = resolveCandidateId(candidate, ctx, issues);
       const kind = mapLocationKind(candidate.raw.kind ?? candidate.raw.type);
       if (candidate.legacyId.length > 0) locationById.set(candidate.legacyId, { name, kind });
-      locationById.set(id, { name, kind });
-      if (rowExists(db, "locations", ctx.branchId, id)) {
+      locationById.set(id2, { name, kind });
+      if (rowExists(db, "locations", ctx.branchId, id2)) {
         bump(mapped, "kind:alreadyImported");
-        issues.push(describeProblem(candidate.origin, `旧地点 ${candidate.legacyId || id} 已经在库里，跳过重复导入`, "ALREADY_IMPORTED"));
-        legacyToSql.set(candidate.legacyId, id);
+        issues.push(describeProblem(candidate.origin, `旧地点 ${candidate.legacyId || id2} 已经在库里，跳过重复导入`, "ALREADY_IMPORTED"));
+        legacyToSql.set(candidate.legacyId, id2);
         continue;
       }
-      const keyKind = checkEntityKey(db, ctx.branchId, id, "location");
+      const keyKind = checkEntityKey(db, ctx.branchId, id2, "location");
       if (keyKind !== null) {
         skipped.push({ kind: "location", legacyId: candidate.legacyId, reason: keyKind });
-        issues.push(issue10("ENTITY_KEY_KIND_CONFLICT", candidate.origin, `entity_keys 里 ${id} 已是 ${keyKind}，不能同时是地点`, "error", false));
+        issues.push(issue10("ENTITY_KEY_KIND_CONFLICT", candidate.origin, `entity_keys 里 ${id2} 已是 ${keyKind}，不能同时是地点`, "error", false));
         continue;
       }
       const parentLegacyId = str5(candidate.raw.parentLocationId ?? candidate.raw.parentRef ?? candidate.raw.parentId);
@@ -19674,7 +19693,7 @@ function migrateLegacyEntities(plan, raw, db, ctx) {
       const gridY = num3(candidate.raw.gridY ?? candidate.raw.y);
       const hasGrid = mapId !== null && gridX !== null && gridY !== null;
       const created = withSavepoint(db, () => {
-        insertEntityKey(db, ctx.branchId, id, "location");
+        insertEntityKey(db, ctx.branchId, id2, "location");
         insertRow(
           db,
           "locations",
@@ -19693,7 +19712,7 @@ function migrateLegacyEntities(plan, raw, db, ctx) {
             existence_quality: "confirmed",
             status: mapLocationStatus(candidate.raw.status)
           },
-          { ...rowCtx, id }
+          { ...rowCtx, id: id2 }
         );
       });
       if (!created.ok) {
@@ -19710,11 +19729,11 @@ function migrateLegacyEntities(plan, raw, db, ctx) {
           )
         );
       }
-      parentLinks.push({ id, parentLegacyId, origin: candidate.origin, name });
-      legacyToSql.set(candidate.legacyId, id);
+      parentLinks.push({ id: id2, parentLegacyId, origin: candidate.origin, name });
+      legacyToSql.set(candidate.legacyId, id2);
       bump(mapped, "kind:locations");
       bump(mapped, "kind:entityKeys");
-      mapped[`legacy:${candidate.legacyId || id}`] = mapped["kind:locations"] ?? 1;
+      mapped[`legacy:${candidate.legacyId || id2}`] = mapped["kind:locations"] ?? 1;
     }
     for (const link of parentLinks) {
       if (!link.parentLegacyId) continue;
@@ -19726,11 +19745,11 @@ function migrateLegacyEntities(plan, raw, db, ctx) {
       runBound(db, "UPDATE locations SET parent_location_id=? WHERE branch_id=? AND id=?", [parentId, ctx.branchId, link.id]);
     }
     const parents = new Map(queryBound(db, "SELECT id,parent_location_id FROM locations WHERE branch_id=?", [ctx.branchId]).map((row3) => [String(row3.id), row3.parent_location_id ? String(row3.parent_location_id) : null]));
-    for (const id of parents.keys()) {
+    for (const id2 of parents.keys()) {
       const seen = /* @__PURE__ */ new Set();
-      let cursor = id;
+      let cursor = id2;
       while (cursor) {
-        if (seen.has(cursor)) throw new AtlasDbError("MIGRATION_FAILED", "旧地点包含关系存在循环，拒绝发布候选", { locationId: id });
+        if (seen.has(cursor)) throw new AtlasDbError("MIGRATION_FAILED", "旧地点包含关系存在循环，拒绝发布候选", { locationId: id2 });
         seen.add(cursor);
         cursor = parents.get(cursor) ?? null;
       }
@@ -19743,14 +19762,14 @@ function migrateLegacyEntities(plan, raw, db, ctx) {
         continue;
       }
       if (factionIds.has(name)) continue;
-      const id = resolveCandidateId(candidate, ctx, issues, name);
-      if (rowExists(db, "factions", ctx.branchId, id)) {
-        factionIds.set(name, id);
+      const id2 = resolveCandidateId(candidate, ctx, issues, name);
+      if (rowExists(db, "factions", ctx.branchId, id2)) {
+        factionIds.set(name, id2);
         bump(mapped, "kind:alreadyImported");
         issues.push(describeProblem(candidate.origin, `旧势力 ${name} 已在库里，跳过重复导入`, "ALREADY_IMPORTED"));
         continue;
       }
-      const keyKind = checkEntityKey(db, ctx.branchId, id, "faction");
+      const keyKind = checkEntityKey(db, ctx.branchId, id2, "faction");
       if (keyKind !== null) {
         skipped.push({ kind: "faction", legacyId: candidate.legacyId || name, reason: keyKind });
         continue;
@@ -19758,7 +19777,7 @@ function migrateLegacyEntities(plan, raw, db, ctx) {
       const headquartersRef = str5(candidate.raw.headquartersLocationId ?? candidate.raw.headquartersRef);
       const headquartersId = headquartersRef.length > 0 ? legacyToSql.get(headquartersRef) ?? null : null;
       const created = withSavepoint(db, () => {
-        insertEntityKey(db, ctx.branchId, id, "faction");
+        insertEntityKey(db, ctx.branchId, id2, "faction");
         insertRow(
           db,
           "factions",
@@ -19770,7 +19789,7 @@ function migrateLegacyEntities(plan, raw, db, ctx) {
             goal: str5(candidate.raw.goal),
             headquarters_location_id: headquartersId
           },
-          { ...rowCtx, id }
+          { ...rowCtx, id: id2 }
         );
       });
       if (!created.ok) {
@@ -19778,7 +19797,7 @@ function migrateLegacyEntities(plan, raw, db, ctx) {
         issues.push(issue10("LEGACY_ROW_REJECTED", candidate.origin, `旧势力「${name}」写入被拒：${created.message}`, "error", true));
         continue;
       }
-      factionIds.set(name, id);
+      factionIds.set(name, id2);
       bump(mapped, "kind:factions");
       bump(mapped, "kind:entityKeys");
     }
@@ -19789,17 +19808,17 @@ function migrateLegacyEntities(plan, raw, db, ctx) {
         issues.push(describeProblem(candidate.origin, "旧人物缺少名称：不编造人名，保留在 skipped", "LEGACY_NAME_MISSING"));
         continue;
       }
-      const id = resolveCandidateId(candidate, ctx, issues);
-      if (rowExists(db, "characters", ctx.branchId, id)) {
+      const id2 = resolveCandidateId(candidate, ctx, issues);
+      if (rowExists(db, "characters", ctx.branchId, id2)) {
         bump(mapped, "kind:alreadyImported");
-        issues.push(describeProblem(candidate.origin, `旧人物 ${candidate.legacyId || id} 已经在库里，跳过重复导入`, "ALREADY_IMPORTED"));
-        legacyToSql.set(candidate.legacyId, id);
+        issues.push(describeProblem(candidate.origin, `旧人物 ${candidate.legacyId || id2} 已经在库里，跳过重复导入`, "ALREADY_IMPORTED"));
+        legacyToSql.set(candidate.legacyId, id2);
         continue;
       }
-      const keyKind = checkEntityKey(db, ctx.branchId, id, "character");
+      const keyKind = checkEntityKey(db, ctx.branchId, id2, "character");
       if (keyKind !== null) {
         skipped.push({ kind: "character", legacyId: candidate.legacyId, reason: keyKind });
-        issues.push(issue10("ENTITY_KEY_KIND_CONFLICT", candidate.origin, `entity_keys 里 ${id} 已是 ${keyKind}，不能同时是人物`, "error", false));
+        issues.push(issue10("ENTITY_KEY_KIND_CONFLICT", candidate.origin, `entity_keys 里 ${id2} 已是 ${keyKind}，不能同时是人物`, "error", false));
         continue;
       }
       const locationLegacyId = str5(candidate.raw.locationId ?? candidate.raw.locationRef ?? candidate.raw.location_id);
@@ -19808,7 +19827,7 @@ function migrateLegacyEntities(plan, raw, db, ctx) {
         issues.push(
           describeProblem(
             candidate.origin,
-            `旧人物 ${candidate.legacyId || id}「${name}」所在地点 ${locationLegacyId} 未迁移：location_id 置空（粗位置未知，不塞进别的地点）`,
+            `旧人物 ${candidate.legacyId || id2}「${name}」所在地点 ${locationLegacyId} 未迁移：location_id 置空（粗位置未知，不塞进别的地点）`,
             "LEGACY_LOCATION_UNRESOLVED"
           )
         );
@@ -19819,7 +19838,7 @@ function migrateLegacyEntities(plan, raw, db, ctx) {
       const gridY = num3(candidate.raw.gridY ?? candidate.raw.y);
       const hasGrid = mapId !== null && gridX !== null && gridY !== null;
       const created = withSavepoint(db, () => {
-        insertEntityKey(db, ctx.branchId, id, "character");
+        insertEntityKey(db, ctx.branchId, id2, "character");
         const absent = candidate.raw.presence === "left" || candidate.raw.status === "archived";
         insertRow(
           db,
@@ -19846,7 +19865,7 @@ function migrateLegacyEntities(plan, raw, db, ctx) {
             capabilities_json: Array.isArray(candidate.raw.capabilities) ? candidate.raw.capabilities : [],
             status: absent ? "archived" : "active"
           },
-          { ...rowCtx, id }
+          { ...rowCtx, id: id2 }
         );
       });
       if (!created.ok) {
@@ -19854,10 +19873,10 @@ function migrateLegacyEntities(plan, raw, db, ctx) {
         issues.push(issue10("LEGACY_ROW_REJECTED", candidate.origin, `旧人物「${name}」写入被拒：${created.message}`, "error", true));
         continue;
       }
-      legacyToSql.set(candidate.legacyId, id);
+      legacyToSql.set(candidate.legacyId, id2);
       bump(mapped, "kind:characters");
       bump(mapped, "kind:entityKeys");
-      mapped[`legacy:${candidate.legacyId || id}`] = mapped["kind:characters"] ?? 1;
+      mapped[`legacy:${candidate.legacyId || id2}`] = mapped["kind:characters"] ?? 1;
     }
     for (const candidate of candidates.items) {
       const name = str5(candidate.raw.name);
@@ -19866,14 +19885,14 @@ function migrateLegacyEntities(plan, raw, db, ctx) {
         issues.push(describeProblem(candidate.origin, "旧物品缺少名称：不编造名称，保留在 skipped", "LEGACY_NAME_MISSING"));
         continue;
       }
-      const id = resolveCandidateId(candidate, ctx, issues);
-      if (rowExists(db, "items", ctx.branchId, id)) {
+      const id2 = resolveCandidateId(candidate, ctx, issues);
+      if (rowExists(db, "items", ctx.branchId, id2)) {
         bump(mapped, "kind:alreadyImported");
-        issues.push(describeProblem(candidate.origin, `旧物品 ${candidate.legacyId || id} 已经在库里，跳过重复导入`, "ALREADY_IMPORTED"));
-        legacyToSql.set(candidate.legacyId, id);
+        issues.push(describeProblem(candidate.origin, `旧物品 ${candidate.legacyId || id2} 已经在库里，跳过重复导入`, "ALREADY_IMPORTED"));
+        legacyToSql.set(candidate.legacyId, id2);
         continue;
       }
-      const keyKind = checkEntityKey(db, ctx.branchId, id, "item");
+      const keyKind = checkEntityKey(db, ctx.branchId, id2, "item");
       if (keyKind !== null) {
         skipped.push({ kind: "item", legacyId: candidate.legacyId, reason: keyKind });
         continue;
@@ -19884,7 +19903,7 @@ function migrateLegacyEntities(plan, raw, db, ctx) {
         issues.push(
           describeProblem(
             candidate.origin,
-            `旧物品 ${candidate.legacyId || id}「${name}」的持有人 ${holderLegacyId} 未迁移：不写 holder，按放置位置处理`,
+            `旧物品 ${candidate.legacyId || id2}「${name}」的持有人 ${holderLegacyId} 未迁移：不写 holder，按放置位置处理`,
             "LEGACY_HOLDER_UNRESOLVED"
           )
         );
@@ -19895,7 +19914,7 @@ function migrateLegacyEntities(plan, raw, db, ctx) {
         issues.push(
           describeProblem(
             candidate.origin,
-            `旧物品 ${candidate.legacyId || id}「${name}」的放置地点 ${locationLegacyId} 未迁移：location_id 置空（位置未知）`,
+            `旧物品 ${candidate.legacyId || id2}「${name}」的放置地点 ${locationLegacyId} 未迁移：location_id 置空（位置未知）`,
             "LEGACY_LOCATION_UNRESOLVED"
           )
         );
@@ -19909,7 +19928,7 @@ function migrateLegacyEntities(plan, raw, db, ctx) {
       const ownerId = ownerLegacyId.length > 0 ? legacyToSql.get(ownerLegacyId) ?? (entityKeyExists(db, ctx.branchId, ownerLegacyId) ? ownerLegacyId : null) : null;
       const quantity = num3(candidate.raw.quantity);
       const created = withSavepoint(db, () => {
-        insertEntityKey(db, ctx.branchId, id, "item");
+        insertEntityKey(db, ctx.branchId, id2, "item");
         insertRow(
           db,
           "items",
@@ -19931,7 +19950,7 @@ function migrateLegacyEntities(plan, raw, db, ctx) {
             properties_json: Array.isArray(candidate.raw.properties) ? candidate.raw.properties : [],
             status: mapItemStatus(candidate.raw.status)
           },
-          { ...rowCtx, id }
+          { ...rowCtx, id: id2 }
         );
       });
       if (!created.ok) {
@@ -19939,10 +19958,10 @@ function migrateLegacyEntities(plan, raw, db, ctx) {
         issues.push(issue10("LEGACY_ROW_REJECTED", candidate.origin, `旧物品「${name}」写入被拒：${created.message}`, "error", true));
         continue;
       }
-      legacyToSql.set(candidate.legacyId, id);
+      legacyToSql.set(candidate.legacyId, id2);
       bump(mapped, "kind:items");
       bump(mapped, "kind:entityKeys");
-      mapped[`legacy:${candidate.legacyId || id}`] = mapped["kind:items"] ?? 1;
+      mapped[`legacy:${candidate.legacyId || id2}`] = mapped["kind:items"] ?? 1;
     }
     for (const rumor of candidates.rumors) {
       const content = rumor.text.trim();
@@ -20079,15 +20098,15 @@ function migrateLegacyEntities(plan, raw, db, ctx) {
   }
   return { mapped, issues, skipped };
 }
-function entityKeyExists(db, branchId, id) {
-  if (id.length === 0) return false;
-  return queryBound(db, "SELECT 1 AS present FROM entity_keys WHERE branch_id = ? AND id = ? LIMIT 1", [branchId, id]).length > 0;
+function entityKeyExists(db, branchId, id2) {
+  if (id2.length === 0) return false;
+  return queryBound(db, "SELECT 1 AS present FROM entity_keys WHERE branch_id = ? AND id = ? LIMIT 1", [branchId, id2]).length > 0;
 }
-function checkEntityKey(db, branchId, id, kind) {
-  const existing = queryOne(db, "SELECT kind FROM entity_keys WHERE branch_id = ? AND id = ? LIMIT 1", [branchId, id]);
+function checkEntityKey(db, branchId, id2, kind) {
+  const existing = queryOne(db, "SELECT kind FROM entity_keys WHERE branch_id = ? AND id = ? LIMIT 1", [branchId, id2]);
   if (!existing) return null;
   const existingKind = String(existing.kind);
-  return existingKind === kind ? null : `ENTITY_KEY_KIND_CONFLICT: ${id} 已是 ${existingKind}`;
+  return existingKind === kind ? null : `ENTITY_KEY_KIND_CONFLICT: ${id2} 已是 ${existingKind}`;
 }
 function resolveCandidateId(candidate, ctx, issues, extraAlias = "") {
   const legacyId = candidate.legacyId;
@@ -20531,12 +20550,12 @@ function migrateLegacySimulation(plan, raw, db, ctx) {
         const rows4 = Array.isArray(topology[key]) ? topology[key] : [];
         for (const row3 of rows4) {
           if (!isPlainObject7(row3)) continue;
-          const id = str5(row3.locationId ?? row3.id), location2 = queryOne(db, "SELECT id,map_id FROM locations WHERE branch_id=? AND id=?", [ctx.branchId, id]);
+          const id2 = str5(row3.locationId ?? row3.id), location2 = queryOne(db, "SELECT id,map_id FROM locations WHERE branch_id=? AND id=?", [ctx.branchId, id2]);
           if (location2 && key === "areas" && Array.isArray(row3.cells) && row3.cells.length <= 256 && row3.cells.every((cell) => isPlainObject7(cell) && Number.isInteger(cell.x) && Number.isInteger(cell.y) && Number(cell.x) >= 0 && Number(cell.y) >= 0)) {
             runBound(
               db,
               "UPDATE locations SET area_geometry_json=?,updated_turn_id=? WHERE branch_id=? AND id=?",
-              [JSON.stringify({ kind: "cells", cells: row3.cells, source: ["manual", "story", "worldbook"].includes(str5(row3.evidence)) ? str5(row3.evidence) : "migration", quality: "confirmed" }), ctx.turnId, ctx.branchId, id]
+              [JSON.stringify({ kind: "cells", cells: row3.cells, source: ["manual", "story", "worldbook"].includes(str5(row3.evidence)) ? str5(row3.evidence) : "migration", quality: "confirmed" }), ctx.turnId, ctx.branchId, id2]
             );
             bump(mapped, "kind:areas");
             continue;
@@ -20546,7 +20565,7 @@ function migrateLegacySimulation(plan, raw, db, ctx) {
             runBound(
               db,
               "UPDATE locations SET mobility=?,anchor_location_id=?,vehicle_profile_json=?,updated_turn_id=? WHERE branch_id=? AND id=?",
-              ["mobile", str5(row3.status) === "stopped" ? resolved : null, JSON.stringify({ legacy_status: row3.status, legacy_route_id: row3.routeEdgeId ?? null }), ctx.turnId, ctx.branchId, id]
+              ["mobile", str5(row3.status) === "stopped" ? resolved : null, JSON.stringify({ legacy_status: row3.status, legacy_route_id: row3.routeEdgeId ?? null }), ctx.turnId, ctx.branchId, id2]
             );
             if (row3.status === "en-route") issues.push(issue10("LEGACY_VEHICLE_TRANSIT_BLOCKED", "$.simulation.geoTopology.vehicles", "旧载具在途记录缺少真实耗时；保留移动载具和旧行程，停靠地点未知", "warning", false));
             bump(mapped, "kind:vehicles");
@@ -20749,9 +20768,9 @@ function recordGroupChanges(db, group2, ctx) {
     assertSafeIdentifier(m.table);
     const operation = mutationOperationKind(m);
     const operationId = m.sourceOpIds.length > 0 ? m.sourceOpIds.join("+") : `${group2.id}:${i}`;
-    const id = ctx.makeLogId ? ctx.makeLogId(group2.id, i, m.table, m.rowId) : `chg_${ctx.turnId}_${sequence}_${i}`;
+    const id2 = ctx.makeLogId ? ctx.makeLogId(group2.id, i, m.table, m.rowId) : `chg_${ctx.turnId}_${sequence}_${i}`;
     const entry = {
-      id,
+      id: id2,
       turnId: ctx.turnId,
       sequence,
       attemptId: ctx.attemptId,
@@ -20872,9 +20891,9 @@ function applySqlLegacyImport(input) {
   if (migrated.issues.some((issue31) => issue31.severity === "error")) throw new AtlasDbError("IMPORT_REJECTED", "旧世界有未解决的引用或结构错误，整份导入候选撤销", { issues: migrated.issues });
   const issues = [...migrated.issues, ...restoreLegacySceneMaps(input.legacy, db, { branchId })];
   const after = snapshot2(), opId = `legacy_import_${turnId}`, mutations = [];
-  for (const [table, rows4] of after) for (const [id, row3] of rows4) {
-    const old = before.get(table)?.get(id) ?? null;
-    if (JSON.stringify(old) !== JSON.stringify(row3)) mutations.push({ table, rowId: id, before: old, after: row3, sourceOpIds: [opId], basis: { kind: "manual", reason: "作者显式导入旧世界；已有稳定身份保留，重复档案跳过", certainty: "confirmed" } });
+  for (const [table, rows4] of after) for (const [id2, row3] of rows4) {
+    const old = before.get(table)?.get(id2) ?? null;
+    if (JSON.stringify(old) !== JSON.stringify(row3)) mutations.push({ table, rowId: id2, before: old, after: row3, sourceOpIds: [opId], basis: { kind: "manual", reason: "作者显式导入旧世界；已有稳定身份保留，重复档案跳过", certainty: "confirmed" } });
   }
   const start = Number(queryBound(db, "SELECT COALESCE(MAX(sequence)+1,1) n FROM turn_changes WHERE turn_id=?", [turnId])[0].n);
   const journal = recordGroupChanges(db, { id: opId, opIds: [opId], mutations }, { turnId, attemptId: "legacy-import", startSequence: start });
@@ -20930,7 +20949,7 @@ function resolveMapTopology(input) {
     const list3 = mapsByContainer.get(locationId);
     if (!list3 || list3.length === 0) return null;
     if (list3.length > 1) {
-      for (const id of list3) if (id !== selfMapId) unlinked.add(id);
+      for (const id2 of list3) if (id2 !== selfMapId) unlinked.add(id2);
       report(
         "AMBIGUOUS_CONTAINER_MAP",
         `ambiguous:${locationId}`,
@@ -20944,7 +20963,7 @@ function resolveMapTopology(input) {
     if (only === selfMapId) return null;
     return only;
   }
-  const nullContainerIds = mapIds.filter((id) => !mapsById.get(id).containerLocationId);
+  const nullContainerIds = mapIds.filter((id2) => !mapsById.get(id2).containerLocationId);
   const designatedRoot = input.rootMapId && mapsById.has(input.rootMapId) ? input.rootMapId : null;
   if (input.rootMapId && !designatedRoot) {
     report(
@@ -20956,7 +20975,7 @@ function resolveMapTopology(input) {
     );
   }
   if (nullContainerIds.length > 1) {
-    const extraRoot = nullContainerIds.find((id) => id !== designatedRoot) ?? null;
+    const extraRoot = nullContainerIds.find((id2) => id2 !== designatedRoot) ?? null;
     report(
       "MULTIPLE_ROOT_MAPS",
       "roots",
@@ -20990,7 +21009,7 @@ function resolveMapTopology(input) {
     }
     const siblings = mapsByContainer.get(containerId) ?? [];
     if (siblings.length > 1) {
-      for (const id of siblings) unlinked.add(id);
+      for (const id2 of siblings) unlinked.add(id2);
       report(
         "AMBIGUOUS_CONTAINER_MAP",
         `ambiguous:${containerId}`,
@@ -21095,7 +21114,7 @@ function resolveMapTopology(input) {
     });
   }
   if (nullContainerIds.length > 1 && fallbackRootId) {
-    for (const id of nullContainerIds) if (id !== fallbackRootId) unlinked.add(id);
+    for (const id2 of nullContainerIds) if (id2 !== fallbackRootId) unlinked.add(id2);
   }
   return {
     nodes,
@@ -21206,22 +21225,22 @@ function isJsonColumn2(name) {
 function checkCoordinates(table, row3, out) {
   const hasX = row3.grid_x !== void 0 && row3.grid_x !== null;
   const hasY = row3.grid_y !== void 0 && row3.grid_y !== null;
-  const id = rowIdOf(table, row3);
+  const id2 = rowIdOf(table, row3);
   if (hasX !== hasY) {
-    out.push(violation("INVARIANT_COORD_PAIR", table, id, "grid_x/grid_y", "坐标 x/y 必须同时有值或同时为空"));
+    out.push(violation("INVARIANT_COORD_PAIR", table, id2, "grid_x/grid_y", "坐标 x/y 必须同时有值或同时为空"));
   }
   const x = finiteOrNull(row3.grid_x);
   const y = finiteOrNull(row3.grid_y);
-  if (x !== null && Number.isNaN(x)) out.push(violation("INVARIANT_COORD_NOT_FINITE", table, id, "grid_x", "坐标必须是有限数字（未知不是 NaN/Infinity）"));
-  if (y !== null && Number.isNaN(y)) out.push(violation("INVARIANT_COORD_NOT_FINITE", table, id, "grid_y", "坐标必须是有限数字（未知不是 NaN/Infinity）"));
+  if (x !== null && Number.isNaN(x)) out.push(violation("INVARIANT_COORD_NOT_FINITE", table, id2, "grid_x", "坐标必须是有限数字（未知不是 NaN/Infinity）"));
+  if (y !== null && Number.isNaN(y)) out.push(violation("INVARIANT_COORD_NOT_FINITE", table, id2, "grid_y", "坐标必须是有限数字（未知不是 NaN/Infinity）"));
   if ((hasX || hasY) && (row3.map_id === null || row3.map_id === void 0)) {
-    out.push(violation("INVARIANT_COORD_WITHOUT_MAP", table, id, "map_id", "有坐标必须有 map_id"));
+    out.push(violation("INVARIANT_COORD_WITHOUT_MAP", table, id2, "map_id", "有坐标必须有 map_id"));
   }
   if (table === "characters" && row3.coord_precision === "layout") {
-    out.push(violation("INVARIANT_CHARACTER_LAYOUT_COORD", table, id, "coord_precision", "人物不把 layout 坐标当实际位置"));
+    out.push(violation("INVARIANT_CHARACTER_LAYOUT_COORD", table, id2, "coord_precision", "人物不把 layout 坐标当实际位置"));
   }
-  if (table === "locations" && row3.map_id && row3.map_id === id) {
-    out.push(violation("INVARIANT_LOCATION_MAP_SELF", table, id, "map_id", "地点所在坐标系不能是它自己的内部地图"));
+  if (table === "locations" && row3.map_id && row3.map_id === id2) {
+    out.push(violation("INVARIANT_LOCATION_MAP_SELF", table, id2, "map_id", "地点所在坐标系不能是它自己的内部地图"));
   }
 }
 function findCycle(edges, selfLoopCode, table, field, out) {
@@ -21252,22 +21271,22 @@ function validateCandidate(db, options) {
   const checked = [];
   const only = options.tables ? new Set(options.tables) : null;
   const onlyRows = options.rowIds;
-  const shouldCheck = (table, id) => {
+  const shouldCheck = (table, id2) => {
     if (only && !only.has(table)) return false;
-    if (onlyRows && onlyRows.size > 0 && !onlyRows.has(id)) return false;
+    if (onlyRows && onlyRows.size > 0 && !onlyRows.has(id2)) return false;
     return true;
   };
   const mapRows = rowsOf(db, "maps", branchId);
   const entityKeys = rowsOf(db, "entity_keys", branchId);
   const keyKindById = /* @__PURE__ */ new Map();
   for (const key of entityKeys) {
-    const id = String(key.id ?? "");
+    const id2 = String(key.id ?? "");
     const kind = String(key.kind ?? "");
     if (!["location", "character", "item", "faction"].includes(kind)) {
-      violations.push(violation("INVARIANT_ENTITY_KEY_KIND", "entity_keys", id, "kind", `身份类型非法：${kind}`));
+      violations.push(violation("INVARIANT_ENTITY_KEY_KIND", "entity_keys", id2, "kind", `身份类型非法：${kind}`));
       continue;
     }
-    keyKindById.set(id, kind);
+    keyKindById.set(id2, kind);
   }
   const detailTables = [
     ["locations", "location"],
@@ -21280,49 +21299,49 @@ function validateCandidate(db, options) {
     const rows4 = rowsOf(db, table, branchId);
     const ids2 = /* @__PURE__ */ new Set();
     for (const row3 of rows4) {
-      const id = rowIdOf(table, row3);
-      ids2.add(id);
-      const keyKind = keyKindById.get(id);
+      const id2 = rowIdOf(table, row3);
+      ids2.add(id2);
+      const keyKind = keyKindById.get(id2);
       if (!keyKind) {
-        violations.push(violation("INVARIANT_ENTITY_WITHOUT_KEY", table, id, "id", "实体详情没有对应的 entity_keys 身份"));
+        violations.push(violation("INVARIANT_ENTITY_WITHOUT_KEY", table, id2, "id", "实体详情没有对应的 entity_keys 身份"));
       } else if (keyKind !== kind) {
-        violations.push(violation("INVARIANT_ENTITY_KIND_MISMATCH", table, id, "id", `身份类型 ${keyKind} 与详情表 ${table} 不一致`));
+        violations.push(violation("INVARIANT_ENTITY_KIND_MISMATCH", table, id2, "id", `身份类型 ${keyKind} 与详情表 ${table} 不一致`));
       }
-      if (shouldCheck(table, id)) {
+      if (shouldCheck(table, id2)) {
         checkCoordinates(table, row3, violations);
-        checked.push(`${table}:${id}`);
+        checked.push(`${table}:${id2}`);
       }
     }
     detailIdsByKind.set(kind, ids2);
   }
   for (const key of entityKeys) {
-    const id = String(key.id ?? "");
+    const id2 = String(key.id ?? "");
     const kind = String(key.kind ?? "");
     const ids2 = detailIdsByKind.get(kind);
-    if (ids2 && !ids2.has(id)) {
-      violations.push(violation("INVARIANT_KEY_WITHOUT_ENTITY", "entity_keys", id, "id", `身份没有对应的 ${kind} 详情`));
+    if (ids2 && !ids2.has(id2)) {
+      violations.push(violation("INVARIANT_KEY_WITHOUT_ENTITY", "entity_keys", id2, "id", `身份没有对应的 ${kind} 详情`));
     }
   }
   const locations = rowsOf(db, "locations", branchId);
   const parentEdges = /* @__PURE__ */ new Map();
   const parentOf = /* @__PURE__ */ new Map();
   for (const loc of locations) {
-    const id = String(loc.id);
+    const id2 = String(loc.id);
     const parent = loc.parent_location_id === null || loc.parent_location_id === void 0 ? null : String(loc.parent_location_id);
-    parentEdges.set(id, parent);
-    parentOf.set(id, parent);
+    parentEdges.set(id2, parent);
+    parentOf.set(id2, parent);
   }
   findCycle(parentEdges, "INVARIANT_LOCATION_PARENT_CYCLE", "locations", "parent_location_id", violations);
-  for (const id of parentOf.keys()) {
+  for (const id2 of parentOf.keys()) {
     let depth = 0;
-    let cursor = parentOf.get(id) ?? null;
-    const seen = /* @__PURE__ */ new Set([id]);
+    let cursor = parentOf.get(id2) ?? null;
+    const seen = /* @__PURE__ */ new Set([id2]);
     while (cursor) {
       if (seen.has(cursor)) break;
       seen.add(cursor);
       depth += 1;
       if (depth > LOCATION_DEPTH) {
-        violations.push(violation("INVARIANT_LOCATION_DEPTH", "locations", id, "parent_location_id", `地点层级超过上限 ${LOCATION_DEPTH}`));
+        violations.push(violation("INVARIANT_LOCATION_DEPTH", "locations", id2, "parent_location_id", `地点层级超过上限 ${LOCATION_DEPTH}`));
         break;
       }
       cursor = parentOf.get(cursor) ?? null;
@@ -21371,32 +21390,32 @@ function validateCandidate(db, options) {
   const items = rowsOf(db, "items", branchId);
   const containerEdges = /* @__PURE__ */ new Map();
   for (const item of items) {
-    const id = String(item.id);
+    const id2 = String(item.id);
     const container = item.container_item_id === null || item.container_item_id === void 0 ? null : String(item.container_item_id);
-    containerEdges.set(id, container);
+    containerEdges.set(id2, container);
     const sources = [item.holder_character_id, item.container_item_id, item.location_id].filter((v) => v !== null && v !== void 0);
     if (sources.length > 1) {
-      violations.push(violation("INVARIANT_ITEM_MULTIPLE_PLACEMENT", "items", id, "holder_character_id/container_item_id/location_id", "一件物品只能有一个实际持有/容纳/独立放置来源"));
+      violations.push(violation("INVARIANT_ITEM_MULTIPLE_PLACEMENT", "items", id2, "holder_character_id/container_item_id/location_id", "一件物品只能有一个实际持有/容纳/独立放置来源"));
     }
     if (typeof item.quantity === "number" && item.quantity < 0) {
-      violations.push(violation("INVARIANT_QUANTITY_NEGATIVE", "items", id, "quantity", "数量不能为负"));
+      violations.push(violation("INVARIANT_QUANTITY_NEGATIVE", "items", id2, "quantity", "数量不能为负"));
     }
     if (item.quantity === 0 && item.status === "active") {
-      violations.push(violation("INVARIANT_QUANTITY_ZERO_ACTIVE", "items", id, "status", "数量为 0 时必须转为 consumed，不能继续交易"));
+      violations.push(violation("INVARIANT_QUANTITY_ZERO_ACTIVE", "items", id2, "status", "数量为 0 时必须转为 consumed，不能继续交易"));
     }
-    if (shouldCheck("items", id)) checkCoordinates("items", item, violations);
+    if (shouldCheck("items", id2)) checkCoordinates("items", item, violations);
   }
   findCycle(containerEdges, "INVARIANT_CONTAINER_CYCLE", "items", "container_item_id", violations);
-  for (const id of containerEdges.keys()) {
+  for (const id2 of containerEdges.keys()) {
     let depth = 0;
-    let cursor = containerEdges.get(id) ?? null;
-    const seen = /* @__PURE__ */ new Set([id]);
+    let cursor = containerEdges.get(id2) ?? null;
+    const seen = /* @__PURE__ */ new Set([id2]);
     while (cursor) {
       if (seen.has(cursor)) break;
       seen.add(cursor);
       depth += 1;
       if (depth > CONTAINER_DEPTH) {
-        violations.push(violation("INVARIANT_CONTAINER_DEPTH", "items", id, "container_item_id", `容器链超过上限 ${CONTAINER_DEPTH}`));
+        violations.push(violation("INVARIANT_CONTAINER_DEPTH", "items", id2, "container_item_id", `容器链超过上限 ${CONTAINER_DEPTH}`));
         break;
       }
       cursor = containerEdges.get(cursor) ?? null;
@@ -21405,10 +21424,10 @@ function validateCandidate(db, options) {
   const characters = rowsOf(db, "characters", branchId);
   const deadOrDown = /* @__PURE__ */ new Set();
   for (const ch of characters) {
-    const id = String(ch.id);
-    if (ch.physical_status === "dead" || ch.physical_status === "incapacitated") deadOrDown.add(id);
-    if (shouldCheck("characters", id)) checkCoordinates("characters", ch, violations);
-    checkListLimits("characters", id, ch, violations);
+    const id2 = String(ch.id);
+    if (ch.physical_status === "dead" || ch.physical_status === "incapacitated") deadOrDown.add(id2);
+    if (shouldCheck("characters", id2)) checkCoordinates("characters", ch, violations);
+    checkListLimits("characters", id2, ch, violations);
   }
   const journeys = rowsOf(db, "journeys", branchId);
   const openByMover = /* @__PURE__ */ new Map();
@@ -21446,34 +21465,34 @@ function validateCandidate(db, options) {
   const actionById = new Map(actions.map((a) => [String(a.id), a]));
   const actionDepends = /* @__PURE__ */ new Map();
   for (const a of actions) {
-    const id = String(a.id);
+    const id2 = String(a.id);
     const parent = a.parent_action_id === null || a.parent_action_id === void 0 ? null : String(a.parent_action_id);
-    actionDepends.set(id, parent);
+    actionDepends.set(id2, parent);
     if (Array.isArray(a.depends_on_json)) {
       for (const dep of a.depends_on_json) {
         if (!actionById.has(dep)) {
-          violations.push(violation("INVARIANT_ACTION_DEPENDENCY_UNKNOWN", "actions", id, "depends_on_json", `依赖的行动不存在：${dep}`));
+          violations.push(violation("INVARIANT_ACTION_DEPENDENCY_UNKNOWN", "actions", id2, "depends_on_json", `依赖的行动不存在：${dep}`));
         }
-        if (dep === id) {
-          violations.push(violation("INVARIANT_ACTION_DEPENDENCY_CYCLE", "actions", id, "depends_on_json", "行动不能依赖自己"));
+        if (dep === id2) {
+          violations.push(violation("INVARIANT_ACTION_DEPENDENCY_CYCLE", "actions", id2, "depends_on_json", "行动不能依赖自己"));
         }
       }
       if (a.depends_on_json.length > 8) {
-        violations.push(violation("INVARIANT_ACTION_DEPENDENCY_COUNT", "actions", id, "depends_on_json", "depends_on_json 最多 8 项"));
+        violations.push(violation("INVARIANT_ACTION_DEPENDENCY_COUNT", "actions", id2, "depends_on_json", "depends_on_json 最多 8 项"));
       }
     }
     let depth = 0;
     let cursor = parent;
-    const seen = /* @__PURE__ */ new Set([id]);
+    const seen = /* @__PURE__ */ new Set([id2]);
     while (cursor) {
       if (seen.has(cursor)) {
-        violations.push(violation("INVARIANT_ACTION_PLAN_CYCLE", "actions", id, "parent_action_id", "计划父子链形成环"));
+        violations.push(violation("INVARIANT_ACTION_PLAN_CYCLE", "actions", id2, "parent_action_id", "计划父子链形成环"));
         break;
       }
       seen.add(cursor);
       depth += 1;
       if (depth > ACTION_PLAN_DEPTH) {
-        violations.push(violation("INVARIANT_ACTION_PLAN_DEPTH", "actions", id, "parent_action_id", `计划最多 ${ACTION_PLAN_DEPTH} 层`));
+        violations.push(violation("INVARIANT_ACTION_PLAN_DEPTH", "actions", id2, "parent_action_id", `计划最多 ${ACTION_PLAN_DEPTH} 层`));
         break;
       }
       const parentRow = actionById.get(cursor);
@@ -21484,83 +21503,83 @@ function validateCandidate(db, options) {
   const information = rowsOf(db, "information", branchId);
   const infoEdges = /* @__PURE__ */ new Map();
   for (const info of information) {
-    const id = String(info.id);
-    infoEdges.set(id, info.parent_information_id === null || info.parent_information_id === void 0 ? null : String(info.parent_information_id));
+    const id2 = String(info.id);
+    infoEdges.set(id2, info.parent_information_id === null || info.parent_information_id === void 0 ? null : String(info.parent_information_id));
     const created = finiteOrNull(info.created_at_s);
     const expires = finiteOrNull(info.expires_at_s);
     if (created !== null && expires !== null && !Number.isNaN(created) && !Number.isNaN(expires) && expires < created) {
-      violations.push(violation("INVARIANT_INFORMATION_EXPIRY", "information", id, "expires_at_s", "expires_at_s 不能早于 created_at_s"));
+      violations.push(violation("INVARIANT_INFORMATION_EXPIRY", "information", id2, "expires_at_s", "expires_at_s 不能早于 created_at_s"));
     }
   }
   findCycle(infoEdges, "INVARIANT_INFORMATION_LINK_CYCLE", "information", "parent_information_id", violations);
   const events = rowsOf(db, "events", branchId);
   for (const ev of events) {
-    const id = String(ev.id);
+    const id2 = String(ev.id);
     const status = String(ev.status);
     if ((status === "occurred" || status === "ongoing") && (ev.occurred_at_s === null || ev.occurred_at_s === void 0)) {
-      violations.push(violation("INVARIANT_EVENT_OCCURRED_NEEDS_TIME", "events", id, "occurred_at_s", "occurred/ongoing 事件必须有实际发生时刻"));
+      violations.push(violation("INVARIANT_EVENT_OCCURRED_NEEDS_TIME", "events", id2, "occurred_at_s", "occurred/ongoing 事件必须有实际发生时刻"));
     }
   }
   const knowledge = rowsOf(db, "knowledge", branchId);
   const seenKnower = /* @__PURE__ */ new Map();
   for (const k of knowledge) {
-    const id = String(k.id);
+    const id2 = String(k.id);
     const hasCharacter = k.knower_character_id !== null && k.knower_character_id !== void 0;
     const hasFaction = k.knower_faction_id !== null && k.knower_faction_id !== void 0;
     const isPov = Number(k.is_pov ?? 0) === 1;
     const count2 = (hasCharacter ? 1 : 0) + (hasFaction ? 1 : 0) + (isPov ? 1 : 0);
     if (count2 !== 1) {
-      violations.push(violation("INVARIANT_KNOWLEDGE_HOLDER", "knowledge", id, "knower_character_id/knower_faction_id/is_pov", "三种持有者必须且只能选择一种"));
+      violations.push(violation("INVARIANT_KNOWLEDGE_HOLDER", "knowledge", id2, "knower_character_id/knower_faction_id/is_pov", "三种持有者必须且只能选择一种"));
     }
     const informationId = String(k.information_id);
     const key = hasCharacter ? `c:${String(k.knower_character_id)}:${informationId}` : hasFaction ? `f:${String(k.knower_faction_id)}:${informationId}` : `pov:${informationId}`;
     const existing = seenKnower.get(key);
-    if (existing && existing !== id) {
-      violations.push(violation("INVARIANT_KNOWLEDGE_DUPLICATE", "knowledge", id, "information_id", `同一持有者对同一信息有两条当前认知（另一条 ${existing}）`));
+    if (existing && existing !== id2) {
+      violations.push(violation("INVARIANT_KNOWLEDGE_DUPLICATE", "knowledge", id2, "information_id", `同一持有者对同一信息有两条当前认知（另一条 ${existing}）`));
     } else {
-      seenKnower.set(key, id);
+      seenKnower.set(key, id2);
     }
   }
   const channels = rowsOf(db, "channels", branchId);
   for (const c of channels) {
-    const id = String(c.id);
+    const id2 = String(c.id);
     if (c.recipient_entity_id && c.recipient_location_id) {
-      violations.push(violation("INVARIANT_CHANNEL_RECIPIENT", "channels", id, "recipient_entity_id/recipient_location_id", "recipient 实体/地点至多一个"));
+      violations.push(violation("INVARIANT_CHANNEL_RECIPIENT", "channels", id2, "recipient_entity_id/recipient_location_id", "recipient 实体/地点至多一个"));
     }
     const scope = c.scope_json;
     const hasScope = Boolean(scope && (Array.isArray(scope.location_refs) && scope.location_refs.length > 0 || Array.isArray(scope.entity_refs) && scope.entity_refs.length > 0));
     if (!c.source_entity_id && !c.source_location_id && !hasScope) {
-      violations.push(violation("INVARIANT_CHANNEL_SCOPE", "channels", id, "scope_json", "渠道必须至少有一项来源或有效范围；范围不能默认为整个世界"));
+      violations.push(violation("INVARIANT_CHANNEL_SCOPE", "channels", id2, "scope_json", "渠道必须至少有一项来源或有效范围；范围不能默认为整个世界"));
     }
     if (Array.isArray(scope?.location_refs)) {
       for (const ref2 of scope.location_refs) {
-        if (!parentOf.has(ref2)) violations.push(violation("INVARIANT_CHANNEL_SCOPE_REF", "channels", id, "scope_json.location_refs", `地点引用不存在：${ref2}`));
+        if (!parentOf.has(ref2)) violations.push(violation("INVARIANT_CHANNEL_SCOPE_REF", "channels", id2, "scope_json.location_refs", `地点引用不存在：${ref2}`));
       }
     }
   }
   const mentions = rowsOf(db, "mention_candidates", branchId);
   for (const m of mentions) {
-    const id = String(m.id);
+    const id2 = String(m.id);
     if (Array.isArray(m.recent_turn_ids_json) && m.recent_turn_ids_json.length > MENTION_RECENT_LIMIT2) {
-      violations.push(violation("INVARIANT_MENTION_RECENT_LIMIT", "mention_candidates", id, "recent_turn_ids_json", `最近提及最多 ${MENTION_RECENT_LIMIT2} 条`));
+      violations.push(violation("INVARIANT_MENTION_RECENT_LIMIT", "mention_candidates", id2, "recent_turn_ids_json", `最近提及最多 ${MENTION_RECENT_LIMIT2} 条`));
     }
     if (m.promoted_entity_id && !keyKindById.has(String(m.promoted_entity_id))) {
-      violations.push(violation("INVARIANT_MENTION_PROMOTED_REF", "mention_candidates", id, "promoted_entity_id", `promoted_entity_id 指向不存在的身份：${String(m.promoted_entity_id)}`));
+      violations.push(violation("INVARIANT_MENTION_PROMOTED_REF", "mention_candidates", id2, "promoted_entity_id", `promoted_entity_id 指向不存在的身份：${String(m.promoted_entity_id)}`));
     }
     if (typeof m.distinct_turn_count === "number" && m.distinct_turn_count < 1) {
-      violations.push(violation("INVARIANT_MENTION_COUNT", "mention_candidates", id, "distinct_turn_count", "distinct_turn_count 至少为 1"));
+      violations.push(violation("INVARIANT_MENTION_COUNT", "mention_candidates", id2, "distinct_turn_count", "distinct_turn_count 至少为 1"));
     }
   }
   validateJsonRefs(db, branchId, keyKindById, parentOf, violations);
   for (const table of ["maps", "locations", "characters", "items", "factions", "relations", "routes", "actions", "journeys", "events", "information", "rumor_fronts", "knowledge", "channels"]) {
     const rows4 = rowsOf(db, table, branchId);
     for (const row3 of rows4) {
-      const id = String(row3.id);
+      const id2 = String(row3.id);
       if (row3.row_rev !== void 0 && (typeof row3.row_rev !== "number" || row3.row_rev < 1)) {
-        violations.push(violation("INVARIANT_ROW_REV", table, id, "row_rev", "row_rev 必须是正整数"));
+        violations.push(violation("INVARIANT_ROW_REV", table, id2, "row_rev", "row_rev 必须是正整数"));
       }
       if (!row3.created_turn_id || !row3.updated_turn_id) {
-        violations.push(violation("INVARIANT_TURN_REF", table, id, "created_turn_id/updated_turn_id", "C 列的创建/更新推演记录不能为空"));
+        violations.push(violation("INVARIANT_TURN_REF", table, id2, "created_turn_id/updated_turn_id", "C 列的创建/更新推演记录不能为空"));
       }
       for (const [column, value] of Object.entries(row3)) {
         if (isJsonColumn2(column) && value !== null && typeof value === "object") {
@@ -21571,27 +21590,27 @@ function validateCandidate(db, options) {
   }
   const branches = rowsOf(db, "branches", branchId);
   for (const b of branches) {
-    const id = String(b.id);
+    const id2 = String(b.id);
     const clock = finiteOrNull(b.clock_s);
     const min = finiteOrNull(b.clock_min_s);
     const max = finiteOrNull(b.clock_max_s);
     if (clock === null || min === null || max === null || Number.isNaN(clock) || Number.isNaN(min) || Number.isNaN(max)) {
-      violations.push(violation("INVARIANT_BRANCH_CLOCK_FINITE", "branches", id, "clock_s", "时钟必须是有限数字"));
+      violations.push(violation("INVARIANT_BRANCH_CLOCK_FINITE", "branches", id2, "clock_s", "时钟必须是有限数字"));
       continue;
     }
-    if (clock < 0 || min < 0 || max < 0) violations.push(violation("INVARIANT_BRANCH_CLOCK_NEGATIVE", "branches", id, "clock_s", "负时间非法"));
+    if (clock < 0 || min < 0 || max < 0) violations.push(violation("INVARIANT_BRANCH_CLOCK_NEGATIVE", "branches", id2, "clock_s", "负时间非法"));
     if (!(min <= clock && clock <= max)) {
-      violations.push(violation("INVARIANT_BRANCH_CLOCK_ORDER", "branches", id, "clock_s", "clock_min ≤ clock ≤ clock_max 必须成立"));
+      violations.push(violation("INVARIANT_BRANCH_CLOCK_ORDER", "branches", id2, "clock_s", "clock_min ≤ clock ≤ clock_max 必须成立"));
     }
     const pov = b.pov_character_id;
     if (pov && !detailIdsByKind.get("character")?.has(String(pov))) {
-      violations.push(violation("INVARIANT_BRANCH_POV", "branches", id, "pov_character_id", `pov_character_id 必须在本分支的人物中：${String(pov)}`));
+      violations.push(violation("INVARIANT_BRANCH_POV", "branches", id2, "pov_character_id", `pov_character_id 必须在本分支的人物中：${String(pov)}`));
     }
     const root = b.root_map_id;
     if (root) {
       const mapExists = queryBound(db, "SELECT COUNT(*) AS n FROM maps WHERE branch_id = ? AND id = ?", [branchId, String(root)]);
       if (Number(mapExists[0]?.n ?? 0) === 0) {
-        violations.push(violation("INVARIANT_BRANCH_ROOT_MAP", "branches", id, "root_map_id", `root_map_id 指向不存在的地图：${String(root)}`));
+        violations.push(violation("INVARIANT_BRANCH_ROOT_MAP", "branches", id2, "root_map_id", `root_map_id 指向不存在的地图：${String(root)}`));
       }
     }
   }
@@ -21620,11 +21639,11 @@ function validateCandidate(db, options) {
     checked
   };
 }
-function checkListLimits(table, id, row3, out) {
+function checkListLimits(table, id2, row3, out) {
   const geometry = row3.area_geometry_json;
   if (geometry && typeof geometry === "object" && Array.isArray(geometry.coordinates)) {
     if (geometry.coordinates.length > GEOMETRY_VERTEX_LIMIT2) {
-      out.push(violation("INVARIANT_GEOMETRY_LIMIT", table, id, "area_geometry_json", `几何顶点超过上限 ${GEOMETRY_VERTEX_LIMIT2}`));
+      out.push(violation("INVARIANT_GEOMETRY_LIMIT", table, id2, "area_geometry_json", `几何顶点超过上限 ${GEOMETRY_VERTEX_LIMIT2}`));
     }
   }
 }
@@ -21636,7 +21655,7 @@ function validateJsonRefs(db, branchId, keyKindById, locationIds, out) {
   const routeIds = new Set(rowsOf(db, "routes", branchId).map((r) => String(r.id)));
   const eventIds = new Set(rowsOf(db, "events", branchId).map((e) => String(e.id)));
   for (const a of actions) {
-    const id = String(a.id);
+    const id2 = String(a.id);
     const payload = a.payload_json;
     if (!payload || typeof payload !== "object") continue;
     const refKeys = ["destination_ref", "information_ref", "channel_ref", "other_ref", "subject_ref"];
@@ -21645,13 +21664,13 @@ function validateJsonRefs(db, branchId, keyKindById, locationIds, out) {
       if (typeof value !== "string" || value === "") continue;
       const ok = key === "destination_ref" && locationIds.has(value) || key === "information_ref" && informationIds.has(value) || key === "channel_ref" && channelIds.has(value) || (key === "other_ref" || key === "subject_ref") && keyKindById.has(value);
       if (!ok) {
-        out.push(violation("INVARIANT_JSON_REF_UNKNOWN", "actions", id, `payload_json.${key}`, `JSON 引用不存在：${value}`));
+        out.push(violation("INVARIANT_JSON_REF_UNKNOWN", "actions", id2, `payload_json.${key}`, `JSON 引用不存在：${value}`));
       }
     }
     if (Array.isArray(payload.via_refs)) {
       for (const v of payload.via_refs) {
         if (!locationIds.has(v)) {
-          out.push(violation("INVARIANT_JSON_REF_UNKNOWN", "actions", id, "payload_json.via_refs", `JSON 引用不存在：${v}`));
+          out.push(violation("INVARIANT_JSON_REF_UNKNOWN", "actions", id2, "payload_json.via_refs", `JSON 引用不存在：${v}`));
         }
       }
     }
@@ -21663,37 +21682,37 @@ function validateJsonRefs(db, branchId, keyKindById, locationIds, out) {
         const body = leaf[kind];
         if (!body) continue;
         if (kind === "at_location" && body.location_ref && !locationIds.has(String(body.location_ref))) {
-          out.push(violation("INVARIANT_JSON_REF_UNKNOWN", "actions", id, "trigger_json.at_location.location_ref", `条件引用不存在：${String(body.location_ref)}`));
+          out.push(violation("INVARIANT_JSON_REF_UNKNOWN", "actions", id2, "trigger_json.at_location.location_ref", `条件引用不存在：${String(body.location_ref)}`));
         }
         if (kind === "action_status" && body.action_ref && !actionIds.has(String(body.action_ref))) {
-          out.push(violation("INVARIANT_JSON_REF_UNKNOWN", "actions", id, "trigger_json.action_status.action_ref", `条件引用不存在：${String(body.action_ref)}`));
+          out.push(violation("INVARIANT_JSON_REF_UNKNOWN", "actions", id2, "trigger_json.action_status.action_ref", `条件引用不存在：${String(body.action_ref)}`));
         }
         if (kind === "event_status" && body.event_ref && !eventIds.has(String(body.event_ref))) {
-          out.push(violation("INVARIANT_JSON_REF_UNKNOWN", "actions", id, "trigger_json.event_status.event_ref", `条件引用不存在：${String(body.event_ref)}`));
+          out.push(violation("INVARIANT_JSON_REF_UNKNOWN", "actions", id2, "trigger_json.event_status.event_ref", `条件引用不存在：${String(body.event_ref)}`));
         }
       }
     }
   }
   const fronts = rowsOf(db, "rumor_fronts", branchId);
   for (const f of fronts) {
-    const id = String(f.id);
+    const id2 = String(f.id);
     if (!informationIds.has(String(f.information_id))) {
-      out.push(violation("INVARIANT_JSON_REF_UNKNOWN", "rumor_fronts", id, "information_id", `引用不存在：${String(f.information_id)}`));
+      out.push(violation("INVARIANT_JSON_REF_UNKNOWN", "rumor_fronts", id2, "information_id", `引用不存在：${String(f.information_id)}`));
     }
     if (!locationIds.has(String(f.location_id))) {
-      out.push(violation("INVARIANT_JSON_REF_UNKNOWN", "rumor_fronts", id, "location_id", `引用不存在：${String(f.location_id)}`));
+      out.push(violation("INVARIANT_JSON_REF_UNKNOWN", "rumor_fronts", id2, "location_id", `引用不存在：${String(f.location_id)}`));
     }
   }
   const events = rowsOf(db, "events", branchId);
   for (const e of events) {
-    const id = String(e.id);
+    const id2 = String(e.id);
     if (e.route_id && !routeIds.has(String(e.route_id))) {
-      out.push(violation("INVARIANT_JSON_REF_UNKNOWN", "events", id, "route_id", `引用不存在：${String(e.route_id)}`));
+      out.push(violation("INVARIANT_JSON_REF_UNKNOWN", "events", id2, "route_id", `引用不存在：${String(e.route_id)}`));
     }
     if (Array.isArray(e.participants_json)) {
       for (const p of e.participants_json) {
         if (p && typeof p.entity_id === "string" && !keyKindById.has(p.entity_id)) {
-          out.push(violation("INVARIANT_JSON_REF_UNKNOWN", "events", id, "participants_json", `参与者引用不存在：${p.entity_id}`));
+          out.push(violation("INVARIANT_JSON_REF_UNKNOWN", "events", id2, "participants_json", `参与者引用不存在：${p.entity_id}`));
         }
       }
     }
@@ -21859,7 +21878,7 @@ function applyGroups(db, orderedGroups, ctx) {
     );
     const fatalOpIds = new Set((group2.opIssues ?? []).filter((i) => i.severity === "error" && i.opId).map((i) => String(i.opId)));
     const fatalIssues = (group2.opIssues ?? []).filter((i) => i.severity === "error");
-    const writableMutations = group2.mutations.filter((m) => !m.sourceOpIds.some((id) => fatalOpIds.has(id)));
+    const writableMutations = group2.mutations.filter((m) => !m.sourceOpIds.some((id2) => fatalOpIds.has(id2)));
     if (fatalIssues.length === 0 && group2.mutations.length === 0) {
       results.push({ groupId: gid, opIds: group2.opIds, status: "applied", issues: [], changedRows: 0 });
       blockedGroups.add(gid);
@@ -22080,9 +22099,9 @@ function planRollback(chain, limits = {}) {
   const parentOf = /* @__PURE__ */ new Map();
   const wallOf = /* @__PURE__ */ new Map();
   for (const row3 of turnRows) {
-    const id = String(row3.id);
-    parentOf.set(id, row3.parent_turn_id === null || row3.parent_turn_id === void 0 ? null : String(row3.parent_turn_id));
-    wallOf.set(id, finiteOr(row3.created_wall_ms, 0));
+    const id2 = String(row3.id);
+    parentOf.set(id2, row3.parent_turn_id === null || row3.parent_turn_id === void 0 ? null : String(row3.parent_turn_id));
+    wallOf.set(id2, finiteOr(row3.created_wall_ms, 0));
   }
   const affected = new Set(collectDescendants(db, branchId, targetTurnId));
   affected.add(targetTurnId);
@@ -22097,10 +22116,10 @@ function planRollback(chain, limits = {}) {
   const depthOf = /* @__PURE__ */ new Map();
   depthOf.set(targetTurnId, 0);
   const children = /* @__PURE__ */ new Map();
-  for (const [id, parent] of parentOf) {
-    if (!parent || !affected.has(id)) continue;
+  for (const [id2, parent] of parentOf) {
+    if (!parent || !affected.has(id2)) continue;
     const list3 = children.get(parent) ?? [];
-    list3.push(id);
+    list3.push(id2);
     children.set(parent, list3);
   }
   const queue = [targetTurnId];
@@ -22121,7 +22140,7 @@ function planRollback(chain, limits = {}) {
     const wb = wallOf.get(b) ?? 0;
     if (wa !== wb) return wa - wb;
     return a < b ? -1 : a > b ? 1 : 0;
-  }).filter((id) => !(target2.kind === "migration" && id === targetTurnId));
+  }).filter((id2) => !(target2.kind === "migration" && id2 === targetTurnId));
   const headTurnId = branch2.head_turn_id === null || branch2.head_turn_id === void 0 ? null : String(branch2.head_turn_id);
   const chainSet = /* @__PURE__ */ new Set();
   let cursor = headTurnId;
@@ -22500,7 +22519,7 @@ function buildHistoryRepairPreview(input) {
     if (parentId !== null) counts.sameNameSameParent += 1;
     else counts.ambiguousSameNameRoot += 1;
     const ids2 = members.map((row3) => text3(row3.id));
-    const withChildren = ids2.filter((id) => (containerOf.get(id) ?? []).length > 0);
+    const withChildren = ids2.filter((id2) => (containerOf.get(id2) ?? []).length > 0);
     const shapes = new Set(members.map((row3) => text3(row3.area_geometry_json) || "(无几何)"));
     const ambiguousRoot = parentId === null && withChildren.length >= 2;
     const containerAmbiguous = withChildren.length >= 2 && !ambiguousRoot;
@@ -22529,12 +22548,12 @@ function buildHistoryRepairPreview(input) {
       return byRefs !== 0 ? byRefs : text3(a.id).localeCompare(text3(b.id));
     });
     const retained = ambiguousRoot ? null : text3(ranked[0].id);
-    const retired = ambiguousRoot ? ids2 : ids2.filter((id) => id !== retained);
+    const retired = ambiguousRoot ? ids2 : ids2.filter((id2) => id2 !== retained);
     const targetIds = new Set(retired);
     const referenceChanges = referenceCensus(targetIds).map((change) => ({ ...change, to: retained ?? "" }));
     const childMapChanges = [];
-    for (const id of retired) for (const map of containerOf.get(id) ?? []) {
-      childMapChanges.push({ mapId: text3(map.id), action: withChildren.length === 1 ? "keep" : "retire", reason: withChildren.length === 1 ? "唯一容器图随地点身份重定向保留" : `容器地点 ${id} 退役后不再保留独立容器图（历史图保留在历史里）` });
+    for (const id2 of retired) for (const map of containerOf.get(id2) ?? []) {
+      childMapChanges.push({ mapId: text3(map.id), action: withChildren.length === 1 ? "keep" : "retire", reason: withChildren.length === 1 ? "唯一容器图随地点身份重定向保留" : `容器地点 ${id2} 退役后不再保留独立容器图（历史图保留在历史里）` });
     }
     for (const map of retained ? containerOf.get(retained) ?? [] : []) {
       childMapChanges.push({ mapId: text3(map.id), action: "keep", reason: "保留方自己的容器图不动" });
@@ -22669,7 +22688,7 @@ function applyHistoryRepair(input) {
     if (typeof mutation7.before?.row_rev === "number") after.row_rev = mutation7.before.row_rev + 1;
     if ("updated_turn_id" in after) after.updated_turn_id = input.turnId;
   };
-  const redirects = new Map(chosen.flatMap((a) => a.kind === "merge-location" ? a.retiredIds.map((id) => [id, a.retainedId]) : []));
+  const redirects = new Map(chosen.flatMap((a) => a.kind === "merge-location" ? a.retiredIds.map((id2) => [id2, a.retainedId]) : []));
   const branchRows = (table) => queryBound(input.db, `SELECT id FROM ${table} WHERE branch_id=?`, [input.branchId]).map((r) => read.selectOne(table, input.branchId, String(r.id))).filter(Boolean);
   for (const action of chosen) {
     if (action.kind === "adopt-space-size") {
@@ -22707,7 +22726,7 @@ function applyHistoryRepair(input) {
         row3[ref2.column] = ref2.to;
       });
     }
-    for (const id of action.retiredIds) edit("locations", id, (row3) => {
+    for (const id2 of action.retiredIds) edit("locations", id2, (row3) => {
       row3.status = "merged";
       row3.merged_into_id = action.retainedId;
     });
@@ -22876,8 +22895,8 @@ function buildAtomicGroups(compiled) {
         if (!internal.has(dep) && indexByOpId.has(dep)) dependsOn.add(dep);
       }
     }
-    const id = `grp_${stableHash2(opIds.join("|"))}`;
-    groups.push({ id, opIds, dependsOn: [...dependsOn], readSet: dedupeReadSet(readSet), mutations, opIssues });
+    const id2 = `grp_${stableHash2(opIds.join("|"))}`;
+    groups.push({ id: id2, opIds, dependsOn: [...dependsOn], readSet: dedupeReadSet(readSet), mutations, opIssues });
   }
   const groupOfOp = /* @__PURE__ */ new Map();
   for (const g of groups) for (const opId of g.opIds) groupOfOp.set(opId, g.id);
@@ -22914,22 +22933,22 @@ function mergeDependencyCycles(groups, issues) {
   const visiting = /* @__PURE__ */ new Set();
   const visited = /* @__PURE__ */ new Set();
   const cycles = [];
-  const dfs = (id, stack) => {
-    if (visited.has(id)) return;
-    if (visiting.has(id)) {
-      const start = stack.indexOf(id);
+  const dfs = (id2, stack) => {
+    if (visited.has(id2)) return;
+    if (visiting.has(id2)) {
+      const start = stack.indexOf(id2);
       if (start >= 0) cycles.push(stack.slice(start));
       return;
     }
-    visiting.add(id);
-    stack.push(id);
-    const g = byId9.get(id);
+    visiting.add(id2);
+    stack.push(id2);
+    const g = byId9.get(id2);
     for (const dep of g?.dependsOn ?? []) {
       if (byId9.has(dep)) dfs(dep, stack);
     }
     stack.pop();
-    visiting.delete(id);
-    visited.add(id);
+    visiting.delete(id2);
+    visited.add(id2);
   };
   for (const g of groups) dfs(g.id, []);
   if (cycles.length === 0) return groups;
@@ -22943,7 +22962,7 @@ function mergeDependencyCycles(groups, issues) {
   const uf = new UnionFind(groups.length);
   const indexById = new Map(groups.map((g, i) => [g.id, i]));
   for (const cycle of cycles) {
-    const idxs = cycle.map((id) => indexById.get(id)).filter((v) => v !== void 0);
+    const idxs = cycle.map((id2) => indexById.get(id2)).filter((v) => v !== void 0);
     for (let i = 1; i < idxs.length; i += 1) uf.union(idxs[0], idxs[i]);
   }
   const buckets = /* @__PURE__ */ new Map();
@@ -23219,8 +23238,8 @@ function collectCauses(op, ctx, issues) {
   const out = [];
   const seen = /* @__PURE__ */ new Set();
   const opId = typeof ctx.opId === "string" && ctx.opId !== "" ? ctx.opId : void 0;
-  const push = (kind, id) => {
-    const trimmed = typeof id === "string" ? id.trim() : "";
+  const push = (kind, id2) => {
+    const trimmed = typeof id2 === "string" ? id2.trim() : "";
     if (trimmed.length === 0) return;
     if (trimmed.startsWith("new:")) return;
     const key = `${kind}\0${trimmed}`;
@@ -23230,9 +23249,9 @@ function collectCauses(op, ctx, issues) {
   };
   for (const cause of ctx.causes ?? []) {
     if (!cause || typeof cause !== "object") continue;
-    const id = typeof cause.id === "string" ? cause.id.trim() : "";
-    if (id.startsWith("new:")) {
-      const resolved = ctx.resolveAlias ? ctx.resolveAlias(id.slice(4)) : null;
+    const id2 = typeof cause.id === "string" ? cause.id.trim() : "";
+    if (id2.startsWith("new:")) {
+      const resolved = ctx.resolveAlias ? ctx.resolveAlias(id2.slice(4)) : null;
       if (resolved) {
         push(typeof cause.kind === "string" ? cause.kind : "entity", resolved);
         continue;
@@ -23241,7 +23260,7 @@ function collectCauses(op, ctx, issues) {
         makeIssue3(
           "SOURCE_CAUSE_UNRESOLVED",
           "$.causes",
-          `因果引用「${id}」仍是 new: 别名；causes 只接受已声明/已解析的 ID，请调用方把 declareRefs 得到的确定性 ID 放进 ctx.causes。`,
+          `因果引用「${id2}」仍是 new: 别名；causes 只接受已声明/已解析的 ID，请调用方把 declareRefs 得到的确定性 ID 放进 ctx.causes。`,
           "warning",
           false,
           opId
@@ -23249,7 +23268,7 @@ function collectCauses(op, ctx, issues) {
       );
       continue;
     }
-    push(typeof cause.kind === "string" ? cause.kind : "entity", id);
+    push(typeof cause.kind === "string" ? cause.kind : "entity", id2);
   }
   const data = op?.data ?? {};
   for (const [field, value] of Object.entries(data)) {
@@ -23731,8 +23750,8 @@ function normalizeSteps(steps, op, ctx, issues) {
       const via = [];
       if (Array.isArray(raw.via_refs)) {
         for (const v of raw.via_refs.slice(0, ACTION_PAYLOAD_REF_LIMIT)) {
-          const id = resolveOne(v, ["location"], `steps[${i}].via_refs`);
-          if (id) via.push(id);
+          const id2 = resolveOne(v, ["location"], `steps[${i}].via_refs`);
+          if (id2) via.push(id2);
         }
       }
       payload.destination_ref = destination;
@@ -23787,8 +23806,8 @@ function normalizeSteps(steps, op, ctx, issues) {
       payload.item_refs = [];
       if (Array.isArray(raw.item_refs)) {
         for (const v of raw.item_refs.slice(0, ACTION_PAYLOAD_REF_LIMIT)) {
-          const id = resolveOne(v, ["item"], `steps[${i}].item_refs`);
-          if (id) payload.item_refs.push(id);
+          const id2 = resolveOne(v, ["item"], `steps[${i}].item_refs`);
+          if (id2) payload.item_refs.push(id2);
         }
       }
     } else if (kind === "act") {
@@ -24150,9 +24169,9 @@ function compileEventPropose(op, ctx) {
     for (const raw of data.participants) {
       if (!isPlainObject9(raw)) continue;
       const refValue = raw.entity_ref ?? raw.ref ?? raw.entity_id;
-      const id = resolveOne(refValue, ["character", "faction", "item", "location"], "participants");
-      if (!id) continue;
-      participants.push({ entity_id: id, role: typeof raw.role === "string" ? raw.role : "participant" });
+      const id2 = resolveOne(refValue, ["character", "faction", "item", "location"], "participants");
+      if (!id2) continue;
+      participants.push({ entity_id: id2, role: typeof raw.role === "string" ? raw.role : "participant" });
     }
   }
   let secrecy = "restricted";
@@ -24245,7 +24264,7 @@ function compileEventPropose(op, ctx) {
           phase: "outcome-effect",
           event,
           target: target2,
-          actorExists: (id) => actor?.id === id && actor.location_id === originId,
+          actorExists: (id2) => actor?.id === id2 && actor.location_id === originId,
           targetLegal: (target3) => target3.kind === "move" ? target3.locationId === originId : target3.kind === "hold" && ctx.tables.selectOne("characters", ctx.branchId, target3.characterId)?.location_id === originId
         });
         result.issues.push(...checked.issues.map((entry) => ({ ...entry, opId: op.opId, line: op.line, path: `$.data.effects[${i}]${entry.path.slice(1)}` })));
@@ -24752,15 +24771,15 @@ function compileChannelUpsert(op, ctx) {
   const scopeLocationRefs = [];
   if (Array.isArray(scope.location_refs)) {
     for (const v of scope.location_refs) {
-      const id = resolveOne(v, ["location"], "scope.location_refs");
-      if (id) scopeLocationRefs.push(id);
+      const id2 = resolveOne(v, ["location"], "scope.location_refs");
+      if (id2) scopeLocationRefs.push(id2);
     }
   }
   const scopeEntityRefs = [];
   if (Array.isArray(scope.entity_refs)) {
     for (const v of scope.entity_refs) {
-      const id = resolveOne(v, null, "scope.entity_refs");
-      if (id) scopeEntityRefs.push(id);
+      const id2 = resolveOne(v, null, "scope.entity_refs");
+      if (id2) scopeEntityRefs.push(id2);
     }
   }
   const hasScope = scopeLocationRefs.length > 0 || scopeEntityRefs.length > 0;
@@ -25057,13 +25076,13 @@ function compileRoutePropose(op, ctx) {
     return result;
   }
   const geometry = validateGeometry(data.geometry, op, result.issues, "$.data.geometry");
-  const endpointRow = (id) => {
-    const candidate = ctx.candidateLocations?.get(id);
-    const original = ctx.tables.selectOne("locations", ctx.branchId, id);
+  const endpointRow = (id2) => {
+    const candidate = ctx.candidateLocations?.get(id2);
+    const original = ctx.tables.selectOne("locations", ctx.branchId, id2);
     for (const dependency of candidate?.opIds ?? []) {
       if (!result.dependencies.includes(dependency)) result.dependencies.push(dependency);
     }
-    if (original) result.readSet.push({ table: "locations", rowId: id, rowRev: Number(original.row_rev ?? 1) });
+    if (original) result.readSet.push({ table: "locations", rowId: id2, rowRev: Number(original.row_rev ?? 1) });
     return candidate?.row ?? original;
   };
   const fromRow = endpointRow(fromId);
@@ -25322,7 +25341,7 @@ function applySpaceStatePatches(input) {
   const locationId = str6(input?.locationId);
   const mapId = str6(input?.mapId);
   const knownIds = new Set((input?.canonical?.furnishing ?? []).map((entry) => entry.localId));
-  const authorLocked = new Set((input?.authorLockedObjectIds ?? []).map((id) => str6(id)).filter((id) => id !== ""));
+  const authorLocked = new Set((input?.authorLockedObjectIds ?? []).map((id2) => str6(id2)).filter((id2) => id2 !== ""));
   const state = /* @__PURE__ */ new Map();
   const affected = [];
   if (input?.readOnly === true) {
@@ -25548,11 +25567,11 @@ function readSpaceStateFacts(world3, subjectPrefix) {
   return { states: resolveSpaceStateFacts(rows4, subjectPrefix, diagnostics), diagnostics };
 }
 function readObjectStateFacts(world3, objectId) {
-  const id = str6(objectId);
-  if (id === "") return null;
-  const seed = readSpaceStateFacts(world3, id).states.get(id);
+  const id2 = str6(objectId);
+  if (id2 === "") return null;
+  const seed = readSpaceStateFacts(world3, id2).states.get(id2);
   if (!seed) return null;
-  return initialState(id, seed);
+  return initialState(id2, seed);
 }
 var OPENING_STATES2, MATERIALS, WORLD_FACT_PAYLOAD_KIND2, OBJECT_STATE_PREDICATES;
 var init_atlas_space_state = __esm({
@@ -25612,11 +25631,11 @@ function latestFactId(rows4, subjectId, predicate) {
     if (!payload) continue;
     if (str7(payload.payloadKind) !== "world-fact/v1") continue;
     if (str7(payload.subjectId) !== subjectId || str7(payload.predicate) !== predicate) continue;
-    const id = str7(payload.id) || str7(row3.id);
-    if (id === "") continue;
+    const id2 = str7(payload.id) || str7(row3.id);
+    if (id2 === "") continue;
     const layer = str7(payload.layer) === "state-event" ? 1 : 0;
     const clock = typeof payload.effectiveClockS === "number" && Number.isFinite(payload.effectiveClockS) ? Number(payload.effectiveClockS) : 0;
-    if (!best || layer > best.layer || layer === best.layer && clock >= best.clock) best = { id, layer, clock };
+    if (!best || layer > best.layer || layer === best.layer && clock >= best.clock) best = { id: id2, layer, clock };
   }
   return best ? best.id : null;
 }
@@ -25949,9 +25968,9 @@ function compileOperations(input) {
     ...input.turnId ? { turnId: input.turnId } : {},
     basisFor: (op, extra) => {
       const causes = (input.sources?.causes ?? []).map((cause) => {
-        const id = typeof cause?.id === "string" ? cause.id : "";
-        if (!id.startsWith("new:")) return cause;
-        const alias = id.slice(4);
+        const id2 = typeof cause?.id === "string" ? cause.id : "";
+        if (!id2.startsWith("new:")) return cause;
+        const alias = id2.slice(4);
         const resolved = declared.aliasById.get(alias) ?? scope.get(alias)?.id ?? null;
         return resolved ? { ...cause, id: resolved } : cause;
       });
@@ -27259,9 +27278,9 @@ function enqueueProjectionSync(db, input) {
   );
   const superseded = [];
   for (const row3 of stale) {
-    const id = String(row3.id);
-    runBound(db, `UPDATE sync_outbox SET status = 'superseded', completed_wall_ms = ? WHERE id = ?`, [input.nowWallMs, id]);
-    superseded.push(id);
+    const id2 = String(row3.id);
+    runBound(db, `UPDATE sync_outbox SET status = 'superseded', completed_wall_ms = ? WHERE id = ?`, [input.nowWallMs, id2]);
+    superseded.push(id2);
   }
   const taskId = input.makeId(idempotencyKey);
   runBound(
@@ -28663,14 +28682,14 @@ function readWorldBuildTurnLink(decisions) {
 }
 function resolveBuildOriginHost(db, branchId, turnId) {
   const seen = /* @__PURE__ */ new Set();
-  let id = turnId;
-  while (id && !seen.has(id) && seen.size < 128) {
-    seen.add(id);
-    const row3 = queryBound(db, "SELECT host_message_uid,parent_turn_id FROM turns WHERE branch_id=? AND id=?", [branchId, id])[0];
+  let id2 = turnId;
+  while (id2 && !seen.has(id2) && seen.size < 128) {
+    seen.add(id2);
+    const row3 = queryBound(db, "SELECT host_message_uid,parent_turn_id FROM turns WHERE branch_id=? AND id=?", [branchId, id2])[0];
     if (!row3) return null;
     const host = typeof row3["host_message_uid"] === "string" ? row3["host_message_uid"] : "";
     if (host && !host.startsWith("world-build:")) return host;
-    id = typeof row3["parent_turn_id"] === "string" ? row3["parent_turn_id"] : null;
+    id2 = typeof row3["parent_turn_id"] === "string" ? row3["parent_turn_id"] : null;
   }
   return null;
 }
@@ -28970,8 +28989,8 @@ var init_atlas_turn_analysis_view = __esm({
 });
 
 // src/atlas-sim-position.ts
-function row(db, table, branchId, id) {
-  const rows4 = queryBound(db, `SELECT * FROM ${table} WHERE branch_id = ? AND id = ? LIMIT 1`, [branchId, id]);
+function row(db, table, branchId, id2) {
+  const rows4 = queryBound(db, `SELECT * FROM ${table} WHERE branch_id = ? AND id = ? LIMIT 1`, [branchId, id2]);
   if (rows4.length === 0) return null;
   const decoded2 = decodeRow(table, rows4[0], { allowExtra: true });
   return decoded2.ok ? decoded2.row : null;
@@ -29131,10 +29150,10 @@ function gridOf(entity) {
     radius: typeof entity.uncertainty_radius_cells === "number" ? entity.uncertainty_radius_cells : null
   };
 }
-function pickRow(world3, cache, table, id) {
+function pickRow(world3, cache, table, id2) {
   const bucket = cache?.[table];
-  if (bucket) return bucket.get(id) ?? null;
-  return row(world3.db, table, world3.branchId, id);
+  if (bucket) return bucket.get(id2) ?? null;
+  return row(world3.db, table, world3.branchId, id2);
 }
 function pickOpenJourney(world3, cache, entityId) {
   if (cache?.journeyByMover) return cache.journeyByMover.get(entityId) ?? null;
@@ -29365,7 +29384,7 @@ function placeUnlocatedScenePoints(input) {
   }
   return { placed, remainingIds: remainingIds.sort(), issues };
 }
-function interiorPositionHint(action, id) {
+function interiorPositionHint(action, id2) {
   const zones = [
     [/(窗边|窗旁|靠窗|window)/i, 80, 30, "窗边"],
     [/(门口|门边|门旁|门前|入口|巷口|路口|door)/i, 18, 80, "入口附近"],
@@ -29381,7 +29400,7 @@ function interiorPositionHint(action, id) {
   }).sort((a, b) => b.index - a.index)[0];
   if (!zone || zone.index < 0) return null;
   let hash2 = 0;
-  for (const letter of id) hash2 = Math.imul(hash2, 31) + letter.charCodeAt(0) | 0;
+  for (const letter of id2) hash2 = Math.imul(hash2, 31) + letter.charCodeAt(0) | 0;
   return {
     x: zone.entry[1] + (hash2 >>> 0) % 11 - 5,
     y: zone.entry[2] + ((hash2 >>> 4) % 11 - 5),
@@ -29591,9 +29610,9 @@ function collectSpatialFacts(input) {
 function projectSpatialFactsForActor(input) {
   const actorId = text4(input?.actorId);
   const facts = input?.facts;
-  const secret = new Set((input?.secretObjectIds ?? []).map(text4).filter((id) => id.length > 0));
-  const hidden = new Set((input?.hiddenObjectIds ?? []).map(text4).filter((id) => id.length > 0));
-  const knownList = (input?.knownObjectIds ?? []).map(text4).filter((id) => id.length > 0);
+  const secret = new Set((input?.secretObjectIds ?? []).map(text4).filter((id2) => id2.length > 0));
+  const hidden = new Set((input?.hiddenObjectIds ?? []).map(text4).filter((id2) => id2.length > 0));
+  const knownList = (input?.knownObjectIds ?? []).map(text4).filter((id2) => id2.length > 0);
   const known = knownList.length > 0 ? new Set(knownList) : null;
   const issues = [];
   const observed = [];
@@ -29648,8 +29667,8 @@ function text5(value) {
   return typeof value === "string" ? value.trim() : "";
 }
 function mapIdOf(value) {
-  const id = text5(value);
-  return id ? id : null;
+  const id2 = text5(value);
+  return id2 ? id2 : null;
 }
 function sceneEntryDedupeKey(input) {
   return [text5(input?.actorId), text5(input?.toLocationId), text5(input?.turnId), mapIdOf(input?.interiorMapId) ?? ""].join("|");
@@ -29658,7 +29677,7 @@ function issueOf(code, message, path = "$") {
   return { code, path, message, severity: "warning", retryable: false };
 }
 function collectConfirmedSceneEntries(input) {
-  const saved = new Set((input?.savedFloorIds ?? []).map((id) => text5(id)).filter(Boolean));
+  const saved = new Set((input?.savedFloorIds ?? []).map((id2) => text5(id2)).filter(Boolean));
   const protagonistId = text5(input?.protagonistId);
   const issues = [];
   const entries = [];
@@ -29724,7 +29743,7 @@ function collectConfirmedSceneEntries(input) {
 }
 function sceneEntryActivation(entry, targets, knownSubspaceIds = []) {
   const facility = text5(entry?.toLocationId);
-  const allowed = /* @__PURE__ */ new Set([facility, ...knownSubspaceIds.map((id) => text5(id)).filter(Boolean)]);
+  const allowed = /* @__PURE__ */ new Set([facility, ...knownSubspaceIds.map((id2) => text5(id2)).filter(Boolean)]);
   const activateTargetIds = (targets ?? []).filter((target2) => target2?.status === "waiting-for-entry").filter((target2) => allowed.has(text5(target2.subjectId)) || (entry?.interiorMapId ? text5(target2.subjectId) === text5(entry.interiorMapId) : false)).map((target2) => String(target2.id)).sort();
   return { facilityLocationId: facility, interiorMapId: mapIdOf(entry?.interiorMapId), activateTargetIds, expandToSettlement: false };
 }
@@ -29901,7 +29920,7 @@ function sightOpen(trait) {
 function buildPerceptionCandidates(input) {
   const issues = [];
   const projection = input?.projection;
-  const blocked = new Set((input?.blockedObjectIds ?? []).map(text6).filter((id) => id.length > 0));
+  const blocked = new Set((input?.blockedObjectIds ?? []).map(text6).filter((id2) => id2.length > 0));
   const observerObjectId = text6(input?.observerObjectId);
   if (!projection || text6(projection.actorId).length === 0) {
     issues.push({
@@ -30042,10 +30061,10 @@ function evaluateClaim(claim, trait, destroyed, access) {
 function detectSceneContradictions(input) {
   const traits = /* @__PURE__ */ new Map();
   for (const trait of input?.traits ?? []) {
-    const id = text7(trait?.objectId);
-    if (id && !traits.has(id)) traits.set(id, trait);
+    const id2 = text7(trait?.objectId);
+    if (id2 && !traits.has(id2)) traits.set(id2, trait);
   }
-  const destroyed = new Set((input?.destroyedObjectIds ?? []).map((id) => text7(id)).filter(Boolean));
+  const destroyed = new Set((input?.destroyedObjectIds ?? []).map((id2) => text7(id2)).filter(Boolean));
   const unevaluated = [
     { scope: "free-text-narration", reason: "自然语言正文不做全检：只核对结构化事件与已知空间事实能对上的部分" }
   ];
@@ -30216,9 +30235,9 @@ function interiorReadiness(layoutSaved) {
   return layoutSaved ? { ready: true, note: null, interiorMapId: null } : { ready: false, note: "内部布局未就绪：只给真实位置与结构状态，不编造家具或尺寸", interiorMapId: null };
 }
 function readFurnishingStates(world3, locationId) {
-  const id = str8(locationId);
-  if (id === "") return { states: /* @__PURE__ */ new Map(), diagnostics: [] };
-  return readSpaceStateFacts(world3, `space:${id}:furn:`);
+  const id2 = str8(locationId);
+  if (id2 === "") return { states: /* @__PURE__ */ new Map(), diagnostics: [] };
+  return readSpaceStateFacts(world3, `space:${id2}:furn:`);
 }
 function readActorSceneFacts(world3, input) {
   const diagnostics = [];
@@ -30432,8 +30451,8 @@ function decodeOrNull(table, row3) {
   const decoded2 = decodeRow(table, row3, { allowExtra: true });
   return decoded2.ok ? decoded2.row : null;
 }
-function loadRow(world3, table, id) {
-  const rows4 = queryBound(world3.db, `SELECT * FROM ${table} WHERE branch_id = ? AND id = ? LIMIT 1`, [world3.branchId, id]);
+function loadRow(world3, table, id2) {
+  const rows4 = queryBound(world3.db, `SELECT * FROM ${table} WHERE branch_id = ? AND id = ? LIMIT 1`, [world3.branchId, id2]);
   return rows4.length > 0 ? decodeOrNull(table, rows4[0]) : null;
 }
 function leafResult(ok, reason, atS) {
@@ -30981,8 +31000,8 @@ function decodeOrNull2(table, row3) {
   const decoded2 = decodeRow(table, row3, { allowExtra: true });
   return decoded2.ok ? decoded2.row : null;
 }
-function loadRow2(world3, table, id) {
-  const rows4 = queryBound(world3.db, `SELECT * FROM ${table} WHERE branch_id = ? AND id = ? LIMIT 1`, [world3.branchId, id]);
+function loadRow2(world3, table, id2) {
+  const rows4 = queryBound(world3.db, `SELECT * FROM ${table} WHERE branch_id = ? AND id = ? LIMIT 1`, [world3.branchId, id2]);
   return rows4.length > 0 ? decodeOrNull2(table, rows4[0]) : null;
 }
 function selectMobility(actor, route, evidence) {
@@ -31973,9 +31992,9 @@ function projectForPov(world3, pov) {
   );
   const informationIds = new Set(knowledgeRows.map((k) => String(k.information_id)));
   const informations = /* @__PURE__ */ new Map();
-  for (const id of informationIds) {
-    const found = rows(world3.db, "information", "SELECT * FROM information WHERE branch_id = ? AND id = ?", [world3.branchId, id]);
-    if (found.length > 0) informations.set(id, found[0]);
+  for (const id2 of informationIds) {
+    const found = rows(world3.db, "information", "SELECT * FROM information WHERE branch_id = ? AND id = ?", [world3.branchId, id2]);
+    if (found.length > 0) informations.set(id2, found[0]);
   }
   const knownLocations = [];
   const knownCharacters = [];
@@ -32225,12 +32244,12 @@ function sqlVisibility(ctx) {
   const visibleCharacters = new Set(povId ? [povId] : []), visibleItems = /* @__PURE__ */ new Set();
   if (here) {
     const seen = /* @__PURE__ */ new Set();
-    let id = here;
-    while (id && !seen.has(id)) {
-      seen.add(id);
-      knownLocations.add(id);
-      const loc = cache.locations?.get(id);
-      id = loc?.parent_location_id ? String(loc.parent_location_id) : null;
+    let id2 = here;
+    while (id2 && !seen.has(id2)) {
+      seen.add(id2);
+      knownLocations.add(id2);
+      const loc = cache.locations?.get(id2);
+      id2 = loc?.parent_location_id ? String(loc.parent_location_id) : null;
     }
     for (const ch of cache.characters?.values() ?? []) {
       if (ch.status !== "active") continue;
@@ -32251,7 +32270,7 @@ function sqlVisibility(ctx) {
     knownCharacters,
     visibleCharacters,
     visibleItems,
-    visible: (kind, id) => kind === "location" ? knownLocations.has(id) : kind === "character" ? visibleCharacters.has(id) : visibleItems.has(id)
+    visible: (kind, id2) => kind === "location" ? knownLocations.has(id2) : kind === "character" ? visibleCharacters.has(id2) : visibleItems.has(id2)
   };
 }
 var init_atlas_sql_visibility = __esm({
@@ -32472,9 +32491,9 @@ function rowsAll(ctx, table, where = "", params = []) {
     const page = queryBound(ctx.db, `SELECT * FROM ${table} WHERE ${clauses.join(" AND ")} ORDER BY id ASC LIMIT 500`, values);
     if (!page.length) return result;
     for (const raw of page) {
-      const id = String(raw.id ?? "");
-      if (!id || afterId !== null && id <= afterId) throw new AtlasDbError("READ_CURSOR_INVALID", "地图只读分页游标不可用", { table });
-      afterId = id;
+      const id2 = String(raw.id ?? "");
+      if (!id2 || afterId !== null && id2 <= afterId) throw new AtlasDbError("READ_CURSOR_INVALID", "地图只读分页游标不可用", { table });
+      afterId = id2;
       const decoded2 = decodeRow(table, raw, { allowExtra: true });
       result.push(decoded2.ok ? decoded2.row : raw);
     }
@@ -32848,23 +32867,23 @@ function queryNearby(ctx, query) {
   }
   const here = target2.kind === "at_grid" ? target2.mapId : target2.kind === "at_location" ? target2.locationId : null;
   const characters = rows2(ctx, "characters", "status = 'active'", [], 1e3);
-  const directLocation = (id, p) => {
+  const directLocation = (id2, p) => {
     if (p.kind === "in_transit" || p.kind === "unknown") return null;
     if (p.kind === "at_location") return p.locationId;
-    if (cache.locations?.has(id)) return id;
-    const character = cache.characters?.get(id);
+    if (cache.locations?.has(id2)) return id2;
+    const character = cache.characters?.get(id2);
     return character?.location_id ? String(character.location_id) : null;
   };
   const targetLocation = entityId ? directLocation(entityId, target2) : null;
   const results = [];
   for (const ch of characters) {
-    const id = String(ch.id);
-    if (entityId && id === entityId) continue;
-    const position = resolveEffectivePosition(ctx, id, void 0, cache);
-    const locationId = directLocation(id, position);
+    const id2 = String(ch.id);
+    if (entityId && id2 === entityId) continue;
+    const position = resolveEffectivePosition(ctx, id2, void 0, cache);
+    const locationId = directLocation(id2, position);
     if (targetLocation && locationId === targetLocation) {
       results.push({
-        entityId: id,
+        entityId: id2,
         name: String(ch.name ?? ""),
         relevance: "same_location",
         positionQuality: position.kind === "at_grid" ? position.precision : "coarse",
@@ -32879,7 +32898,7 @@ function queryNearby(ctx, query) {
       const dy = position.y - target2.y;
       if (Math.hypot(dx, dy) > 10) continue;
       results.push({
-        entityId: id,
+        entityId: id2,
         name: String(ch.name ?? ""),
         relevance: "same_map",
         positionQuality: position.precision,
@@ -33350,11 +33369,11 @@ function queryCatalog(ctx, query) {
   const clock = Number(queryBound(ctx.db, "SELECT clock_s FROM branches WHERE id = ?", [ctx.branchId])[0]?.clock_s ?? 0);
   const visibleRow = (kind, row3) => {
     if (!isPov) return true;
-    const id = String(row3.id);
+    const id2 = String(row3.id);
     const locationId = row3.location_id === null || row3.location_id === void 0 ? null : String(row3.location_id);
-    if (kind === "location") return visibility.knownLocations.has(id);
-    if (kind === "character") return id === visibility.povId || visibility.knownCharacters.has(id);
-    if (kind === "item") return visibility.visibleItems.has(id);
+    if (kind === "location") return visibility.knownLocations.has(id2);
+    if (kind === "character") return id2 === visibility.povId || visibility.knownCharacters.has(id2);
+    if (kind === "item") return visibility.visibleItems.has(id2);
     if (kind === "event") {
       if (String(row3.secrecy ?? "restricted") !== "public") return false;
       return locationId === null || visibility.knownLocations.has(locationId);
@@ -33783,19 +33802,19 @@ function renderedEntityIds(scene, known) {
   if (!layout) return { entities, routeIds, selfIds };
   const kind = TEXT2(layout.kind);
   const add2 = (value) => {
-    const id = TEXT2(value);
-    if (id && known.has(id)) entities.add(id);
+    const id2 = TEXT2(value);
+    if (id2 && known.has(id2)) entities.add(id2);
   };
   const addAny = (value) => {
-    const id = TEXT2(value);
-    if (id) entities.add(id);
+    const id2 = TEXT2(value);
+    if (id2) entities.add(id2);
   };
   if (kind === "overview") {
     for (const shape of Array.isArray(layout.shapes) ? layout.shapes : []) add2(shape?.id);
     for (const pin of Array.isArray(layout.pins) ? layout.pins : []) add2(pin?.id);
     for (const route of Array.isArray(layout.routes) ? layout.routes : []) {
-      const id = TEXT2(route?.id);
-      if (id) routeIds.add(id);
+      const id2 = TEXT2(route?.id);
+      if (id2) routeIds.add(id2);
     }
     const selfArea = PLAIN2(layout.selfArea) ? layout.selfArea : null;
     const selfId = selfArea ? TEXT2(selfArea.locationId) : "";
@@ -33841,65 +33860,65 @@ function assessMapCompleteness(input) {
   const requestState = input.requestState ?? (savedRequestStatus === "failed" ? "failed" : savedRequestStatus === "pending" ? "pending" : "idle");
   const known = new Set(input.knownEntityIds ?? []);
   for (const row3 of input.members ?? []) {
-    const id = TEXT2(row3?.id);
-    if (id) known.add(id);
+    const id2 = TEXT2(row3?.id);
+    if (id2) known.add(id2);
   }
   const containerId = input.container ? TEXT2(input.container.id) : "";
   const expected = /* @__PURE__ */ new Set();
   for (const row3 of input.members ?? []) {
-    const id = TEXT2(row3?.id);
-    if (id && id !== containerId) expected.add(id);
+    const id2 = TEXT2(row3?.id);
+    if (id2 && id2 !== containerId) expected.add(id2);
   }
   for (const proxy of input.entranceProxies ?? []) {
-    const id = TEXT2(proxy?.id);
-    if (id) expected.add(id);
+    const id2 = TEXT2(proxy?.id);
+    if (id2) expected.add(id2);
   }
   for (const row3 of input.characters ?? []) {
-    const id = TEXT2(row3?.id);
-    if (id) expected.add(id);
+    const id2 = TEXT2(row3?.id);
+    if (id2) expected.add(id2);
   }
   for (const row3 of input.items ?? []) {
-    const id = TEXT2(row3?.id);
-    if (id) expected.add(id);
+    const id2 = TEXT2(row3?.id);
+    if (id2) expected.add(id2);
   }
   const rendered = renderedEntityIds(sceneValid ? rawScene : null, known);
-  for (const id of rendered.selfIds) if (id === containerId) rendered.entities.add(id);
-  const listRepresented = new Set((input.listIds ?? []).map((value) => TEXT2(value)).filter((id) => id.length > 0));
+  for (const id2 of rendered.selfIds) if (id2 === containerId) rendered.entities.add(id2);
+  const listRepresented = new Set((input.listIds ?? []).map((value) => TEXT2(value)).filter((id2) => id2.length > 0));
   const expectedRouteIds = /* @__PURE__ */ new Set();
   const layoutKind = input.profile.layoutKind;
   if (layoutKind === "overview") {
     for (const row3 of input.routes ?? []) {
-      const id = TEXT2(row3?.id);
-      if (!id) continue;
+      const id2 = TEXT2(row3?.id);
+      if (!id2) continue;
       const from = TEXT2(row3?.from_location_id);
       const to = TEXT2(row3?.to_location_id);
       const unknownEndpoint = from && !known.has(from) || to && !known.has(to);
       const geometry = row3?.geometry ?? null;
       if (unknownEndpoint) {
-        routeIssues.push(issue23("MAP_ROUTE_ENDPOINT_UNKNOWN", `${path}.routes.${id}`, `路线 ${id} 的端点不在当前可见目录内：保留有效部分，不把它画成连接`, "warning", { relatedIds: [from, to].filter((value) => value.length > 0) }));
+        routeIssues.push(issue23("MAP_ROUTE_ENDPOINT_UNKNOWN", `${path}.routes.${id2}`, `路线 ${id2} 的端点不在当前可见目录内：保留有效部分，不把它画成连接`, "warning", { relatedIds: [from, to].filter((value) => value.length > 0) }));
         continue;
       }
       if (geometry === null || geometry === void 0) {
-        routeIssues.push(issue23("MAP_ROUTE_GEOMETRY_MISSING", `${path}.routes.${id}`, `路线 ${id} 没有可绘制几何：本轮只保留端点关系，不画假线`, "warning", { relatedIds: [id] }));
+        routeIssues.push(issue23("MAP_ROUTE_GEOMETRY_MISSING", `${path}.routes.${id2}`, `路线 ${id2} 没有可绘制几何：本轮只保留端点关系，不画假线`, "warning", { relatedIds: [id2] }));
         continue;
       }
-      expectedRouteIds.add(id);
+      expectedRouteIds.add(id2);
     }
   }
-  for (const id of expectedRouteIds) expected.add(id);
-  for (const id of rendered.routeIds) rendered.entities.add(id);
+  for (const id2 of expectedRouteIds) expected.add(id2);
+  for (const id2 of rendered.routeIds) rendered.entities.add(id2);
   const expectedIds = sortedUnique(expected);
   const renderedIds = sortedUnique([...rendered.entities, ...listRepresented]);
   const renderedSet = new Set(renderedIds);
-  const missingIds = sceneState === "missing" || sceneState === "invalid" ? [] : expectedIds.filter((id) => !renderedSet.has(id));
+  const missingIds = sceneState === "missing" || sceneState === "invalid" ? [] : expectedIds.filter((id2) => !renderedSet.has(id2));
   for (const member of input.profile.unsupported ?? []) {
-    const id = TEXT2(member?.id);
+    const id2 = TEXT2(member?.id);
     semanticIssues.push(issue23(
       "MAP_MEMBER_UNSUPPORTED",
       `${path}.profile`,
-      `成员 ${id}（${TEXT2(member?.kind) || "未知类型"}）当前模板表达不了：${TEXT2(member?.reason) || "保留实体与事实，不替换类型凑成功"}`,
+      `成员 ${id2}（${TEXT2(member?.kind) || "未知类型"}）当前模板表达不了：${TEXT2(member?.reason) || "保留实体与事实，不替换类型凑成功"}`,
       "warning",
-      { relatedIds: id ? [id] : [] }
+      { relatedIds: id2 ? [id2] : [] }
     ));
   }
   if (sceneState === "unsupported") {
@@ -33941,7 +33960,7 @@ var init_atlas_map_assessment = __esm({
     init_atlas_spatial();
     PLAIN2 = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
     TEXT2 = (value) => typeof value === "string" && value.length > 0 ? value : "";
-    sortedUnique = (values) => [...new Set(values)].filter((id) => id.length > 0).sort();
+    sortedUnique = (values) => [...new Set(values)].filter((id2) => id2.length > 0).sort();
     DECORATIVE_SCENE_KEYS = Object.freeze(["features", "roads", "segments", "lamps", "windows", "bodies"]);
   }
 });
@@ -34231,7 +34250,7 @@ function querySpatialScene(ctx, query) {
     const mapRow = mapRows.get(mapId) ?? { id: mapId, frame_json: frame };
     const containerId = mapRow.container_location_id ? String(mapRow.container_location_id) : "";
     const container = containerId ? locationById.get(containerId) ?? null : null;
-    const visible = (id) => scope.viewMode !== "pov" || visibility.knownLocations.has(id);
+    const visible = (id2) => scope.viewMode !== "pov" || visibility.knownLocations.has(id2);
     const members = collectMapLocations({ mapRow, maps: [...mapRows.values()], locations: locationRows }).filter((row3) => visible(String(row3.id)));
     const profile = resolveSpatialProfile({
       map: mapRow,
@@ -34355,8 +34374,8 @@ function queryTasks(ctx, query) {
   const actor = typeof query.entityId === "string" && query.entityId ? query.entityId : null;
   const statusFilter = typeof query.status === "string" && query.status ? query.status : null;
   const items = [];
-  const knownActor = (id) => !isPov || id !== null && (id === visibility.povId || visibility.knownCharacters.has(id));
-  const knownPlace = (id) => !isPov || id === null || visibility.knownLocations.has(id);
+  const knownActor = (id2) => !isPov || id2 !== null && (id2 === visibility.povId || visibility.knownCharacters.has(id2));
+  const knownPlace = (id2) => !isPov || id2 === null || visibility.knownLocations.has(id2);
   const actionParams = [ctx.branchId];
   let actionSql = "SELECT * FROM actions WHERE branch_id = ?";
   if (actor) {
@@ -34663,7 +34682,7 @@ function readHistoricalRows(db, input) {
     [branchId, committedRevision, ...HISTORICAL_TURN_STATUSES]
   );
   const turnIds = windowTurns.map((t) => String(t.id));
-  const turnRank = new Map(turnIds.map((id, index) => [id, index]));
+  const turnRank = new Map(turnIds.map((id2, index) => [id2, index]));
   const { entries, issues, rawCount } = readJournalRows(db, turnIds, tables);
   entries.sort(
     (a, b) => (turnRank.get(a.turnId) ?? 0) - (turnRank.get(b.turnId) ?? 0) || a.sequence - b.sequence
@@ -34695,8 +34714,8 @@ function readHistoricalRows(db, input) {
     present[table] = [];
     unresolved[table] = [];
     const currentIds = queryBound(db, `SELECT id FROM ${table} WHERE branch_id = ?`, [branchId]).map((r) => String(r.id ?? "")).filter(Boolean);
-    for (const id of currentIds) {
-      if (!folded.has(`${table}\0${id}`)) unresolved[table].push(id);
+    for (const id2 of currentIds) {
+      if (!folded.has(`${table}\0${id2}`)) unresolved[table].push(id2);
     }
     present[table].sort(compareText);
     unresolved[table].sort(compareText);
@@ -34772,7 +34791,7 @@ function stableId(flavor, eventId, turnId) {
 function buildEventFeedCandidates(turns, options = {}) {
   const formatTime = options.formatTime ?? defaultTimeLabel;
   const labels = options.labels ?? {};
-  const labelOf = (id) => typeof labels[id] === "string" && labels[id] ? labels[id] : id;
+  const labelOf = (id2) => typeof labels[id2] === "string" && labels[id2] ? labels[id2] : id2;
   const out = [];
   for (const turn of turns ?? []) {
     if (!turn || typeof turn.turnId !== "string" || !turn.turnId) continue;
@@ -34819,12 +34838,12 @@ function buildEventFeedCandidates(turns, options = {}) {
       const links = [];
       if (locationId) links.push({ kind: "location", id: locationId, label: labelOf(locationId) });
       for (const p of participants) {
-        const id = str13(p.entity_id);
-        if (!id || id === locationId) continue;
+        const id2 = str13(p.entity_id);
+        if (!id2 || id2 === locationId) continue;
         links.push({
-          kind: options.entityKindById?.[id] ?? "character",
-          id,
-          label: str13(p.role) && str13(p.role) !== "participant" ? str13(p.role) : labelOf(id)
+          kind: options.entityKindById?.[id2] ?? "character",
+          id: id2,
+          label: str13(p.role) && str13(p.role) !== "participant" ? str13(p.role) : labelOf(id2)
         });
       }
       const subjectId = str13(after.subject_entity_id);
@@ -34914,14 +34933,14 @@ function defaultTransitionTimeLabel(seconds) {
 function buildTransitionFeedCandidates(turns, options = {}) {
   const formatTime = options.formatTime ?? defaultTransitionTimeLabel;
   const labels = options.labels ?? {};
-  const labelOf = (id) => {
-    const key = str14(id);
+  const labelOf = (id2) => {
+    const key = str14(id2);
     if (!key) return "";
     const label2 = labels[key];
     return typeof label2 === "string" && label2 ? label2 : key;
   };
-  const kindOf = (id) => options.entityKindById?.[id] ?? "character";
-  const mapOf = (id) => id ? options.mapIdByLocationId?.[id] ?? null : null;
+  const kindOf = (id2) => options.entityKindById?.[id2] ?? "character";
+  const mapOf = (id2) => id2 ? options.mapIdByLocationId?.[id2] ?? null : null;
   const info = options.informationById ?? {};
   const covered = new Set((options.coveredByEvents ?? []).map((c) => `${c.table}\0${c.rowId}`));
   const out = [];
@@ -35251,7 +35270,7 @@ function filterFeedCandidates(candidates, ctx) {
     const facts = knowledgeAtTurn(item.turnId).filter(knowledgeIsEvidence);
     const firstHand = facts.filter((f) => f.isPov || povId !== null && f.knowerCharacterId === povId);
     const reported = facts.filter((f) => !firstHand.includes(f));
-    const isParticipant = !!povId && (candidate.participantIds ?? []).some((id) => id === povId);
+    const isParticipant = !!povId && (candidate.participantIds ?? []).some((id2) => id2 === povId);
     const samePlace = !!candidate.locationId && povPlaceAtTurn(item.turnId) === candidate.locationId;
     if (isEventCard && candidate.eventId) {
       const firstHandCovers = firstHand.some((f) => f.sourceEventId && f.sourceEventId === candidate.eventId);
@@ -35274,7 +35293,7 @@ function filterFeedCandidates(candidates, ctx) {
       }
       continue;
     }
-    const isActor = !!povId && (candidate.participantIds ?? []).some((id) => id === povId);
+    const isActor = !!povId && (candidate.participantIds ?? []).some((id2) => id2 === povId);
     if (isActor) {
       items.push({ ...item, visibility: "known" });
       continue;
@@ -35285,7 +35304,7 @@ function filterFeedCandidates(candidates, ctx) {
     }
   }
   const sanitized = author ? items : items.map((item) => {
-    const keep = (id) => item.target?.id === id || visible.has(id) || id === povId;
+    const keep = (id2) => item.target?.id === id2 || visible.has(id2) || id2 === povId;
     const links = item.links.filter((l) => keep(l.id));
     const locationId = item.locationId && keep(item.locationId) ? item.locationId : null;
     return {
@@ -35497,11 +35516,11 @@ function readLabelTables(ctx) {
   ];
   for (const [table, kind, labelColumn] of sources) {
     for (const row3 of queryBound(ctx.db, `SELECT id, ${labelColumn} AS label FROM ${table} WHERE branch_id = ?`, [ctx.branchId])) {
-      const id = String(row3.id ?? "");
-      if (!id) continue;
-      kinds[id] = kind;
+      const id2 = String(row3.id ?? "");
+      if (!id2) continue;
+      kinds[id2] = kind;
       const name = str15(row3.label);
-      if (name) labels[id] = name;
+      if (name) labels[id2] = name;
     }
   }
   for (const row3 of queryBound(ctx.db, "SELECT id, map_id FROM locations WHERE branch_id = ?", [ctx.branchId])) {
@@ -35534,8 +35553,8 @@ function povVisibleSet(ctx, povId) {
     const infoId = str15(row3.information_id);
     if (infoId) set.add(infoId);
     for (const key of ["origin_location_id", "subject_entity_id"]) {
-      const id = str15(row3[key]);
-      if (id) set.add(id);
+      const id2 = str15(row3[key]);
+      if (id2) set.add(id2);
     }
   }
   return set;
@@ -35618,17 +35637,17 @@ function queryWorldFeed(ctx, query) {
   }
   const labelTables = readLabelTables(ctx);
   const visibleSet = viewMode === "pov" && povId ? povVisibleSet(ctx, povId) : null;
-  const placeholderOf = (id) => {
-    const kind = labelTables.kinds[id];
+  const placeholderOf = (id2) => {
+    const kind = labelTables.kinds[id2];
     return kind ? PLACEHOLDER[kind] : "某个已知对象";
   };
   const effectiveLabels = {};
   if (viewMode === "pov") {
-    for (const id of Object.keys(labelTables.kinds)) {
-      effectiveLabels[id] = visibleSet?.has(id) ? labelTables.labels[id] ?? id : placeholderOf(id);
+    for (const id2 of Object.keys(labelTables.kinds)) {
+      effectiveLabels[id2] = visibleSet?.has(id2) ? labelTables.labels[id2] ?? id2 : placeholderOf(id2);
     }
   } else {
-    for (const [id, name] of Object.entries(labelTables.labels)) effectiveLabels[id] = name;
+    for (const [id2, name] of Object.entries(labelTables.labels)) effectiveLabels[id2] = name;
   }
   while (blocks < ATLAS_RUNTIME_LIMITS.feedMaxScanBlocks && collected.length < limit) {
     const batch2 = turnWindow.slice(
@@ -35676,7 +35695,7 @@ function queryWorldFeed(ctx, query) {
       if (snapshots.length === 0) continue;
       const history = historyOf(turn.id);
       const infoById = informationSnapshots(history);
-      const kindOfInfo = (id) => str15(infoById[id]?.kind);
+      const kindOfInfo = (id2) => str15(infoById[id2]?.kind);
       const turnOrigin = turn.kind === "manual" ? "manual" : turn.kind === "migration" ? "migration" : "story";
       const turnBase = {
         turnId: turn.id,
@@ -35728,8 +35747,8 @@ function queryWorldFeed(ctx, query) {
         const participants = [];
         if (isPlainObject17(row3)) {
           for (const key of ["mover_entity_id", "actor_entity_id", "holder_character_id", "knower_character_id"]) {
-            const id = str15(row3[key]);
-            if (id) participants.push(id);
+            const id2 = str15(row3[key]);
+            if (id2) participants.push(id2);
           }
         }
         feedCandidates.push({
@@ -36048,15 +36067,15 @@ function deriveElapsedInterval(facts, base) {
   });
   const detectCycle = () => {
     const indeg2 = /* @__PURE__ */ new Map();
-    for (const id of groupIds) indeg2.set(id, 0);
+    for (const id2 of groupIds) indeg2.set(id2, 0);
     for (const e of edges) indeg2.set(e.to, (indeg2.get(e.to) ?? 0) + 1);
-    const queue = groupIds.filter((id) => (indeg2.get(id) ?? 0) === 0);
+    const queue = groupIds.filter((id2) => (indeg2.get(id2) ?? 0) === 0);
     let seen = 0;
     while (queue.length > 0) {
-      const id = queue.shift();
+      const id2 = queue.shift();
       seen += 1;
       for (const e of edges) {
-        if (e.from !== id) continue;
+        if (e.from !== id2) continue;
         const next = (indeg2.get(e.to) ?? 0) - 1;
         indeg2.set(e.to, next);
         if (next === 0) queue.push(e.to);
@@ -36068,20 +36087,20 @@ function deriveElapsedInterval(facts, base) {
     conflicts.push("CYCLE_AFTER_REF");
     edges = [];
     const root = groupOf[0];
-    for (const id of groupIds) union(root, id);
+    for (const id2 of groupIds) union(root, id2);
     groupOf = nodes.map((_, i) => find(i));
     groupIds = [...new Set(groupOf)];
     implicitSameGroup = true;
   }
   const groupBounds = /* @__PURE__ */ new Map();
   for (const node of nodes) {
-    const id = groupOf[node.index];
+    const id2 = groupOf[node.index];
     const bound = node.interval;
-    const previous = groupBounds.get(id);
-    groupBounds.set(id, previous ? maxBound(previous, bound) : bound);
+    const previous = groupBounds.get(id2);
+    groupBounds.set(id2, previous ? maxBound(previous, bound) : bound);
   }
-  const predecessorBounds = (id) => {
-    const preds = edges.filter((e) => e.to === id);
+  const predecessorBounds = (id2) => {
+    const preds = edges.filter((e) => e.to === id2);
     if (preds.length === 0) return { ...ZERO };
     let acc = null;
     for (const pred of preds) {
@@ -36092,24 +36111,24 @@ function deriveElapsedInterval(facts, base) {
     return acc ?? { ...ZERO };
   };
   const indeg = /* @__PURE__ */ new Map();
-  for (const id of groupIds) indeg.set(id, 0);
+  for (const id2 of groupIds) indeg.set(id2, 0);
   for (const e of edges) indeg.set(e.to, (indeg.get(e.to) ?? 0) + 1);
-  const ready = groupIds.filter((id) => (indeg.get(id) ?? 0) === 0);
+  const ready = groupIds.filter((id2) => (indeg.get(id2) ?? 0) === 0);
   const finish2 = /* @__PURE__ */ new Map();
   while (ready.length > 0) {
-    const id = ready.shift();
-    const own = groupBounds.get(id) ?? { ...ZERO };
-    finish2.set(id, add(predecessorBounds(id), own));
+    const id2 = ready.shift();
+    const own = groupBounds.get(id2) ?? { ...ZERO };
+    finish2.set(id2, add(predecessorBounds(id2), own));
     for (const e of edges) {
-      if (e.from !== id) continue;
+      if (e.from !== id2) continue;
       const next = (indeg.get(e.to) ?? 0) - 1;
       indeg.set(e.to, next);
       if (next === 0) ready.push(e.to);
     }
   }
   let total = null;
-  for (const id of groupIds) {
-    const bound = finish2.get(id);
+  for (const id2 of groupIds) {
+    const bound = finish2.get(id2);
     if (!bound) continue;
     total = total ? maxBound(total, bound) : bound;
   }
@@ -36530,8 +36549,8 @@ function deliverDueInformation(untilS, world3) {
       seen.add(dedupeKey);
       if (arriveAt > untilS) {
         if (world3.persistPending) {
-          const id = `delivery_${String(task.id)}`;
-          if (!queryBound(world3.db, "SELECT id FROM actions WHERE branch_id=? AND id=?", [world3.branchId, id]).length) {
+          const id2 = `delivery_${String(task.id)}`;
+          if (!queryBound(world3.db, "SELECT id FROM actions WHERE branch_id=? AND id=?", [world3.branchId, id2]).length) {
             const row3 = createRow(
               "actions",
               {
@@ -36546,7 +36565,7 @@ function deliverDueInformation(untilS, world3) {
                 evaluated_until_s: untilS,
                 payload_json: { ...task, program_kind: "rumor_delivery" }
               },
-              { branchId: world3.branchId, id, turnId: world3.turnId, clockS: untilS, nowWallMs: 0, rulesetVersion: "atlas-1" }
+              { branchId: world3.branchId, id: id2, turnId: world3.turnId, clockS: untilS, nowWallMs: 0, rulesetVersion: "atlas-1" }
             );
             const columns = tableColumnNames("actions").filter((c) => c in row3);
             runBound(world3.db, `INSERT INTO actions (${columns.join(",")}) VALUES (${columns.map(() => "?").join(",")})`, columns.map((c) => {
@@ -37094,12 +37113,12 @@ function buildDecisionContext(batch2, world3) {
     }
     const informationIds = /* @__PURE__ */ new Set([
       ...knowledge.map((k) => String(k.information_id)),
-      ...opportunities.map((o) => o.informationId).filter((id) => typeof id === "string")
+      ...opportunities.map((o) => o.informationId).filter((id2) => typeof id2 === "string")
     ]);
-    const information = [...informationIds].flatMap((id) => queryBound(
+    const information = [...informationIds].flatMap((id2) => queryBound(
       world3.db,
       "SELECT id,title,content,kind FROM information WHERE branch_id=? AND id=?",
-      [world3.branchId, id]
+      [world3.branchId, id2]
     ));
     const scene = actorScene(world3, entityId);
     if (scene?.location) refs.add(`location:${scene.location.locationId}`);
@@ -37157,8 +37176,8 @@ function decodeOrNull6(table, row3) {
   const decoded2 = decodeRow(table, row3, { allowExtra: true });
   return decoded2.ok ? decoded2.row : null;
 }
-function loadRow3(world3, table, id) {
-  const rows4 = queryBound(world3.db, `SELECT * FROM ${table} WHERE branch_id = ? AND id = ? LIMIT 1`, [world3.branchId, id]);
+function loadRow3(world3, table, id2) {
+  const rows4 = queryBound(world3.db, `SELECT * FROM ${table} WHERE branch_id = ? AND id = ? LIMIT 1`, [world3.branchId, id2]);
   return rows4.length > 0 ? decodeOrNull6(table, rows4[0]) : null;
 }
 function heldBy2(world3, actorId, itemId) {
@@ -37451,10 +37470,10 @@ async function settleSqlTurn(input) {
   const steps = [];
   const pendingActors = [];
   const decidedAt = /* @__PURE__ */ new Map();
-  const decisionSignature = (id, opportunities) => {
-    const actor = queryBound(input.db, "SELECT status,physical_status FROM characters WHERE branch_id=? AND id=?", [input.branchId, id])[0];
-    const position = resolveEffectivePosition({ db: input.db, branchId: input.branchId }, id);
-    const context2 = buildDecisionContext({ actors: [{ entityId: id }], opportunities }, { db: input.db, branchId: input.branchId });
+  const decisionSignature = (id2, opportunities) => {
+    const actor = queryBound(input.db, "SELECT status,physical_status FROM characters WHERE branch_id=? AND id=?", [input.branchId, id2])[0];
+    const position = resolveEffectivePosition({ db: input.db, branchId: input.branchId }, id2);
+    const context2 = buildDecisionContext({ actors: [{ entityId: id2 }], opportunities }, { db: input.db, branchId: input.branchId });
     return sha256HexSync(JSON.stringify([actor, position, context2.actorSlices], (key, value) => ["row_rev", "updated_turn_id", "evaluated_until_s", "reason_code"].includes(key) ? void 0 : value));
   };
   const operationContexts = [];
@@ -37475,7 +37494,7 @@ async function settleSqlTurn(input) {
     if (input.attemptKey?.startsWith("resume_")) request.diagnosticCause = "background_resume";
     if (actorTargets.length) request.diagnosticTargets = actorTargets.map((actor) => actor.entityId);
     request.messages[1].content += "\n现有对象短引用：" + collectEntityRefs(tables, input.branchId, knownRefs).join("、");
-    for (const [id, alias] of byId9) request.messages[1].content = request.messages[1].content.split(JSON.stringify(id)).join(JSON.stringify(alias));
+    for (const [id2, alias] of byId9) request.messages[1].content = request.messages[1].content.split(JSON.stringify(id2)).join(JSON.stringify(alias));
     request.sourceSnapshot = [];
     if (phase === "decision") {
       const actors = JSON.parse(fields.actorSlices ?? "[]");
@@ -37527,7 +37546,7 @@ async function settleSqlTurn(input) {
     modelOperations.push(...operations);
     if (phase === "decision" && !scopeRejected && (parsed.explicitNoop || operations.length > 0) && !payload.issues.some((i) => i.severity === "error") && !parsed.issues.some((i) => i.severity === "error") && !compiled.issues.some((i) => i.severity === "error") && !result.groups.some((g) => g.status === "rejected" || g.status === "blocked")) {
       const currentOpportunities = collectOpportunities({ fromS: Number(branch2.simulation_cursor_s), untilS: atS }, { db: input.db, branchId: input.branchId });
-      for (const id of context2.actorIds) decidedAt.set(id, { clockS: atS, signature: decisionSignature(id, currentOpportunities) });
+      for (const id2 of context2.actorIds) decidedAt.set(id2, { clockS: atS, signature: decisionSignature(id2, currentOpportunities) });
     }
     return { changed: result.groups.some((g) => g.status === "applied" && g.changedRows > 0), noop: parsed.explicitNoop };
   };
@@ -37611,8 +37630,8 @@ async function settleSqlTurn(input) {
     runBound(input.db, "UPDATE branches SET clock_s=?,clock_min_s=?,clock_max_s=?,simulation_cursor_s=? WHERE id=?", [clockAfter, clockMin, clockMax, cursor, input.branchId]);
     const opportunities = collectOpportunities({ fromS: Number(branch2.simulation_cursor_s), untilS: cursor }, { db: input.db, branchId: input.branchId });
     let actors = queryBound(input.db, "SELECT id FROM characters WHERE branch_id=? AND status='active' AND physical_status='alive' AND role!='protagonist' ORDER BY CASE importance WHEN 'core' THEN 0 WHEN 'recurring' THEN 1 ELSE 2 END,role,location_id,id", [input.branchId]).filter((actor) => {
-      const id = String(actor.id), previous = decidedAt.get(id);
-      return previous?.clockS !== cursor || previous.signature !== decisionSignature(id, opportunities);
+      const id2 = String(actor.id), previous = decidedAt.get(id2);
+      return previous?.clockS !== cursor || previous.signature !== decisionSignature(id2, opportunities);
     });
     if (clockAfter === input.clockBefore && branch2.simulation_status === "catching_up") {
       const prior = queryBound(input.db, "SELECT decisions_json FROM turns WHERE id=?", [String(branch2.head_turn_id)])[0];
@@ -37746,6 +37765,35 @@ var init_atlas_model_attempts = __esm({
   }
 });
 
+// src/atlas-scene-expansion.ts
+function sceneExpansionLocationIds(input) {
+  const locations = input.locations.filter(active), byId9 = new Map(locations.map((l) => [id(l.id), l]));
+  const required = new Set(input.plannedLocationIds ?? []);
+  for (const l of locations) {
+    if (l.parent_location_id && byId9.has(id(l.parent_location_id))) required.add(id(l.parent_location_id));
+  }
+  for (const row3 of [...input.characters ?? [], ...input.items ?? []].filter(active)) if (row3.location_id) required.add(id(row3.location_id));
+  for (const start of [...required]) {
+    let at = byId9.get(start);
+    const seen = /* @__PURE__ */ new Set();
+    while (at && !seen.has(id(at.id))) {
+      seen.add(id(at.id));
+      required.add(id(at.id));
+      at = byId9.get(id(at.parent_location_id));
+    }
+  }
+  return new Set([...required].filter((v) => v && byId9.has(v)));
+}
+var id, active;
+var init_atlas_scene_expansion = __esm({
+  "src/atlas-scene-expansion.ts"() {
+    "use strict";
+    init_define_ATLAS_BUILD_INFO();
+    id = (v) => typeof v === "string" ? v : "";
+    active = (r) => !r.status || r.status === "active";
+  }
+});
+
 // src/atlas-sql-scene-maps.ts
 function containerRaw(value) {
   if (value === null || value === void 0) return null;
@@ -37775,13 +37823,13 @@ function compileSqlSceneMaps(input) {
     if (previous) changes[changes.indexOf(previous)] = mutation7;
     else changes.push(mutation7);
   };
-  const makeMap = (id, name, kind, container, size) => createRow("maps", {
+  const makeMap = (id2, name, kind, container, size) => createRow("maps", {
     name,
     kind,
     container_location_id: container,
     // 两套字段同时写：新读法认 cols/rows，旧读法认 reference_*，不给未来的归一留下歧义。
     frame_json: { origin_x: 0, origin_y: 0, cols: size.cols, rows: size.rows, reference_width_cells: size.cols, reference_height_cells: size.rows }
-  }, { branchId, id, turnId, clockS, nowWallMs: Date.now(), rulesetVersion: "atlas-1" });
+  }, { branchId, id: id2, turnId, clockS, nowWallMs: Date.now(), rulesetVersion: "atlas-1" });
   const branch2 = read.selectOne("branches", branchId, branchId);
   maps.sort((left, right) => String(left.id) < String(right.id) ? -1 : String(left.id) > String(right.id) ? 1 : 0);
   const locationIds = new Set(locations.map((row3) => String(row3.id)));
@@ -37824,18 +37872,34 @@ function compileSqlSceneMaps(input) {
       maps.push(root);
     }
     const createBudget = Math.max(0, SCENE_ROW_LIMIT - maps.length), remainingLocationIds = [];
+    const expanded = sceneExpansionLocationIds({
+      locations,
+      characters: read.selectWhere("characters", { branch_id: branchId, status: "active" }, SCENE_ROW_LIMIT),
+      items: read.selectWhere("items", { branch_id: branchId, status: "active" }, SCENE_ROW_LIMIT),
+      plannedLocationIds: input.plannedLocationIds
+    });
+    for (const key of byContainer.keys()) {
+      let at = locations.find((l) => l.id === key);
+      const seen = /* @__PURE__ */ new Set();
+      while (at?.parent_location_id && !seen.has(String(at.id))) {
+        seen.add(String(at.id));
+        expanded.add(String(at.parent_location_id));
+        at = locations.find((l) => l.id === at.parent_location_id);
+      }
+    }
     let created = 0;
     for (const location2 of locations) {
-      const id = String(location2.id);
-      if (byContainer.has(id)) continue;
+      const id2 = String(location2.id);
+      if (byContainer.has(id2)) continue;
+      if (!expanded.has(id2)) continue;
       if (created >= createBudget) {
-        remainingLocationIds.push(id);
+        remainingLocationIds.push(id2);
         continue;
       }
       const size = String(location2.kind) === "room" ? CONTAINER_FRAME_CELLS.room : CONTAINER_FRAME_CELLS.other;
-      const map = makeMap(makeId("map", opId, `container:${id}`), String(location2.name), containerMapKind2(String(location2.kind)), id, size);
+      const map = makeMap(makeId("map", opId, `container:${id2}`), String(location2.name), containerMapKind2(String(location2.kind)), id2, size);
       change("maps", null, map);
-      byContainer.set(id, map);
+      byContainer.set(id2, map);
       maps.push(map);
       created += 1;
     }
@@ -37868,18 +37932,18 @@ function compileSqlSceneMaps(input) {
       }
       const existing = [], pending = [];
       for (const location2 of children) {
-        const id = String(location2.id);
+        const id2 = String(location2.id);
         const precision = String(location2.coord_precision ?? "unknown");
         const confirmed = precision === "exact" || precision === "confirmed";
         const onThisMap = String(location2.map_id ?? "") === mapId;
         const finite7 = Number.isFinite(Number(location2.grid_x)) && Number.isFinite(Number(location2.grid_y));
         if (!confirmed) {
-          if (onThisMap && finite7) existing.push({ id, x: Number(location2.grid_x), y: Number(location2.grid_y) });
-          else pending.push({ id });
+          if (onThisMap && finite7) existing.push({ id: id2, x: Number(location2.grid_x), y: Number(location2.grid_y) });
+          else pending.push({ id: id2 });
           continue;
         }
         if (onThisMap) continue;
-        blockedMigrations.push(`${id}→${mapId}`);
+        blockedMigrations.push(`${id2}→${mapId}`);
       }
       if (!pending.length && !existing.length) continue;
       const placement = placeUnlocatedScenePoints({ frame, existing, pending, obstacles: [], seed: `${branchId}\0${mapId}` });
@@ -37902,7 +37966,7 @@ function compileSqlSceneMaps(input) {
           ...location2.map_id && String(location2.map_id) !== mapId ? { area_geometry_json: null } : {}
         });
       }
-      for (const id of byId9.keys()) unplacedFrames.push(id);
+      for (const id2 of byId9.keys()) unplacedFrames.push(id2);
     }
     if (blockedMigrations.length) opIssues.push({
       code: "COORD_FRAME_MIGRATION_BLOCKED",
@@ -37999,6 +38063,7 @@ var init_atlas_sql_scene_maps = __esm({
     init_atlas_spatial_frame();
     init_atlas_spatial_profile();
     init_atlas_db_runtime();
+    init_atlas_scene_expansion();
     SCENE_ROW_LIMIT = 1e3;
     CONTAINER_FRAME_CELLS = { room: { cols: 12, rows: 8 }, other: { cols: 100, rows: 100 } };
   }
@@ -38023,9 +38088,9 @@ function warn(code, path, message, entityId) {
   return { code, path, message: entityId ? `${message}（${entityId}）` : message, severity: "warning", retryable: false };
 }
 function reconcileOccupantsSpec(input) {
-  const physicalRoom = (id) => {
-    const area = input.functionalAreas?.find((area2) => area2.id === id);
-    return area ? text8(area.parent_location_id) : id;
+  const physicalRoom = (id2) => {
+    const area = input.functionalAreas?.find((area2) => area2.id === id2);
+    return area ? text8(area.parent_location_id) : id2;
   };
   const issues = [];
   const requestSpec = plain3(input.requestSpec) ? input.requestSpec : {};
@@ -38035,16 +38100,16 @@ function reconcileOccupantsSpec(input) {
   const roomIds = /* @__PURE__ */ new Set();
   if (input.container?.kind === "room" && text8(input.container.id)) roomIds.add(text8(input.container.id));
   for (const room of rows3(requestSpec.rooms)) {
-    const id = text8(room?.id);
-    if (id) roomIds.add(id);
+    const id2 = text8(room?.id);
+    if (id2) roomIds.add(id2);
   }
   const requestCorridor = text8(requestSpec.corridorLocationRef);
   if (requestCorridor) roomIds.add(requestCorridor);
   const layout = scene?.layout ?? null;
   if (layout?.kind === "floor" && Array.isArray(layout.rooms)) {
     for (const room of layout.rooms) {
-      const id = text8(room?.id);
-      if (id) roomIds.add(id);
+      const id2 = text8(room?.id);
+      if (id2) roomIds.add(id2);
     }
   }
   if (layout?.kind === "floor") {
@@ -38059,11 +38124,11 @@ function reconcileOccupantsSpec(input) {
     if (!Array.isArray(list3)) return;
     for (const raw of list3) {
       if (!plain3(raw)) continue;
-      const id = text8(raw.id);
-      if (!id) continue;
-      groupIds.add(id);
+      const id2 = text8(raw.id);
+      if (!id2) continue;
+      groupIds.add(id2);
       const roomId = text8(raw.roomId);
-      if (roomId) groupRoom.set(id, roomId);
+      if (roomId) groupRoom.set(id2, roomId);
     }
   };
   const savedConstraints = (() => {
@@ -38074,11 +38139,11 @@ function reconcileOccupantsSpec(input) {
   collectGroups(savedConstraints.contents);
   if (layout?.kind === "floor" && Array.isArray(layout.groups)) {
     for (const group2 of layout.groups) {
-      const id = text8(group2?.id);
-      if (id) {
-        groupIds.add(id);
+      const id2 = text8(group2?.id);
+      if (id2) {
+        groupIds.add(id2);
         const roomId = text8(group2?.roomId);
-        if (roomId) groupRoom.set(id, roomId);
+        if (roomId) groupRoom.set(id2, roomId);
       }
     }
   }
@@ -38087,10 +38152,10 @@ function reconcileOccupantsSpec(input) {
     if (!Array.isArray(list3)) return;
     for (const raw of list3) {
       if (!plain3(raw)) continue;
-      const id = text8(raw.id);
+      const id2 = text8(raw.id);
       const roomId = text8(raw.roomId);
-      if (!id || !roomId) continue;
-      prevActors.set(id, { id, roomId, ...text8(raw.near) ? { near: text8(raw.near) } : {} });
+      if (!id2 || !roomId) continue;
+      prevActors.set(id2, { id: id2, roomId, ...text8(raw.near) ? { near: text8(raw.near) } : {} });
     }
   };
   collectActors(requestSpec.actors);
@@ -38100,9 +38165,9 @@ function reconcileOccupantsSpec(input) {
     if (!Array.isArray(list3)) return;
     for (const raw of list3) {
       if (!plain3(raw)) continue;
-      const id = text8(raw.id);
+      const id2 = text8(raw.id);
       const on = text8(raw.on);
-      if (id && on) prevItems.set(id, { id, on });
+      if (id2 && on) prevItems.set(id2, { id: id2, on });
     }
   };
   collectItems(requestSpec.items);
@@ -38128,13 +38193,13 @@ function reconcileOccupantsSpec(input) {
   const itemRows = rows3(input.items).filter((row3) => alive(row3) && inBranch(row3));
   const charById = /* @__PURE__ */ new Map();
   for (const row3 of characterRows) {
-    const id = text8(row3?.id);
-    if (id) charById.set(id, row3);
+    const id2 = text8(row3?.id);
+    if (id2) charById.set(id2, row3);
   }
   const itemById = /* @__PURE__ */ new Map();
   for (const row3 of itemRows) {
-    const id = text8(row3?.id);
-    if (id) itemById.set(id, row3);
+    const id2 = text8(row3?.id);
+    if (id2) itemById.set(id2, row3);
   }
   const actors = [];
   const seenActors = /* @__PURE__ */ new Set();
@@ -38144,38 +38209,38 @@ function reconcileOccupantsSpec(input) {
     actors.push(spec);
   };
   for (const raw of rows3(requestSpec.actors)) {
-    const id = text8(raw?.id);
+    const id2 = text8(raw?.id);
     const roomId = physicalRoom(text8(raw?.roomId));
-    if (!id) continue;
+    if (!id2) continue;
     if (!roomIds.has(roomId)) {
-      issues.push(warn("ACTOR_ROOM_UNKNOWN", "$.actors.roomId", "名单里的房间不在本布局中，移除该锚点", id));
+      issues.push(warn("ACTOR_ROOM_UNKNOWN", "$.actors.roomId", "名单里的房间不在本布局中，移除该锚点", id2));
       continue;
     }
-    const row3 = charById.get(id);
+    const row3 = charById.get(id2);
     if (!row3) {
-      issues.push(warn("ACTOR_REF_UNKNOWN", "$.actors.id", "人物不在当前分支的可用名单中，移除该锚点", id));
+      issues.push(warn("ACTOR_REF_UNKNOWN", "$.actors.id", "人物不在当前分支的可用名单中，移除该锚点", id2));
       continue;
     }
     const actualRoom = physicalRoom(text8(row3.location_id));
     if (actualRoom && actualRoom !== roomId) {
-      issues.push(warn("ACTOR_LOCATION_MISMATCH", "$.actors.roomId", "该人物当前不在名单指定的房间，按真实 SQL 归属处理", id));
+      issues.push(warn("ACTOR_LOCATION_MISMATCH", "$.actors.roomId", "该人物当前不在名单指定的房间，按真实 SQL 归属处理", id2));
       continue;
     }
-    if (transit.has(id)) {
-      issues.push(warn("ACTOR_IN_TRANSIT", "$.actors", "该人物本轮在途，不进入室内名单", id));
+    if (transit.has(id2)) {
+      issues.push(warn("ACTOR_IN_TRANSIT", "$.actors", "该人物本轮在途，不进入室内名单", id2));
       continue;
     }
-    const previous = prevActors.get(id);
+    const previous = prevActors.get(id2);
     const near = text8(raw?.near) || previous?.near || "";
-    pushActor({ id, roomId, ...near && groupIds.has(near) ? { near } : {} });
+    pushActor({ id: id2, roomId, ...near && groupIds.has(near) ? { near } : {} });
   }
   for (const row3 of characterRows) {
-    const id = text8(row3?.id);
+    const id2 = text8(row3?.id);
     const roomId = physicalRoom(text8(row3?.location_id));
-    if (!id || !roomIds.has(roomId)) continue;
-    if (seenActors.has(id) || transit.has(id)) continue;
-    const previous = prevActors.get(id);
-    pushActor({ id, roomId, ...previous?.near && groupIds.has(previous.near) ? { near: previous.near } : {} });
+    if (!id2 || !roomIds.has(roomId)) continue;
+    if (seenActors.has(id2) || transit.has(id2)) continue;
+    const previous = prevActors.get(id2);
+    pushActor({ id: id2, roomId, ...previous?.near && groupIds.has(previous.near) ? { near: previous.near } : {} });
   }
   const items = [];
   const looseItemMarkers = [];
@@ -38185,54 +38250,54 @@ function reconcileOccupantsSpec(input) {
     return roomIds.has(physicalRoom(text8(row3?.location_id)));
   });
   for (const raw of rows3(requestSpec.items)) {
-    const id = text8(raw?.id);
-    if (!id) continue;
-    const row3 = itemById.get(id);
+    const id2 = text8(raw?.id);
+    if (!id2) continue;
+    const row3 = itemById.get(id2);
     if (!row3) {
-      issues.push(warn("ITEM_REF_UNKNOWN", "$.items.id", "物品不在当前分支的可用名单中，移除该锚点", id));
+      issues.push(warn("ITEM_REF_UNKNOWN", "$.items.id", "物品不在当前分支的可用名单中，移除该锚点", id2));
       continue;
     }
     if (text8(row3.holder_character_id) || text8(row3.container_item_id)) {
-      issues.push(warn("ITEM_HELD", "$.items.on", "物品已被持有或收纳，不再作为地面物品显示", id));
+      issues.push(warn("ITEM_HELD", "$.items.on", "物品已被持有或收纳，不再作为地面物品显示", id2));
       continue;
     }
-    const on = text8(raw?.on) || prevItems.get(id)?.on || ledgerBound.get(id) || "";
+    const on = text8(raw?.on) || prevItems.get(id2)?.on || ledgerBound.get(id2) || "";
     const groupRoomId = on ? text8(groupRoom.get(on)) : "";
     const actualRoom = physicalRoom(text8(row3.location_id));
     if (on && groupIds.has(on) && groupRoomId && actualRoom && groupRoomId === actualRoom) {
-      seenItems.add(id);
-      items.push({ id, on });
+      seenItems.add(id2);
+      items.push({ id: id2, on });
       continue;
     }
     if (roomIds.has(actualRoom)) {
-      looseItemMarkers.push({ id, roomId: actualRoom, name: text8(row3.name) || id, type: "item" });
-      seenItems.add(id);
+      looseItemMarkers.push({ id: id2, roomId: actualRoom, name: text8(row3.name) || id2, type: "item" });
+      seenItems.add(id2);
     } else {
-      issues.push(warn("ITEM_LOCATION_MISMATCH", "$.items.on", "物品不在本布局的房间内，移除该锚点", id));
+      issues.push(warn("ITEM_LOCATION_MISMATCH", "$.items.on", "物品不在本布局的房间内，移除该锚点", id2));
     }
   }
   for (const row3 of groundInRoom) {
-    const id = text8(row3?.id);
-    if (!id || seenItems.has(id)) continue;
+    const id2 = text8(row3?.id);
+    if (!id2 || seenItems.has(id2)) continue;
     const actualRoom = physicalRoom(text8(row3?.location_id));
-    const boundOn = ledgerBound.get(id) ?? "";
+    const boundOn = ledgerBound.get(id2) ?? "";
     if (boundOn && groupIds.has(boundOn) && text8(groupRoom.get(boundOn)) === actualRoom) {
-      seenItems.add(id);
-      items.push({ id, on: boundOn });
+      seenItems.add(id2);
+      items.push({ id: id2, on: boundOn });
       continue;
     }
-    looseItemMarkers.push({ id, roomId: actualRoom, name: text8(row3.name) || id, type: "item" });
+    looseItemMarkers.push({ id: id2, roomId: actualRoom, name: text8(row3.name) || id2, type: "item" });
   }
   const looseIds = new Set(looseItemMarkers.map((m) => m.id));
   const deleted = {
-    actors: [...prevActors.keys()].filter((id) => !seenActors.has(id)).sort(),
-    items: [...prevItems.keys()].filter((id) => !seenItems.has(id) && !looseIds.has(id)).sort()
+    actors: [...prevActors.keys()].filter((id2) => !seenActors.has(id2)).sort(),
+    items: [...prevItems.keys()].filter((id2) => !seenItems.has(id2) && !looseIds.has(id2)).sort()
   };
   const placedIds = /* @__PURE__ */ new Set();
   if (Array.isArray(layout?.items)) {
     for (const point of layout.items) {
-      const id = text8(point?.id);
-      if (id) placedIds.add(id);
+      const id2 = text8(point?.id);
+      if (id2) placedIds.add(id2);
     }
   }
   const newLoose = looseItemMarkers.filter((marker) => !placedIds.has(marker.id)).length > 0;
@@ -38242,18 +38307,18 @@ function reconcileOccupantsSpec(input) {
     if (Array.isArray(savedConstraints.actors)) {
       for (const raw of savedConstraints.actors) {
         if (!plain3(raw)) continue;
-        const id = text8(raw.id);
+        const id2 = text8(raw.id);
         const roomId = text8(raw.roomId);
-        if (!id || !roomId) continue;
-        savedActors.push({ id, roomId, ...text8(raw.near) ? { near: text8(raw.near) } : {} });
+        if (!id2 || !roomId) continue;
+        savedActors.push({ id: id2, roomId, ...text8(raw.near) ? { near: text8(raw.near) } : {} });
       }
     }
     if (Array.isArray(savedConstraints.items)) {
       for (const raw of savedConstraints.items) {
         if (!plain3(raw)) continue;
-        const id = text8(raw.id);
+        const id2 = text8(raw.id);
         const on = text8(raw.on);
-        if (id && on) savedItems.push({ id, on });
+        if (id2 && on) savedItems.push({ id: id2, on });
       }
     }
   }
@@ -38267,11 +38332,11 @@ function placeLooseItems(input) {
   if (markers.length === 0) return { points, issues };
   const byRoom = /* @__PURE__ */ new Map();
   for (const marker of markers) {
-    const id = text8(marker?.id);
+    const id2 = text8(marker?.id);
     const roomId = text8(marker?.roomId);
-    if (!id || !roomId) continue;
+    if (!id2 || !roomId) continue;
     const list3 = byRoom.get(roomId) ?? [];
-    list3.push({ id, roomId, name: text8(marker?.name) || id, type: "item" });
+    list3.push({ id: id2, roomId, name: text8(marker?.name) || id2, type: "item" });
     byRoom.set(roomId, list3);
   }
   const scene = input.scene;
@@ -38298,17 +38363,17 @@ function placeLooseItems(input) {
       issues.push(spatialIssue(diagnostic3, { ...ctx, entityId: text8(diagnostic3?.entityId) || void 0 }));
     }
     for (const marker of placed.markers ?? []) {
-      const id = text8(marker?.id);
+      const id2 = text8(marker?.id);
       const x = typeof marker?.x === "number" ? marker.x : Number.NaN;
       const y = typeof marker?.y === "number" ? marker.y : Number.NaN;
-      if (!id || !Number.isFinite(x) || !Number.isFinite(y)) continue;
+      if (!id2 || !Number.isFinite(x) || !Number.isFinite(y)) continue;
       points.push({
-        id,
+        id: id2,
         x,
         y,
         quality: String(marker?.quality ?? "layout") === "exact" ? "exact" : "layout",
         roomId,
-        name: text8(marker?.name) || id
+        name: text8(marker?.name) || id2
       });
     }
   }
@@ -38618,24 +38683,24 @@ function applyLooseItemMarkers(input) {
   const hostRect = host ? rectOf(host) : null;
   if (hostRect && typeof host?.id === "string") regions.set(host.id, [{ x: hostRect.x, y: hostRect.y }, { x: hostRect.x + hostRect.w, y: hostRect.y }, { x: hostRect.x + hostRect.w, y: hostRect.y + hostRect.h }, { x: hostRect.x, y: hostRect.y + hostRect.h }]);
   for (const room of Array.isArray(layout.rooms) ? layout.rooms : []) {
-    const id = typeof room?.id === "string" ? room.id : "";
+    const id2 = typeof room?.id === "string" ? room.id : "";
     const rect = rectOf(room);
-    if (!id || !rect) continue;
+    if (!id2 || !rect) continue;
     const { x, y, w, h } = rect;
-    regions.set(id, [{ x, y }, { x: x + w, y }, { x: x + w, y: y + h }, { x, y: y + h }]);
+    regions.set(id2, [{ x, y }, { x: x + w, y }, { x: x + w, y: y + h }, { x, y: y + h }]);
   }
   const constraints = plain4(scene.constraints) ? scene.constraints : {};
   const roomOfGroup = /* @__PURE__ */ new Map();
   for (const entry of Array.isArray(constraints.contents) ? constraints.contents : []) {
-    const id = typeof entry?.id === "string" ? entry.id : "";
+    const id2 = typeof entry?.id === "string" ? entry.id : "";
     const roomId = typeof entry?.roomId === "string" ? entry.roomId : "";
-    if (id && roomId) roomOfGroup.set(id, roomId);
+    if (id2 && roomId) roomOfGroup.set(id2, roomId);
   }
   const obstacles = /* @__PURE__ */ new Map();
   if (hostRect && typeof host?.id === "string") obstacles.set(host.id, (Array.isArray(layout.rooms) ? layout.rooms : []).map(rectOf).filter((r) => r !== null));
   for (const group3 of Array.isArray(layout.groups) ? layout.groups : []) {
-    const id = typeof group3?.id === "string" ? group3.id : "";
-    const roomId = roomOfGroup.get(id);
+    const id2 = typeof group3?.id === "string" ? group3.id : "";
+    const roomId = roomOfGroup.get(id2);
     const rect = rectOf(group3);
     if (!roomId || !rect) continue;
     const list3 = obstacles.get(roomId) ?? [];
@@ -38778,17 +38843,17 @@ function collectSceneMemberIds(input) {
   const memberCharacters = /* @__PURE__ */ new Set();
   for (const character of characters) {
     if (String(character.status ?? "active") !== "active") continue;
-    const id = String(character.id);
+    const id2 = String(character.id);
     if (String(character.map_id ?? "") === mapId || memberLocations.has(String(character.location_id ?? ""))) {
-      memberCharacters.add(id);
+      memberCharacters.add(id2);
     }
   }
   const memberItems = /* @__PURE__ */ new Set();
   for (const item of items) {
     if (String(item.status ?? "active") !== "active") continue;
-    const id = String(item.id);
+    const id2 = String(item.id);
     if (String(item.map_id ?? "") === mapId || memberLocations.has(String(item.location_id ?? ""))) {
-      memberItems.add(id);
+      memberItems.add(id2);
     }
   }
   return {
@@ -38804,20 +38869,20 @@ function pruneInvalidSceneMembers(input) {
   const issues = [];
   const constraints = plain4(scene) && plain4(scene.constraints) ? scene.constraints : null;
   if (!constraints) return { deletes, pruned, issues };
-  const bump2 = (key, id) => {
+  const bump2 = (key, id2) => {
     const list3 = deletes[key] ?? [];
-    list3.push(id);
+    list3.push(id2);
     deletes[key] = list3;
-    pruned.push(id);
+    pruned.push(id2);
   };
   for (const [key, kind] of Object.entries(SCENE_MEMBER_KIND)) {
     const entries = constraints[key];
     if (!Array.isArray(entries)) continue;
     for (const entry of entries) {
-      const id = plain4(entry) && typeof entry.id === "string" ? String(entry.id) : "";
-      if (!id || !memberIds.known[kind]?.has(id)) continue;
-      if (memberIds.members[kind]?.has(id)) continue;
-      bump2(key, id);
+      const id2 = plain4(entry) && typeof entry.id === "string" ? String(entry.id) : "";
+      if (!id2 || !memberIds.known[kind]?.has(id2)) continue;
+      if (memberIds.members[kind]?.has(id2)) continue;
+      bump2(key, id2);
     }
   }
   const prunedRooms = new Set(deletes.rooms ?? []);
@@ -38825,9 +38890,9 @@ function pruneInvalidSceneMembers(input) {
     for (const entry of constraints.contents) {
       if (!plain4(entry)) continue;
       const roomId = typeof entry.roomId === "string" ? String(entry.roomId) : "";
-      const id = typeof entry.id === "string" ? String(entry.id) : "";
-      if (!id || !roomId || !prunedRooms.has(roomId)) continue;
-      bump2("contents", id);
+      const id2 = typeof entry.id === "string" ? String(entry.id) : "";
+      if (!id2 || !roomId || !prunedRooms.has(roomId)) continue;
+      bump2("contents", id2);
     }
   }
   if (pruned.length > 0) {
@@ -38966,7 +39031,7 @@ function applyPendingSpatialRequests(input) {
       for (const [key, value] of Object.entries(source)) {
         if (!Array.isArray(value)) continue;
         const list3 = deletes[key] ?? [];
-        for (const id of value) if (typeof id === "string" && id && !list3.includes(id)) list3.push(id);
+        for (const id2 of value) if (typeof id2 === "string" && id2 && !list3.includes(id2)) list3.push(id2);
         deletes[key] = list3;
       }
     };
@@ -39462,7 +39527,7 @@ function resolveCompletionMaps(tables, branchId, locationIds) {
   return owners;
 }
 function completionMapIds(owners) {
-  return [...new Set(owners.map((owner) => owner.completionMapId).filter((id) => Boolean(id)))].sort(byId7);
+  return [...new Set(owners.map((owner) => owner.completionMapId).filter((id2) => Boolean(id2)))].sort(byId7);
 }
 function completionOwnershipIssues(owners) {
   return owners.flatMap((owner) => owner.issues);
@@ -39596,8 +39661,8 @@ function planCandidates(tables, branchId, input, policy) {
   const memberLines = [];
   const lockLines = [];
   const ordered4 = [];
-  const push = (id) => {
-    if (id && !ordered4.includes(id)) ordered4.push(id);
+  const push = (id2) => {
+    if (id2 && !ordered4.includes(id2)) ordered4.push(id2);
   };
   const requested = uniqueSorted3(input.focusLocationIds);
   const unclassified = [];
@@ -39639,18 +39704,18 @@ function planCandidates(tables, branchId, input, policy) {
   let frontier = uniqueSorted3(requested);
   for (let depth = 0; depth < policy.maxAdditionalDepth; depth += 1) {
     const next = [];
-    for (const id of frontier) {
-      for (const child of childrenOf(tables, branchId, id)) next.push(asId5(child.id));
+    for (const id2 of frontier) {
+      for (const child of childrenOf(tables, branchId, id2)) next.push(asId5(child.id));
     }
     if (next.length === 0) break;
     expanded.push(...uniqueSorted3(next));
     frontier = uniqueSorted3(next);
   }
-  for (const id of emptyStructure) push(id);
-  for (const id of uniqueSorted3(unclassified)) push(id);
-  for (const id of noConnectivity) push(id);
-  for (const id of expanded) push(id);
-  for (const id of requested) push(id);
+  for (const id2 of emptyStructure) push(id2);
+  for (const id2 of uniqueSorted3(unclassified)) push(id2);
+  for (const id2 of noConnectivity) push(id2);
+  for (const id2 of expanded) push(id2);
+  for (const id2 of requested) push(id2);
   const cap = ATLAS_RUNTIME_LIMITS.worldFillTargets;
   const focusIds = ordered4.slice(0, cap);
   const remainingIds = ordered4.slice(cap);
@@ -39810,7 +39875,7 @@ function buildSqlWorldCompletionTask(tables, branchId, input, turnId, budgetRema
   if (input.sourceScan && !sources.chunks.length) return null;
   const owners = resolveCompletionMaps(tables, branchId, plan.focusIds);
   const ownedMapIds = completionMapIds(owners);
-  const markerMapIds = plan.focusIds.map((id) => asId5(tables.selectOne("locations", branchId, id)?.map_id)).filter((id) => id.length > 0);
+  const markerMapIds = plan.focusIds.map((id2) => asId5(tables.selectOne("locations", branchId, id2)?.map_id)).filter((id2) => id2.length > 0);
   const catalogue = collectTaskRefs(tables, {
     branchId,
     focusMapIds: uniqueSorted3([...ownedMapIds, ...markerMapIds]),
@@ -39840,7 +39905,7 @@ function buildSqlWorldCompletionTask(tables, branchId, input, turnId, budgetRema
       `locks:${plan.lockLines.join("|")}`
     ].join("")
   );
-  const reuseMapIds = ownedMapIds.length > 0 ? ownedMapIds : [branchRootMapId(tables, branchId)].filter((id) => id.length > 0);
+  const reuseMapIds = ownedMapIds.length > 0 ? ownedMapIds : [branchRootMapId(tables, branchId)].filter((id2) => id2.length > 0);
   const reusable = reuseMapIds.length > 0 && reuseMapIds.every((mapId) => {
     const state = readWorldFillState(tables, branchId, mapId);
     return Boolean(state && state.status === "ready" && state.contextHash === contextHash);
@@ -40094,8 +40159,8 @@ function dedupeWorldConstructionOps(input) {
   const reusedIds = [];
   const rejectedRefs = [];
   const resolved = /* @__PURE__ */ new Map();
-  for (const [ref2, id] of Object.entries(input?.newRefToExistingId ?? {})) {
-    if (asText3(ref2).trim().length > 0 && asText3(id).trim().length > 0) resolved.set(asText3(ref2).trim(), asText3(id).trim());
+  for (const [ref2, id2] of Object.entries(input?.newRefToExistingId ?? {})) {
+    if (asText3(ref2).trim().length > 0 && asText3(id2).trim().length > 0) resolved.set(asText3(ref2).trim(), asText3(id2).trim());
   }
   const declared = /* @__PURE__ */ new Map();
   const poisoned = /* @__PURE__ */ new Set();
@@ -40509,8 +40574,8 @@ function emptyRunnerLedger() {
   return { windows: [], failures: {}, triggers: [] };
 }
 function windowSignature(input) {
-  const units = [...input?.unitIds ?? []].map((id) => String(id)).sort();
-  const targets = [...input?.targetSignatures ?? []].map((id) => String(id)).sort();
+  const units = [...input?.unitIds ?? []].map((id2) => String(id2)).sort();
+  const targets = [...input?.targetSignatures ?? []].map((id2) => String(id2)).sort();
   return JSON.stringify([text9(input?.jobId), Number(input?.runEpoch ?? 0), Number(input?.windowSequence ?? 0), units, targets]);
 }
 function registerTrigger(ledger, signature2) {
@@ -40697,7 +40762,7 @@ function planNewRouteMapAssignments(input) {
       toMapId: text10(entry.toMapId).length > 0 ? text10(entry.toMapId) : null
     });
   }
-  const guarded = new Set((input?.protectedRouteIds ?? []).map(text10).filter((id) => id.length > 0));
+  const guarded = new Set((input?.protectedRouteIds ?? []).map(text10).filter((id2) => id2.length > 0));
   const intents = [...input?.intents ?? []].filter((intent) => text10(intent?.routeId).length > 0).sort((left, right) => text10(left.routeId) < text10(right.routeId) ? -1 : text10(left.routeId) > text10(right.routeId) ? 1 : 0);
   const assignments = [];
   const seen = /* @__PURE__ */ new Set();
@@ -40762,7 +40827,7 @@ function intentBranch(intent, routeId, endpoints, assignments, issues) {
       });
       return;
     }
-    const inMap = [endpoint.fromMapId, endpoint.toMapId].filter((id) => id !== null);
+    const inMap = [endpoint.fromMapId, endpoint.toMapId].filter((id2) => id2 !== null);
     if (inMap.length === 0) {
       assignments.push({ routeId, action: "conflict", mapId: null, reason: "两端都没有归属图" });
       issues.push({
@@ -40869,10 +40934,10 @@ function planLoreDelta(input) {
   const push = (entry, reason) => {
     const sourceKey = str21(entry?.sourceKey);
     for (const targetId of entry?.targetIds ?? []) {
-      const id = str21(targetId);
-      if (id === "") continue;
-      touched.add(id);
-      enqueue.push({ targetId: id, sourceKey, reason });
+      const id2 = str21(targetId);
+      if (id2 === "") continue;
+      touched.add(id2);
+      enqueue.push({ targetId: id2, sourceKey, reason });
     }
   };
   for (const entry of diff.added) push(entry, "source-added");
@@ -40880,10 +40945,10 @@ function planLoreDelta(input) {
   for (const entry of diff.permissionRevoked) push(entry, "permission-revoked");
   for (const entry of diff.permissionGranted) push(entry, "permission-granted");
   const known = [...input?.targetMaps?.keys() ?? []];
-  const untouchedTargetIds = known.filter((id) => !touched.has(id)).sort();
+  const untouchedTargetIds = known.filter((id2) => !touched.has(id2)).sort();
   const missingSources = diff.removed.map((entry) => ({
     sourceKey: str21(entry?.sourceKey),
-    affectedTargetIds: [...entry?.targetIds ?? []].map(str21).filter((id) => id !== "")
+    affectedTargetIds: [...entry?.targetIds ?? []].map(str21).filter((id2) => id2 !== "")
   }));
   const issues = [];
   if (missingSources.length > 0) {
@@ -41100,7 +41165,7 @@ function worldBuildMapQuality(db, branchId, mapId) {
   }
   const canonical = readSpaceCanonical2(frame, str22(map["container_location_id"])).canonical;
   const requiredIds = [...required.map((row3) => str22(row3["id"])), ...(canonical?.furnishing ?? []).filter((entry) => !entry.itemId).map((entry) => entry.localId)];
-  const missing = requiredIds.filter((id) => !present.has(id));
+  const missing = requiredIds.filter((id2) => !present.has(id2));
   const checkedScene = readSceneFrame(frame, { branchId, mapId });
   const sceneErrors = (checkedScene.issues ?? []).filter((issue31) => issue31.severity === "error").length + (record2(scene) && Array.isArray(scene["issues"]) ? scene["issues"].filter((issue31) => record2(issue31) && issue31["severity"] === "error").length : 0) + (layout && Array.isArray(layout["issues"]) ? layout["issues"].filter((issue31) => record2(issue31) && issue31["severity"] !== "warning").length : 0);
   const routes = queryBound(db, "SELECT * FROM routes WHERE branch_id=? AND map_id=? AND status<>'closed'", [branchId, mapId]);
@@ -41173,17 +41238,18 @@ function discover(ctx, job, previous) {
   if (sourceTargets.some((entry) => entry.status === "pending" || entry.status === "running")) return [...byId9.values()];
   const inferred = new Set(readProgressRows(tables, branchId).filter((row3) => row3.payload["payloadKind"] === "world-build-facility/v1").map((row3) => str22(row3.payload["locationId"])));
   for (const location2 of locations) {
-    const id = str22(location2["id"]);
-    if (["city", "town", "village", "settlement"].includes(str22(location2["kind"])) && !inferred.has(id)) add2(target(job, "settlement-plan", id, stableHexHash(id)));
+    const id2 = str22(location2["id"]);
+    if (["city", "town", "village", "settlement"].includes(str22(location2["kind"])) && !inferred.has(id2)) add2(target(job, "settlement-plan", id2, stableHexHash(id2)));
   }
   if ([...byId9.values()].some((entry) => entry.workKind === "settlement-plan" && entry.status === "pending")) return [...byId9.values()];
   const maps = pageAllRows(tables, "maps", branchId).filter((row3) => row3["status"] === "active" && (job.kind !== "initialize" || ownedTurns.has(str22(row3["created_turn_id"]))));
   const signatures = computeMapLayoutSignatures(tables, branchId);
+  const expanded = sceneExpansionLocationIds({ locations, characters });
   const historical = job.kind === "lore-incremental" ? readWorldBuildJobs(readProgressRows(tables, branchId)).values.filter((old) => old.id !== job.id).flatMap((old) => readWorldBuildTargets(readProgressRows(tables, branchId), old.id).values) : [];
   for (const map of maps) {
-    const id = str22(map["id"]), containerId = str22(map["container_location_id"]);
+    const id2 = str22(map["id"]), containerId = str22(map["container_location_id"]);
     const location2 = locations.find((row3) => row3["id"] === containerId);
-    const policy = classifyBuildRequirement({ location: location2 ?? { id, kind: map["kind"] }, origin: inferred.has(containerId) ? "inferred" : "source", canEnter: true, facts: [] });
+    const policy = classifyBuildRequirement({ location: location2 ?? { id: id2, kind: map["kind"] }, origin: inferred.has(containerId) ? "inferred" : "source", canEnter: true, facts: [] });
     let depth = 0, parent = location2;
     const seen = /* @__PURE__ */ new Set();
     while (parent && str22(parent["parent_location_id"]) && !seen.has(str22(parent["id"]))) {
@@ -41191,11 +41257,11 @@ function discover(ctx, job, previous) {
       depth++;
       parent = locations.find((row3) => row3["id"] === parent?.["parent_location_id"]);
     }
-    const members = locations.filter((row3) => row3["map_id"] === id).map((row3) => row3["id"]).sort();
-    const detail = resolveLocationDetailTier({ location: location2 ?? { id }, facts: [], knownCharacters: characters, plotLinks: [] });
-    const entry = target(job, "map-layout", id, stableHexHash(JSON.stringify([id, members, detail.tier])), depth);
-    if (job.kind === "lore-incremental" && historical.some((old) => old.workKind === "map-layout" && old.subjectId === id && old.inputSignature === entry.inputSignature) && worldBuildMapReady(ctx.db, branchId, id, signatures)) continue;
-    if (policy.interiorPolicy === "on-confirmed-entry") {
+    const members = locations.filter((row3) => row3["map_id"] === id2).map((row3) => row3["id"]).sort();
+    const detail = resolveLocationDetailTier({ location: location2 ?? { id: id2 }, facts: [], knownCharacters: characters, plotLinks: [] });
+    const entry = target(job, "map-layout", id2, stableHexHash(JSON.stringify([id2, members, detail.tier])), depth);
+    if (job.kind === "lore-incremental" && historical.some((old) => old.workKind === "map-layout" && old.subjectId === id2 && old.inputSignature === entry.inputSignature) && worldBuildMapReady(ctx.db, branchId, id2, signatures)) continue;
+    if (policy.interiorPolicy === "on-confirmed-entry" && !expanded.has(containerId) && !normalizeFrame(map["frame_json"]).atlasScene) {
       entry.requirement = "deferred-interior";
       entry.status = "waiting-for-entry";
     }
@@ -41211,11 +41277,11 @@ function planLocalWork(ctx, plan) {
   const progress = readProgressRows(tables, branchId);
   const addRecord = (key, payload) => {
     const scopeKey3 = `world-build:${plan.job.id}`;
-    const id = progressId("unit", scopeKey3, key);
+    const id2 = progressId("unit", scopeKey3, key);
     plan.records.push(progressRowMutation(
       context(ctx),
-      { id, scopeKey: scopeKey3, kind: "unit", subjectKey: key },
-      tables.selectOne("construction_progress", branchId, id),
+      { id: id2, scopeKey: scopeKey3, kind: "unit", subjectKey: key },
+      tables.selectOne("construction_progress", branchId, id2),
       { status: "processed", inputSignature: stableHexHash(JSON.stringify(payload)), payload }
     ));
   };
@@ -41367,10 +41433,10 @@ function prepareWorldBuildWindow(ctx) {
   if (request.abortedWindow) {
     const window2 = request.abortedWindow;
     if (!Number.isInteger(window2.transports) || window2.transports < 0) throw new AtlasDbError("WORLD_BUILD_AUDIT_INVALID", "实际发送计数非法", {});
-    const scopeKey3 = `world-build:${job.id}`, subjectKey = `aborted:${window2.id}`, id = progressId("unit", scopeKey3, subjectKey);
-    if (!rows4.some((row3) => row3.id === id)) {
+    const scopeKey3 = `world-build:${job.id}`, subjectKey = `aborted:${window2.id}`, id2 = progressId("unit", scopeKey3, subjectKey);
+    if (!rows4.some((row3) => row3.id === id2)) {
       job = { ...job, cumulativeTransports: job.cumulativeTransports + window2.transports };
-      manifestMutations.push(progressRowMutation(context(ctx), { id, scopeKey: scopeKey3, kind: "unit", subjectKey }, null, {
+      manifestMutations.push(progressRowMutation(context(ctx), { id: id2, scopeKey: scopeKey3, kind: "unit", subjectKey }, null, {
         status: "processed",
         inputSignature: window2.id,
         payload: { payloadKind: "world-build-aborted-window/v1", version: 1, id: window2.id, transports: window2.transports }
@@ -41391,10 +41457,10 @@ function prepareWorldBuildWindow(ctx) {
     }));
     if (!activated.length && entry.interiorMapId) activated.push({ ...target(job, "map-layout", entry.interiorMapId, stableHexHash(entry.dedupeKey)), originFloorId: entry.turnId, eventId: entry.eventId });
     targets.push(...activated.filter((target2) => !targets.some((old) => old.id === target2.id)));
-    const scopeKey3 = `world-build:${job.id}`, subjectKey = `entry:${stableHexHash(entry.dedupeKey)}`, id = progressId("unit", scopeKey3, subjectKey);
+    const scopeKey3 = `world-build:${job.id}`, subjectKey = `entry:${stableHexHash(entry.dedupeKey)}`, id2 = progressId("unit", scopeKey3, subjectKey);
     manifestMutations.push(progressRowMutation(
       context(ctx),
-      { id, scopeKey: scopeKey3, kind: "unit", subjectKey },
+      { id: id2, scopeKey: scopeKey3, kind: "unit", subjectKey },
       null,
       { status: "processed", inputSignature: stableHexHash(entry.dedupeKey), payload: { payloadKind: "world-build-entry/v1", ...entry } }
     ));
@@ -41407,10 +41473,10 @@ function prepareWorldBuildWindow(ctx) {
       included: !incremental || !previous.some((old) => old.sourceKey === source.key && old.contentHash === source.hash)
     }));
     for (let offset = 0; offset < manifest.length; offset += 24) {
-      const scopeKey3 = `world-build:${job.id}`, subjectKey = `manifest:${offset / 24}`, id = progressId("unit", scopeKey3, subjectKey);
+      const scopeKey3 = `world-build:${job.id}`, subjectKey = `manifest:${offset / 24}`, id2 = progressId("unit", scopeKey3, subjectKey);
       manifestMutations.push(progressRowMutation(
         context(ctx),
-        { id, scopeKey: scopeKey3, kind: "unit", subjectKey },
+        { id: id2, scopeKey: scopeKey3, kind: "unit", subjectKey },
         null,
         { status: "processed", inputSignature: manifestHash, payload: { payloadKind: "world-build-manifest/v1", version: 1, entries: manifest.slice(offset, offset + 24) } }
       ));
@@ -41611,6 +41677,7 @@ var init_atlas_world_build_execution = __esm({
     init_atlas_sql_layout_task();
     init_atlas_spatial_profile();
     init_atlas_db_views();
+    init_atlas_scene_expansion();
     POLICY = "world-build-v2";
     DISCOVERY_PAGE = 64;
     str22 = (value) => typeof value === "string" ? value : "";
@@ -41680,10 +41747,10 @@ function auditSavedSpatialMoves(input) {
   const result = detectSceneContradictions({ claims, traits, accessEvents });
   const scopeKey3 = "scene-contradictions:v1";
   const groups = result.contradictions.map((finding) => {
-    const id = progressId("unit", scopeKey3, finding.issueId), opId = `scene-audit:${finding.issueId}`;
+    const id2 = progressId("unit", scopeKey3, finding.issueId), opId = `scene-audit:${finding.issueId}`;
     return { id: opId, opIds: [], dependsOn: [], readSet: [], purpose: "bookkeeping", mutations: [progressRowMutation(
       { branchId: input.branchId, turnId: input.turnId, opId },
-      { id, scopeKey: scopeKey3, kind: "unit", subjectKey: finding.issueId },
+      { id: id2, scopeKey: scopeKey3, kind: "unit", subjectKey: finding.issueId },
       null,
       { status: "processed", inputSignature: finding.issueId, payload: { payloadKind: "scene-contradiction/v1", ...finding } }
     )] };
@@ -41849,7 +41916,7 @@ function planConstructionQueue(args) {
   for (const row3 of targetRows) targetBefore.set(row3.subjectKey, row3.raw);
   const scanBefore = readScanState(scopeRow);
   const priorityRank2 = new Map(
-    orderCompletionTargets(tables, branchId, { mode, focusLocationIds: args.focusLocationIds }, args.policy).map((id, index) => [id, index])
+    orderCompletionTargets(tables, branchId, { mode, focusLocationIds: args.focusLocationIds }, args.policy).map((id2, index) => [id2, index])
   );
   const servedSeq = new Map(targetRows.map((row3) => [row3.subjectKey, row3.lastServedSeq]));
   const pendingTargetIds = uniqueIds([
@@ -41877,8 +41944,8 @@ function planConstructionQueue(args) {
   const sourceFocusIds = uniqueIds([
     ...args.focusLocationIds,
     ...targetRows.filter((row3) => row3.status === "processed").map((row3) => row3.subjectKey)
-  ]).filter((id) => {
-    const row3 = tables.selectOne("locations", branchId, id);
+  ]).filter((id2) => {
+    const row3 = tables.selectOne("locations", branchId, id2);
     return row3 && !["destroyed", "merged", "archived"].includes(String(row3.status));
   }).slice(0, ATLAS_RUNTIME_LIMITS.worldFillTargets);
   const wantSources = args.sourceScan === true || Boolean(reusedUnit) || allocation.targetIds.length > 0 || sourceFocusIds.length > 0;
@@ -41904,9 +41971,9 @@ function planConstructionQueue(args) {
   if (!reusedUnit && (allocation.targetIds.length > 0 || args.sourceScan && unitChunkKeys.length > 0)) {
     allocationSeq += 1;
     schedulerSeq += 1;
-    const id = unitId(scopeKey3, allocation.targetIds, unitChunkKeys, allocationSeq);
+    const id2 = unitId(scopeKey3, allocation.targetIds, unitChunkKeys, allocationSeq);
     unit = {
-      id,
+      id: id2,
       targetIds: allocation.targetIds,
       sourceChunkKeys: unitChunkKeys,
       inputSignature: sha256HexSync(JSON.stringify([unitSignatureSource(allocation.targetIds), CONSTRUCTION_PAYLOAD_VERSION])),
@@ -41933,22 +42000,22 @@ function planConstructionQueue(args) {
     schedulerSeq
   };
   const ctx = { branchId, turnId, opId: `construction_progress_${turnId}` };
-  const unitBeforeOf = (id) => {
-    const row3 = rowsInScope(readProgressRows(tables, branchId), scopeKey3, "unit").find((item) => item.subjectKey === id);
+  const unitBeforeOf = (id2) => {
+    const row3 = rowsInScope(readProgressRows(tables, branchId), scopeKey3, "unit").find((item) => item.subjectKey === id2);
     return row3?.raw ?? null;
   };
   const preMutations = [
     scopeRowMutation(ctx, scopeKey3, scopeBeforeOf(scopeRow), scan, mode, args.focusLocationIds)
   ];
-  for (const id of discovery.enqueueIds) {
-    const row3 = tables.selectOne("locations", branchId, id);
+  for (const id2 of discovery.enqueueIds) {
+    const row3 = tables.selectOne("locations", branchId, id2);
     const signature2 = targetSignature(row3 ?? {});
-    preMutations.push(targetRowMutation(ctx, scopeKey3, targetBefore.get(id) ?? null, id, signature2, "pending", { version: CONSTRUCTION_PAYLOAD_VERSION }));
+    preMutations.push(targetRowMutation(ctx, scopeKey3, targetBefore.get(id2) ?? null, id2, signature2, "pending", { version: CONSTRUCTION_PAYLOAD_VERSION }));
   }
-  for (const id of discovery.suspendTargetIds) {
-    const before = targetBefore.get(id) ?? null;
+  for (const id2 of discovery.suspendTargetIds) {
+    const before = targetBefore.get(id2) ?? null;
     if (!before) continue;
-    preMutations.push(targetRowMutation(ctx, scopeKey3, before, id, String(before.input_signature ?? ""), "suspended", { version: CONSTRUCTION_PAYLOAD_VERSION }));
+    preMutations.push(targetRowMutation(ctx, scopeKey3, before, id2, String(before.input_signature ?? ""), "suspended", { version: CONSTRUCTION_PAYLOAD_VERSION }));
   }
   if (unit && !unit.existing) {
     preMutations.push(unitRowMutation(ctx, scopeKey3, null, unit.id, {
@@ -41990,7 +42057,7 @@ function planConstructionQueue(args) {
     freshUnitCount: next.freshCount,
     retryUnitCount: next.retryCount,
     pendingTargetCount: discovery.enqueueIds.length,
-    remainingTargetIds: unit ? uniqueIds(pendingTargetIds).filter((id) => !unit.targetIds.includes(id)) : uniqueIds(pendingTargetIds),
+    remainingTargetIds: unit ? uniqueIds(pendingTargetIds).filter((id2) => !unit.targetIds.includes(id2)) : uniqueIds(pendingTargetIds),
     preMutations,
     sourcePlan,
     sourceSelection: sourcePlan ? sourcePlan.selection : null,
@@ -41999,10 +42066,10 @@ function planConstructionQueue(args) {
       const out = [];
       const port = tables;
       const covered = new Set(coveredIds.map(String));
-      for (const id of unit.targetIds) {
-        if (!covered.has(id)) continue;
-        const before = port.selectOne("locations", branchId, id);
-        out.push(targetRowMutation(ctx, scopeKey3, targetBefore.get(id) ?? null, id, acceptedSignature(before ?? {}), "processed", { version: CONSTRUCTION_PAYLOAD_VERSION }));
+      for (const id2 of unit.targetIds) {
+        if (!covered.has(id2)) continue;
+        const before = port.selectOne("locations", branchId, id2);
+        out.push(targetRowMutation(ctx, scopeKey3, targetBefore.get(id2) ?? null, id2, acceptedSignature(before ?? {}), "processed", { version: CONSTRUCTION_PAYLOAD_VERSION }));
       }
       out.push(unitRowMutation(ctx, scopeKey3, unitBeforeOf(unit.id), unit.id, {
         inputSignature: unit.inputSignature,
@@ -42019,10 +42086,10 @@ function planConstructionQueue(args) {
     failedMutations: (code, bindings) => {
       if (!unit) return [];
       const out = [];
-      for (const id of unit.targetIds) {
-        const before = targetBefore.get(id) ?? null;
+      for (const id2 of unit.targetIds) {
+        const before = targetBefore.get(id2) ?? null;
         if (!before) continue;
-        out.push(targetRowMutation(ctx, scopeKey3, before, id, String(before.input_signature ?? ""), "pending", { version: CONSTRUCTION_PAYLOAD_VERSION }, schedulerSeq));
+        out.push(targetRowMutation(ctx, scopeKey3, before, id2, String(before.input_signature ?? ""), "pending", { version: CONSTRUCTION_PAYLOAD_VERSION }, schedulerSeq));
       }
       const attempts = unit.attemptCount + 1;
       const exhausted = attempts >= MAX_UNIT_ATTEMPTS;
@@ -42260,7 +42327,7 @@ function unitSignatureSource(targetIds) {
   return [...new Set(targetIds)].sort();
 }
 function uniqueIds(values) {
-  return [...new Set(values)].filter((id) => id.length > 0);
+  return [...new Set(values)].filter((id2) => id2.length > 0);
 }
 function mergeChangedFields(target2, patch) {
   if (target2 === null) return { before: null, after: { ...patch } };
@@ -43000,8 +43067,8 @@ function createSqlRepository(options) {
             const ref2 = op.value.ref;
             const own = ref2 && !ref2.startsWith("new:") ? [{ id: ref2, kind: op.value.op.startsWith("character.") ? "character" : op.value.op.startsWith("route.") ? "route" : "location" }] : [];
             const locations = ["parent_ref", "from_ref", "to_ref", "location_ref"].flatMap((key) => {
-              const id = op.value.data?.[key];
-              return typeof id === "string" && !id.startsWith("new:") ? [{ id, kind: "location" }] : [];
+              const id2 = op.value.data?.[key];
+              return typeof id2 === "string" && !id2.startsWith("new:") ? [{ id: id2, kind: "location" }] : [];
             });
             const map = op.value.data?.["map_ref"];
             return [...own, ...locations, ...typeof map === "string" ? [{ id: map, kind: "map" }] : []];
@@ -43179,7 +43246,7 @@ function createSqlRepository(options) {
           } else {
             if (combinedSpatial) {
               const planningLayout = input.layoutMaps ? buildSqlLayoutTask(candidateDb, branchId, input, turnId, constructionReport, { canonicalRefs: true, combinedSpatial: true }) : null;
-              for (const id of planningLayout?.mapIds ?? []) combinedPlannedMapIds.add(id);
+              for (const id2 of planningLayout?.mapIds ?? []) combinedPlannedMapIds.add(id2);
               task.request = combineSpatialRequest(task.request, planningLayout);
             }
             construction.attempted = true;
@@ -43225,7 +43292,7 @@ function createSqlRepository(options) {
               const readPort = createTableReadPort(candidateDb);
               const aliases = new Map(task.catalogue.knownRefs.map((ref2) => [ref2.alias, ref2.id]));
               const reusedBindings = { ...construction.queuePlan?.unit?.bindings ?? {} };
-              for (const [alias, id] of Object.entries(reusedBindings)) aliases.set(alias, id);
+              for (const [alias, id2] of Object.entries(reusedBindings)) aliases.set(alias, id2);
               const resolveRefs = (value) => typeof value === "string" ? aliases.get(value) ?? value : Array.isArray(value) ? value.map(resolveRefs) : value && typeof value === "object" ? Object.fromEntries(Object.entries(value).map(([key, child]) => [key, key === "ref" || key.endsWith("_ref") || typeof child === "object" ? resolveRefs(child) : child])) : value;
               const existingLocations = queryBound(candidateDb, "SELECT id FROM locations WHERE branch_id = ? AND status = ?", [branchId, "active"]).map((row3) => readPort.selectOne("locations", branchId, String(row3.id))).filter((row3) => !!row3);
               const deduped = dedupeWorldConstructionOps({
@@ -43244,10 +43311,10 @@ function createSqlRepository(options) {
                   constructionRefs.push({ alias: reused.id, id: reused.id, kind: "location", rowRev: Number(row3.row_rev ?? 0) });
                 }
               }
-              for (const id of Object.values(reusedBindings)) {
-                if (constructionRefs.some((ref2) => ref2.id === id)) continue;
-                const row3 = existingLocations.find((item) => item.id === id);
-                if (row3) constructionRefs.push({ alias: id, id, kind: "location", rowRev: Number(row3.row_rev ?? 0) });
+              for (const id2 of Object.values(reusedBindings)) {
+                if (constructionRefs.some((ref2) => ref2.id === id2)) continue;
+                const row3 = existingLocations.find((item) => item.id === id2);
+                if (row3) constructionRefs.push({ alias: id2, id: id2, kind: "location", rowRev: Number(row3.row_rev ?? 0) });
               }
               const normalized = normalizeConstructionOps({
                 operations: deduped.operations,
@@ -43308,7 +43375,7 @@ function createSqlRepository(options) {
                 if (combinedSpatial) combinedRefs = [
                   ...compiledConstruction.scope.all(),
                   ...deduped.reusedIds.map((reused) => ({ alias: reused.ref, id: reused.id, kind: "location", rowRev: Number(existingLocations.find((row3) => row3.id === reused.id)?.row_rev ?? 1), declaredByOpId: null })),
-                  ...Object.entries(reusedBindings).filter(([, id]) => readPort.selectOne("locations", branchId, id)).map(([alias, id]) => ({ alias, id, kind: "location", rowRev: null, declaredByOpId: null }))
+                  ...Object.entries(reusedBindings).filter(([, id2]) => readPort.selectOne("locations", branchId, id2)).map(([alias, id2]) => ({ alias, id: id2, kind: "location", rowRev: null, declaredByOpId: null }))
                 ];
                 for (const group2 of orderedConstruction.order) {
                   if (!appliedGroupIds.has(group2.id)) continue;
@@ -43433,7 +43500,8 @@ function createSqlRepository(options) {
         allIssues.push(...imported.issues);
       }
       if (input.sceneMaps || input.mapCalibration || input.mapBackground || input.mapProfile) {
-        const mapGroup = compileSqlSceneMaps({ db: candidateDb, branchId, turnId, clockS: clockBefore, makeId, ensureScenes: input.sceneMaps, calibration: input.mapCalibration, povName: input.povName, background: input.mapBackground, profile: input.mapProfile });
+        const plannedLocationIds = input.legacyImport ? pageAllRows(tables, "locations", branchId).filter((l) => l.status === "active").map((l) => String(l.id)) : plannedSceneLocationIds(combinedDrafts, combinedRefs);
+        const mapGroup = compileSqlSceneMaps({ db: candidateDb, branchId, turnId, clockS: clockBefore, makeId, ensureScenes: input.sceneMaps, calibration: input.mapCalibration, povName: input.povName, background: input.mapBackground, profile: input.mapProfile, plannedLocationIds });
         if (mapGroup) {
           const mapResult = applyGroups(candidateDb, [mapGroup], { branchId, turnId, attemptId: "scene-maps", validate: true });
           if (mapResult.journalIssues.length || mapResult.groups.some((group2) => group2.status === "rejected" || group2.status === "blocked"))
@@ -43490,7 +43558,7 @@ function createSqlRepository(options) {
       };
       if (Array.isArray(input.layoutMaps) && input.layoutMaps.length) applyFunctionalAreas(input.layoutMaps, true);
       const layoutInput = worldBuildWindow && Array.isArray(input.layoutMaps) ? { ...input, layoutMaps: input.layoutMaps.filter((mapId) => !worldBuildMapReady(candidateDb, branchId, mapId)) } : input;
-      let layoutTask = layoutInput.layoutMaps ? buildSqlLayoutTask(candidateDb, branchId, layoutInput, turnId, layoutReport) : null;
+      let layoutTask = layoutInput.layoutMaps ? buildSqlLayoutTask(candidateDb, branchId, layoutInput, turnId, layoutReport, { eagerLocationIds: plannedSceneLocationIds(combinedDrafts, combinedRefs) }) : null;
       drainLayoutReport();
       const pendingLayoutIds = layoutTask ? [...layoutTask.mapIds, ...layoutTask.remainingLocationIds] : [];
       const layoutParents = layoutTask?.parentMapIds ?? {};
@@ -43502,7 +43570,7 @@ function createSqlRepository(options) {
         preparedCombinedOperations = prepared.operations;
         allIssues.push(...prepared.issues);
         for (const op of prepared.operations) if (op.ref) combinedPlannedMapIds.add(op.ref);
-        const cachedIds = pendingLayoutIds.filter((id) => combinedPlannedMapIds.has(id));
+        const cachedIds = pendingLayoutIds.filter((id2) => combinedPlannedMapIds.has(id2));
         if (cachedIds.length) {
           const cached = buildSqlLayoutTask(candidateDb, branchId, { ...input, layoutMaps: cachedIds, generationOptions: { ...generationOptions, ...generationOptions.workBatching ? { workBatching: { ...generationOptions.workBatching, mapBatches: 1 } } : {} } }, turnId, layoutReport);
           if (cached) {
@@ -43511,7 +43579,7 @@ function createSqlRepository(options) {
           }
         }
       }
-      const evidenceMapRefs = pendingLayoutIds.map((id, index) => ({ id, alias: `M${index + 1}`, name: String(createTableReadPort(candidateDb).selectOne("maps", branchId, id)?.name ?? id) }));
+      const evidenceMapRefs = pendingLayoutIds.map((id2, index) => ({ id: id2, alias: `M${index + 1}`, name: String(createTableReadPort(candidateDb).selectOne("maps", branchId, id2)?.name ?? id2) }));
       let layoutEvidenceCache = combinedSpatial ? [] : null;
       const evidenceBlockedMaps = /* @__PURE__ */ new Set();
       const deferredLayoutIds = /* @__PURE__ */ new Set();
@@ -43608,15 +43676,15 @@ function createSqlRepository(options) {
         groupResults.push(...spatial.groups);
         allIssues.push(...spatial.issues);
         const processedNow = new Set(spatial.processed);
-        for (const [id, requestId] of pendingRequestByMap) if (processedNow.has(requestId)) completedSpatialMaps.add(id);
-        for (const id of spatial.completedMapIds ?? []) completedSpatialMaps.add(id);
+        for (const [id2, requestId] of pendingRequestByMap) if (processedNow.has(requestId)) completedSpatialMaps.add(id2);
+        for (const id2 of spatial.completedMapIds ?? []) completedSpatialMaps.add(id2);
         if (completedSpatialMaps.size) {
           applyFunctionalAreas([...completedSpatialMaps], false);
           const processedRequests = new Set(spatial.processed);
           const ctxPort = createTableReadPort(candidateDb);
           const ctxMutations = [];
-          const completedMaps = new Map([...completedSpatialMaps].map((id) => [id, void 0]));
-          for (const id of spatial.completedMapIds ?? []) if (!completedMaps.has(id)) completedMaps.set(id, void 0);
+          const completedMaps = new Map([...completedSpatialMaps].map((id2) => [id2, void 0]));
+          for (const id2 of spatial.completedMapIds ?? []) if (!completedMaps.has(id2)) completedMaps.set(id2, void 0);
           for (const [mapId, requestId] of completedMaps) {
             const mapLayoutTask = taskByMap.get(mapId);
             if (requestId && !processedRequests.has(requestId)) continue;
@@ -43661,7 +43729,7 @@ function createSqlRepository(options) {
           }
         }
       };
-      while (layoutTask && layoutModelPort && (layoutBudget.remaining() > 0 || combinedPlanAvailable) && (mapBatchesRemaining > 0 || layoutTask.mapIds.some((id) => retriedLayoutIds.has(id)))) {
+      while (layoutTask && layoutModelPort && (layoutBudget.remaining() > 0 || combinedPlanAvailable) && (mapBatchesRemaining > 0 || layoutTask.mapIds.some((id2) => retriedLayoutIds.has(id2)))) {
         let currentLayoutTask = layoutTask;
         const attemptedMapIds = [...layoutTask.mapIds];
         const returnedMapIds = /* @__PURE__ */ new Set();
@@ -43697,7 +43765,7 @@ function createSqlRepository(options) {
               }
               if ((firstError || rejected2.length) && !canSupplement()) {
                 const affected = firstError || rejected2.some((r) => r.mapId === null) ? evidenceMapRefs.map((m) => m.id) : rejected2.map((r) => r.mapId);
-                for (const id of affected) evidenceBlockedMaps.add(id);
+                for (const id2 of affected) evidenceBlockedMaps.add(id2);
                 allIssues.push({ code: "LAYOUT_EVIDENCE_PENDING", path: "$.layout.evidence", message: "部分位置依据未通过校验，额外请求额度已用尽；通过的片段保留，失败地图待处理。", severity: "warning", retryable: true });
                 layoutFacts.push(...verified);
                 continue;
@@ -43729,19 +43797,19 @@ function createSqlRepository(options) {
             }
             layoutEvidenceCache = layoutFacts;
           }
-          const eligibleMaps = currentLayoutTask.mapIds.filter((id) => !evidenceBlockedMaps.has(id));
+          const eligibleMaps = currentLayoutTask.mapIds.filter((id2) => !evidenceBlockedMaps.has(id2));
           if (eligibleMaps.length !== currentLayoutTask.mapIds.length) {
-            for (const id of currentLayoutTask.mapIds) if (evidenceBlockedMaps.has(id)) deferredLayoutIds.add(id);
+            for (const id2 of currentLayoutTask.mapIds) if (evidenceBlockedMaps.has(id2)) deferredLayoutIds.add(id2);
             const narrowed = eligibleMaps.length ? buildSqlLayoutTask(candidateDb, branchId, { ...input, layoutMaps: eligibleMaps }, `${turnId}_eligible_${layoutTasks.length}`, layoutReport) : null;
             if (!narrowed) throw new Error("本批位置依据未通过校验；其他地图继续，本批等待重试");
             currentLayoutTask = layoutTask = narrowed;
             layoutTasks[layoutTasks.length - 1] = narrowed;
           }
           const layoutRequest = combinedSpatial ? withOriginalSpatialSources(currentLayoutTask.request, sourceSnapshot) : attachLayoutEvidence(currentLayoutTask.request, layoutEvidenceCache, currentLayoutTask.mapIds);
-          const isSupplement = currentLayoutTask.mapIds.some((id) => retriedLayoutIds.has(id));
+          const isSupplement = currentLayoutTask.mapIds.some((id2) => retriedLayoutIds.has(id2));
           if (isSupplement) {
             layoutRequest.retryOf = layoutTasks[0].request.batchId;
-            layoutRequest.diagnosticCause = currentLayoutTask.mapIds.some((id) => smallerLayoutBatches.has(id)) ? "batch_split" : "missing_map_reply";
+            layoutRequest.diagnosticCause = currentLayoutTask.mapIds.some((id2) => smallerLayoutBatches.has(id2)) ? "batch_split" : "missing_map_reply";
           } else mapBatchesRemaining--;
           let response;
           if (combinedPlanAvailable && !isSupplement) {
@@ -43782,36 +43850,36 @@ function createSqlRepository(options) {
           }
           if (input.manual && Array.isArray(input.layoutMaps)) {
             const read = createTableReadPort(candidateDb);
-            for (const id of currentLayoutTask.mapIds) {
-              const refs = layoutRefs.find((r) => r.id === id), map = read.selectOne("maps", branchId, id);
-              if (!refs || !map || parsed.operations.some((o) => o.value.op === "map.layout.request" && (o.value.ref === id || o.value.ref === refs.alias))) continue;
+            for (const id2 of currentLayoutTask.mapIds) {
+              const refs = layoutRefs.find((r) => r.id === id2), map = read.selectOne("maps", branchId, id2);
+              if (!refs || !map || parsed.operations.some((o) => o.value.op === "map.layout.request" && (o.value.ref === id2 || o.value.ref === refs.alias))) continue;
               const frame = normalizeFrame(map.frame_json), scene = frame.atlasScene;
-              const kind = currentLayoutTask.kinds[id];
+              const kind = currentLayoutTask.kinds[id2];
               const registeredContainer = map.container_location_id ? read.selectOne("locations", branchId, String(map.container_location_id)) : null;
-              const emptyOwn = Number(queryBound(candidateDb, "SELECT COUNT(*) n FROM locations WHERE branch_id=? AND map_id=? AND status='active'", [branchId, id])[0].n) === 0;
+              const emptyOwn = Number(queryBound(candidateDb, "SELECT COUNT(*) n FROM locations WHERE branch_id=? AND map_id=? AND status='active'", [branchId, id2])[0].n) === 0;
               const localSpec = registeredContainer ? scene?.constraints ?? (kind === "overview" && emptyOwn ? { surface: "mixed", zones: [], links: [], features: [] } : null) : null;
               if (!localSpec) continue;
-              const local = parseOperations(JSON.stringify({ op: "map.layout.request", ref: id, data: { kind, spec: localSpec }, why: "程序基于已登记结构完成布局；模型新增细节未完成" }), { phase: "geography" });
+              const local = parseOperations(JSON.stringify({ op: "map.layout.request", ref: id2, data: { kind, spec: localSpec }, why: "程序基于已登记结构完成布局；模型新增细节未完成" }), { phase: "geography" });
               parsed.operations.push(...local.operations);
-              allIssues.push({ code: "LAYOUT_DETAILS_DEFERRED", path: "$.layout", message: `地图 ${id} 由程序基于已登记结构生成；模型本轮新增细节未通过协议校验，仍未完成。`, severity: "warning", retryable: true });
+              allIssues.push({ code: "LAYOUT_DETAILS_DEFERRED", path: "$.layout", message: `地图 ${id2} 由程序基于已登记结构生成；模型本轮新增细节未通过协议校验，仍未完成。`, severity: "warning", retryable: true });
             }
           }
           allIssues.push(...extracted.issues, ...parsed.issues);
           const ops = parsed.operations.filter((op) => op.value.op === "map.layout.request" && allowedRefs.has(op.value.ref ?? "") && (currentLayoutTask.mapIds.length === 1 || unknownLayoutEntityRefs([op.value], layoutRefs).length === 0)).map((op) => {
-            const id = layoutRefs.find((r) => r.id === op.value.ref || r.alias === op.value.ref)?.id;
-            const extent2 = id ? currentLayoutTask.extents[id] : void 0;
-            const kind = id ? currentLayoutTask.kinds[id] : void 0;
+            const id2 = layoutRefs.find((r) => r.id === op.value.ref || r.alias === op.value.ref)?.id;
+            const extent2 = id2 ? currentLayoutTask.extents[id2] : void 0;
+            const kind = id2 ? currentLayoutTask.kinds[id2] : void 0;
             const data = op.value.data, spec = data?.spec;
-            if (!id || !extent2 || !kind || !spec || typeof spec !== "object" || Array.isArray(spec)) return { ...op, opId: `layout_${layoutTasks.length}_${op.opId}` };
-            if (data?.kind !== kind) allIssues.push({ code: "LAYOUT_KIND_OVERRIDDEN", path: "$.layout.kind", message: `地图 ${id} 的角色由容器决定为 ${kind}，模型给出的 ${String(data?.kind ?? "(空)")} 已按 ${kind} 处理`, severity: "warning", retryable: false });
+            if (!id2 || !extent2 || !kind || !spec || typeof spec !== "object" || Array.isArray(spec)) return { ...op, opId: `layout_${layoutTasks.length}_${op.opId}` };
+            if (data?.kind !== kind) allIssues.push({ code: "LAYOUT_KIND_OVERRIDDEN", path: "$.layout.kind", message: `地图 ${id2} 的角色由容器决定为 ${kind}，模型给出的 ${String(data?.kind ?? "(空)")} 已按 ${kind} 处理`, severity: "warning", retryable: false });
             const canvas = extent2.units === "meters" ? { width: extent2.width, height: extent2.height } : {};
-            const baseline = kind === "floor" ? currentLayoutTask.baselineRooms[id] ?? [] : [];
+            const baseline = kind === "floor" ? currentLayoutTask.baselineRooms[id2] ?? [] : [];
             const rooms = "rooms" in spec ? spec.rooms : void 0;
             const defaults = baseline.length && (rooms === void 0 || Array.isArray(rooms) && rooms.length === 0) ? { rooms: baseline } : {};
             let normalizedSpec = { ...canvas, ...spec, ...defaults };
             const citySpec = spec;
             if (kind === "city" && (!Array.isArray(citySpec.districts) || citySpec.districts.length === 0)) {
-              const read = createTableReadPort(candidateDb), mapRow = read.selectOne("maps", branchId, id);
+              const read = createTableReadPort(candidateDb), mapRow = read.selectOne("maps", branchId, id2);
               const containerId = String(mapRow?.container_location_id ?? "");
               const containerRef = layoutRefs.find((entry) => entry.id === containerId)?.alias ?? containerId;
               const priorDistricts = normalizeFrame(mapRow?.frame_json).atlasScene?.constraints;
@@ -43847,8 +43915,8 @@ function createSqlRepository(options) {
           parsedOperations.push(...ops);
           const acceptedIds = new Set(appliedLayout.groups.filter((g) => g.status === "applied").flatMap((g) => g.opIds));
           for (const op of ops) if (acceptedIds.has(op.opId)) {
-            const id = layoutRefs.find((r) => r.id === op.value.ref || r.alias === op.value.ref)?.id;
-            if (id) returnedMapIds.add(id);
+            const id2 = layoutRefs.find((r) => r.id === op.value.ref || r.alias === op.value.ref)?.id;
+            if (id2) returnedMapIds.add(id2);
           }
           layoutApplied = layoutApplied || ops.length > 0;
           for (const message of appliedLayout.journalIssues) allIssues.push({ code: "JOURNAL_WRITE_FAILED", path: "$.layout", message, severity: "error", retryable: false });
@@ -43859,7 +43927,7 @@ function createSqlRepository(options) {
           }
           if (error instanceof AtlasDbError && error.code === "STALE_BASE") throw error;
           if (layoutEvidenceCache === null) layoutEvidenceBlocked = true;
-          splitAfterFailure = !generationOptions.workBatching && isModelBatchSizeFailure(error) && currentLayoutTask.mapIds.length > 1 && !currentLayoutTask.mapIds.some((id) => retriedLayoutIds.has(id)) && layoutBudget.remaining() > 0;
+          splitAfterFailure = !generationOptions.workBatching && isModelBatchSizeFailure(error) && currentLayoutTask.mapIds.length > 1 && !currentLayoutTask.mapIds.some((id2) => retriedLayoutIds.has(id2)) && layoutBudget.remaining() > 0;
           retryableBatchReply = splitAfterFailure;
           allIssues.push(splitAfterFailure ? { code: "LAYOUT_BATCH_SPLIT", path: "$.layout", message: "合批超出模型容量或回复被截断，原回复未写入；缩小批量补交一次。", severity: "warning", retryable: false } : { code: "LAYOUT_MODEL_FAILED", path: "$.layout", message: `空间布局未生成：${error.message} 已登记的世界数据保留，下一轮自动继续布局。`, severity: "warning", retryable: true });
           writeLayoutAttempt({ failure_kind: failureKindOf(error), error: error.message });
@@ -43867,21 +43935,21 @@ function createSqlRepository(options) {
         if (layoutEvidenceBlocked) break;
         materializeLayouts();
         const retryIds = [];
-        for (const id of currentLayoutTask.mapIds) {
-          if (completedSpatialMaps.has(id)) continue;
-          if (!returnedMapIds.has(id) && retryableBatchReply && !retriedLayoutIds.has(id) && layoutBudget.remaining() > 0 && canSupplement() && !evidenceBlockedMaps.has(id)) {
-            retryIds.push(id);
-            retriedLayoutIds.add(id);
-            if (splitAfterFailure) smallerLayoutBatches.set(id, Math.max(1, Math.floor(currentLayoutTask.mapIds.length / 2)));
-          } else deferredLayoutIds.add(id);
+        for (const id2 of currentLayoutTask.mapIds) {
+          if (completedSpatialMaps.has(id2)) continue;
+          if (!returnedMapIds.has(id2) && retryableBatchReply && !retriedLayoutIds.has(id2) && layoutBudget.remaining() > 0 && canSupplement() && !evidenceBlockedMaps.has(id2)) {
+            retryIds.push(id2);
+            retriedLayoutIds.add(id2);
+            if (splitAfterFailure) smallerLayoutBatches.set(id2, Math.max(1, Math.floor(currentLayoutTask.mapIds.length / 2)));
+          } else deferredLayoutIds.add(id2);
         }
         if (retryIds.length && !splitAfterFailure) allIssues.push({ code: "LAYOUT_MAP_REPLY_RETRIED", path: "$.layout", message: `本批仅补交 ${retryIds.length} 张未完成地图，已完成地图不重做。`, severity: "warning", retryable: false });
         const consumed = new Set(attemptedMapIds);
-        pendingLayoutIds.splice(0, pendingLayoutIds.length, ...pendingLayoutIds.filter((id) => !consumed.has(id) && !completedSpatialMaps.has(id)));
+        pendingLayoutIds.splice(0, pendingLayoutIds.length, ...pendingLayoutIds.filter((id2) => !consumed.has(id2) && !completedSpatialMaps.has(id2)));
         pendingLayoutIds.unshift(...retryIds);
-        const parentBlocked = pendingLayoutIds.filter((id) => {
+        const parentBlocked = pendingLayoutIds.filter((id2) => {
           const seen = /* @__PURE__ */ new Set();
-          let parent = layoutParents[id];
+          let parent = layoutParents[id2];
           while (parent && !seen.has(parent)) {
             seen.add(parent);
             if (deferredLayoutIds.has(parent) || evidenceBlockedMaps.has(parent)) return true;
@@ -43890,15 +43958,15 @@ function createSqlRepository(options) {
           return false;
         });
         if (parentBlocked.length) {
-          for (const id of parentBlocked) deferredLayoutIds.add(id);
+          for (const id2 of parentBlocked) deferredLayoutIds.add(id2);
           const blocked = new Set(parentBlocked);
-          pendingLayoutIds.splice(0, pendingLayoutIds.length, ...pendingLayoutIds.filter((id) => !blocked.has(id)));
+          pendingLayoutIds.splice(0, pendingLayoutIds.length, ...pendingLayoutIds.filter((id2) => !blocked.has(id2)));
           allIssues.push({ code: "LAYOUT_PARENT_PENDING", path: "$.layout", message: `${parentBlocked.length} 张子图等待父图完成；本轮不消耗请求生成缺少父图依据的细节。`, severity: "warning", retryable: true });
         }
-        const supplements = generationOptions.workBatching ? pendingLayoutIds.filter((id) => retriedLayoutIds.has(id)) : [];
+        const supplements = generationOptions.workBatching ? pendingLayoutIds.filter((id2) => retriedLayoutIds.has(id2)) : [];
         const nextTargets = supplements.length ? supplements : pendingLayoutIds;
         layoutTask = nextTargets.length && (mapBatchesRemaining > 0 || supplements.length > 0) ? buildSqlLayoutTask(candidateDb, branchId, { ...input, generationOptions: { ...generationOptions, ...generationOptions.workBatching ? { workBatching: { ...generationOptions.workBatching, mapBatches: supplements.length ? 1 : mapBatchesRemaining } } : {} }, layoutMaps: nextTargets, layoutBatchMapLimit: smallerLayoutBatches.get(pendingLayoutIds[0]) }, `${turnId}_layout_${layoutTasks.length}`, layoutReport) : null;
-        if (layoutTask && layoutTask.mapIds.some((id) => retriedLayoutIds.has(id))) {
+        if (layoutTask && layoutTask.mapIds.some((id2) => retriedLayoutIds.has(id2))) {
           const repair = planLayoutRepair({
             maps: layoutTask.mapIds.map((mapId) => ({ mapId, batchId: currentLayoutTask.request.batchId, attempts: 0 })),
             failures: layoutTask.mapIds.map((mapId) => ({
@@ -44510,7 +44578,7 @@ function createSqlRepository(options) {
 }
 function reconcileRepairResults(first, second, rejected) {
   const repaired = new Set(second.filter((g) => g.status === "applied" || g.status === "duplicate").flatMap((g) => g.opIds));
-  const merged = first.filter((g) => !rejected.some((r) => r.groupId === g.groupId) || !g.opIds.length || !g.opIds.every((id) => repaired.has(id)));
+  const merged = first.filter((g) => !rejected.some((r) => r.groupId === g.groupId) || !g.opIds.length || !g.opIds.every((id2) => repaired.has(id2)));
   for (const g of second) {
     const idx = merged.findIndex((x) => x.groupId === g.groupId);
     if (idx >= 0) merged[idx] = g;
@@ -45824,21 +45892,21 @@ init_atlas_sim_motion();
 init_atlas_db_readport();
 function previewSqlTravel(session, destination) {
   const read = createTableReadPort(session.repo.db), branch2 = session.repo.internal.branchRow();
-  const id = String(destination ?? ""), clock = Number(branch2.clock_s);
+  const id2 = String(destination ?? ""), clock = Number(branch2.clock_s);
   const planned = startJourney({
     id: "preview",
     status: "ready",
     kind: "travel",
     actor_entity_id: branch2.pov_character_id,
-    target_location_id: id,
+    target_location_id: id2,
     payload_json: {}
   }, { db: session.repo.db, branchId: session.branchId, clockS: clock, turnId: "preview", makeId: () => "preview" });
-  if (!read.selectOne("locations", session.branchId, id) || !planned.journey) return { preview: null, issues: planned.issues, coreSaved: false };
+  if (!read.selectOne("locations", session.branchId, id2) || !planned.journey) return { preview: null, issues: planned.issues, coreSaved: false };
   const arrival = estimatedArrival(planned.journey, clock), segments = JSON.parse(String(planned.journey.segments_json));
   const distance3 = segments.every((segment) => typeof segment.distanceNominalM === "number") ? segments.reduce((n, segment) => n + segment.distanceNominalM, 0) : null;
   if (distance3 === null || arrival.minS === null || arrival.maxS === null) return { preview: null, reason: "路线未标定或角色移动能力未确定；展示布局不作为实际路程", issues: planned.issues, coreSaved: false };
   return { preview: {
-    destinationId: id,
+    destinationId: id2,
     distance: distance3,
     estimatedDuration: (arrival.minS + arrival.maxS) / 2 - clock,
     distanceUnit: "m",
@@ -45853,6 +45921,7 @@ init_atlas_db_runtime();
 init_atlas_hash();
 init_atlas_map_topology();
 init_atlas_runtime_limits();
+init_atlas_scene_expansion();
 function inspectSqlWorld(session) {
   const branch2 = session.repo.internal.branchRow();
   const db = session.repo.db;
@@ -45862,7 +45931,7 @@ function inspectSqlWorld(session) {
     "SELECT (SELECT COUNT(*) FROM locations WHERE branch_id=?) locations,(SELECT COUNT(*) FROM characters WHERE branch_id=?) characters,(SELECT COUNT(*) FROM items WHERE branch_id=?) items",
     [b, b, b]
   )[0];
-  const missing = queryBound(
+  const unmapped = queryBound(
     db,
     "SELECT l.id FROM locations l WHERE l.branch_id=? AND l.status='active' AND NOT EXISTS (SELECT 1 FROM maps m WHERE m.branch_id=l.branch_id AND m.container_location_id=l.id AND m.status='active')",
     [b]
@@ -45876,6 +45945,12 @@ function inspectSqlWorld(session) {
     [b]
   );
   const routeRows = queryBound(db, "SELECT id, from_location_id, to_location_id FROM routes WHERE branch_id=?", [b]);
+  const expanded = sceneExpansionLocationIds({
+    locations: locationRows,
+    characters: queryBound(db, "SELECT location_id,status FROM characters WHERE branch_id=? AND status='active'", [b]),
+    items: queryBound(db, "SELECT location_id,status FROM items WHERE branch_id=? AND status='active'", [b])
+  });
+  const missing = unmapped.filter((row3) => expanded.has(String(row3.id)));
   const diagnostics = buildInspectDiagnostics({
     branchId: b,
     rootMapId: branch2.root_map_id ? String(branch2.root_map_id) : null,
@@ -45902,7 +45977,7 @@ function inspectSqlWorld(session) {
   const inferenceCount = topologyIssues.filter((issue31) => issue31.kind === "inference").length + unknownContainment.length + isolatedComponents.length;
   const reasons = [];
   if (foreignKeys.length) reasons.push("存在引用错误；保存候选会拒绝该状态，请从完整备份恢复");
-  if (missing.length || rootMissing) reasons.push("部分地点缺少内部地图，可重建地图结构并记录回退");
+  if (missing.length || rootMissing) reasons.push("部分有内部结构或在场实体的地点缺少地图，可重建地图结构并记录回退");
   if (errorCount) reasons.push(`地图包含关系有 ${errorCount} 处明确错误（父环/缺父/重复容器/自容器图等），需作者经候选组修复`);
   if (inferenceCount) reasons.push(`有 ${inferenceCount} 处需要推断或人工确认（未知包含、孤立交通分量等），可能合法，不自动判错`);
   if (reasons.length === 0) reasons.push("地点、人物、物品和地图引用检查通过");
@@ -45967,7 +46042,7 @@ function buildInspectDiagnostics(input) {
   const locationById = new Map(locationRows.map((row3) => [String(row3.id), row3]));
   const unknownContainment = [];
   for (const row3 of locationRows) {
-    const id = String(row3.id);
+    const id2 = String(row3.id);
     if (row3.parent_location_id !== null && row3.parent_location_id !== void 0) continue;
     const mapId = row3.map_id === null || row3.map_id === void 0 ? null : String(row3.map_id);
     const map = mapId ? mapById.get(mapId) : void 0;
@@ -45976,11 +46051,11 @@ function buildInspectDiagnostics(input) {
     unknownContainment.push({
       code: "UNKNOWN_CONTAINMENT",
       mapId,
-      locationId: id,
+      locationId: id2,
       relatedIds: [],
       severity: "warning",
       kind: "inference",
-      message: `地点 ${id}（${String(row3.name ?? "")}）没有父地点，却画在非根图 ${mapId} 上：包含关系需要推断或由作者确认`
+      message: `地点 ${id2}（${String(row3.name ?? "")}）没有父地点，却画在非根图 ${mapId} 上：包含关系需要推断或由作者确认`
     });
   }
   const adjacency = /* @__PURE__ */ new Map();
@@ -45994,11 +46069,11 @@ function buildInspectDiagnostics(input) {
   }
   const seen = /* @__PURE__ */ new Set();
   const components = [];
-  for (const id of [...adjacency.keys()].sort()) {
-    if (seen.has(id)) continue;
-    const stack = [id];
+  for (const id2 of [...adjacency.keys()].sort()) {
+    if (seen.has(id2)) continue;
+    const stack = [id2];
     const component = [];
-    seen.add(id);
+    seen.add(id2);
     while (stack.length > 0) {
       const current2 = stack.pop();
       component.push(current2);
@@ -46019,7 +46094,7 @@ function buildInspectDiagnostics(input) {
   }));
   const coordinateConflicts = [];
   for (const row3 of locationRows) {
-    const id = String(row3.id);
+    const id2 = String(row3.id);
     const precision = String(row3.coord_precision ?? "unknown");
     if (precision !== "exact") continue;
     if (typeof row3.grid_x !== "number" || typeof row3.grid_y !== "number") continue;
@@ -46032,7 +46107,7 @@ function buildInspectDiagnostics(input) {
     const expected = (mapByContainer.get(parentId) ?? [])[0] ?? null;
     if (!expected || expected === mapId) continue;
     coordinateConflicts.push({
-      locationId: id,
+      locationId: id2,
       name: String(row3.name ?? ""),
       mapId,
       expectedMapId: expected,
@@ -46289,8 +46364,8 @@ function toRetryCandidate(target2) {
     attempts: target2.attempts
   };
 }
-function currentWindow(job, active) {
-  if (!job || !active) return null;
+function currentWindow(job, active2) {
+  if (!job || !active2) return null;
   const next = job.nextWindowSequence;
   if (!Number.isSafeInteger(next) || next <= 0) return null;
   return job.committedWindowSequence < next ? next : null;
@@ -46427,21 +46502,21 @@ function emptyCollected() {
   };
 }
 function legacyMapPoint(point, kind) {
-  const id = str23(point.entityId ?? point.id);
+  const id2 = str23(point.entityId ?? point.id);
   return {
-    id,
+    id: id2,
     name: str23(point.name),
     x: num15(point.x) ?? 0,
     y: num15(point.y) ?? 0,
     regionId: null,
     kind,
-    rowId: id
+    rowId: id2
   };
 }
 function legacyNpc(entry, quality) {
-  const id = str23(entry.entityId ?? entry.id);
+  const id2 = str23(entry.entityId ?? entry.id);
   return {
-    id,
+    id: id2,
     name: str23(entry.name),
     pointId: entry.locationId ? null : str23(entry.mapId) || null,
     regionId: null,
@@ -46461,9 +46536,9 @@ function legacyNpc(entry, quality) {
   };
 }
 function legacyObject(entry, locationName) {
-  const id = str23(entry.entityId ?? entry.id);
+  const id2 = str23(entry.entityId ?? entry.id);
   return {
-    id,
+    id: id2,
     name: str23(entry.name),
     type: "item",
     pointId: str23(entry.mapId) || null,
@@ -46888,7 +46963,7 @@ function querySqlSceneState(ctx, query) {
   const uniquePov = characters.filter((c) => c.role === "protagonist");
   const povId = ctx.povId ?? (branch2?.pov_character_id ? String(branch2.pov_character_id) : uniquePov.length === 1 ? String(uniquePov[0].id) : void 0);
   const cache = buildPositionCache(ctx), locationById = new Map(locations.map((l) => [String(l.id), l]));
-  const position = (id) => resolveEffectivePosition(ctx, id, void 0, cache);
+  const position = (id2) => resolveEffectivePosition(ctx, id2, void 0, cache);
   const resolvedLocation = (row3) => {
     const p = position(String(row3.id));
     if (p.kind === "unknown" || p.kind === "in_transit") return null;
@@ -46897,12 +46972,12 @@ function querySqlSceneState(ctx, query) {
   };
   const player = characters.find((c) => c.id === povId), currentLocationId = player ? resolvedLocation(player) : null;
   const chain = [], visited = /* @__PURE__ */ new Set();
-  for (let id = currentLocationId; id && !visited.has(id); ) {
-    visited.add(id);
-    const row3 = locationById.get(id);
+  for (let id2 = currentLocationId; id2 && !visited.has(id2); ) {
+    visited.add(id2);
+    const row3 = locationById.get(id2);
     if (!row3) break;
-    chain.push({ id, name: String(row3.name) });
-    id = row3.parent_location_id ? String(row3.parent_location_id) : null;
+    chain.push({ id: id2, name: String(row3.name) });
+    id2 = row3.parent_location_id ? String(row3.parent_location_id) : null;
   }
   const viewContext = { ...ctx, povId }, base = { branchId: ctx.branchId, revision: ctx.revision, povId, viewMode: ctx.viewMode ?? "author" };
   const mapQuery = { ...base, kind: "map" }, map = queryMapView(viewContext, mapQuery);
@@ -46948,12 +47023,12 @@ function querySqlSceneState(ctx, query) {
   const compatible = toLegacyStateDto(map, mapQuery);
   const nearbyIds = new Set(nearby.items.map((raw) => String(raw.entityId)));
   const npcs = characters.map((row3) => {
-    const id = String(row3.id), locationId = resolvedLocation(row3), p = position(id);
+    const id2 = String(row3.id), locationId = resolvedLocation(row3), p = position(id2);
     const monologue = seesInternalMonologue(ctx.viewMode);
     return {
-      id,
+      id: id2,
       name: String(row3.name),
-      isProtagonist: id === povId,
+      isProtagonist: id2 === povId,
       presence: "present",
       locationId,
       pointId: locationId,
@@ -46972,15 +47047,15 @@ function querySqlSceneState(ctx, query) {
       positionQuality: p.kind === "at_grid" ? p.precision : p.kind === "at_location" ? "coarse" : p.kind === "in_transit" ? p.quality : "unknown",
       positionSource: "sql",
       position: p,
-      isNear: nearbyIds.has(id),
-      reason: nearbyIds.has(id) ? "sameLocation" : "knownElsewhere",
+      isNear: nearbyIds.has(id2),
+      reason: nearbyIds.has(id2) ? "sameLocation" : "knownElsewhere",
       recentNarratives: []
     };
   });
   const objects = items.map((row3) => {
-    const id = String(row3.id), locationId = resolvedLocation(row3), p = position(id);
+    const id2 = String(row3.id), locationId = resolvedLocation(row3), p = position(id2);
     return {
-      id,
+      id: id2,
       name: String(row3.name),
       type: "item",
       description: String(row3.description ?? ""),
@@ -47044,8 +47119,8 @@ function querySqlSceneState(ctx, query) {
 init_define_ATLAS_BUILD_INFO();
 init_atlas_db_runtime();
 function querySqlCharacterTimeline(ctx, input) {
-  const id = input.characterId.replace(/^npc:/, ""), branchId = ctx.branchId;
-  const character = queryBound(ctx.db, "SELECT name FROM characters WHERE branch_id=? AND id=?", [branchId, id])[0];
+  const id2 = input.characterId.replace(/^npc:/, ""), branchId = ctx.branchId;
+  const character = queryBound(ctx.db, "SELECT name FROM characters WHERE branch_id=? AND id=?", [branchId, id2])[0];
   if (!character) throw new AtlasDbError("REF_UNKNOWN", "人物档案不存在", {});
   const offset = Number.isFinite(input.offset ?? 0) ? Math.max(0, Math.trunc(input.offset ?? 0)) : 0;
   const limit = Number.isFinite(input.limit ?? 25) ? Math.max(1, Math.min(100, Math.trunc(input.limit ?? 25))) : 25;
@@ -47059,7 +47134,7 @@ function querySqlCharacterTimeline(ctx, input) {
     (tc.target_table='events' AND (json_extract(COALESCE(tc.after_json,tc.before_json),'$.subject_entity_id')=? OR
       json_extract(COALESCE(tc.after_json,tc.before_json),'$.cause_action_id') IN (SELECT id FROM actions WHERE branch_id=? AND actor_entity_id=?) OR
       EXISTS(SELECT 1 FROM json_each(json_extract(COALESCE(tc.after_json,tc.before_json),'$.participants_json')) participant WHERE json_extract(participant.value,'$.entity_id')=?))))`;
-  const params = [branchId, id, id, id, id, id, branchId, id, id];
+  const params = [branchId, id2, id2, id2, id2, id2, branchId, id2, id2];
   const total = Number(queryBound(ctx.db, `SELECT COUNT(*) AS n FROM turn_changes tc JOIN turns t ON t.id=tc.turn_id WHERE ${where}`, params)[0].n);
   const records = queryBound(ctx.db, `SELECT tc.*,t.clock_before_s,t.clock_after_s FROM turn_changes tc JOIN turns t ON t.id=tc.turn_id WHERE ${where}
     ORDER BY COALESCE(json_extract(COALESCE(tc.after_json,tc.before_json),'$.occurred_at_s'),json_extract(COALESCE(tc.after_json,tc.before_json),'$.last_advanced_at_s'),json_extract(COALESCE(tc.after_json,tc.before_json),'$.evaluated_until_s'),t.clock_after_s) DESC,t.created_wall_ms DESC,tc.sequence DESC LIMIT ? OFFSET ?`, [...params, limit, offset]);
@@ -47070,7 +47145,7 @@ function querySqlCharacterTimeline(ctx, input) {
     const atS = row3.occurred_at_s ?? row3.last_advanced_at_s ?? row3.evaluated_until_s ?? record3.clock_after_s;
     return {
       id: String(record3.id),
-      characterId: id,
+      characterId: id2,
       name: String(character.name),
       period: Number(atS),
       atS: Number(atS),
@@ -47348,8 +47423,8 @@ var ROLEPLAY_ENTRY_MODES = ["reader", "firstPerson", "npc"];
 var ROLEPLAY_CHANGE_KINDS = ["time", "location", "npc", "memory", "flag", "note"];
 function parseRoleplaySession(raw) {
   if (!isObject(raw)) return null;
-  const id = parseId(raw.id);
-  if (!id) return null;
+  const id2 = parseId(raw.id);
+  if (!id2) return null;
   const sessionKey = parseId(raw.sessionKey);
   if (!sessionKey) return null;
   const sourceStoryId = parseId(raw.sourceStoryId);
@@ -47381,7 +47456,7 @@ function parseRoleplaySession(raw) {
   }
   if (!isNumber(raw.createdAt) || !isNumber(raw.updatedAt)) return null;
   return {
-    id,
+    id: id2,
     sessionKey,
     sourceStoryId,
     rootStoryId,
@@ -47400,8 +47475,8 @@ function parseRoleplaySession(raw) {
 }
 function parseRoleplayMessage(raw) {
   if (!isObject(raw)) return null;
-  const id = parseId(raw.id);
-  if (!id) return null;
+  const id2 = parseId(raw.id);
+  if (!id2) return null;
   if (raw.role !== "user" && raw.role !== "assistant") return null;
   const inputMode = ROLEPLAY_INPUT_MODES.includes(raw.inputMode) ? raw.inputMode : "narrative";
   if (raw.inputMode !== void 0 && !ROLEPLAY_INPUT_MODES.includes(raw.inputMode)) return null;
@@ -47428,7 +47503,7 @@ function parseRoleplayMessage(raw) {
   if (raw.presetName !== void 0 && raw.presetName !== null && !isString(raw.presetName)) return null;
   if (raw.model !== void 0 && raw.model !== null && !isString(raw.model)) return null;
   return {
-    id,
+    id: id2,
     role: raw.role,
     inputMode,
     text: raw.text,
@@ -47577,8 +47652,8 @@ function parseCharacterState(raw) {
 }
 function parseCharacterMemory(raw) {
   if (!isObject(raw)) return null;
-  const id = parseId(raw.id);
-  if (!id) return null;
+  const id2 = parseId(raw.id);
+  if (!id2) return null;
   const characterId = parseId(raw.characterId);
   if (!characterId) return null;
   if (!isNumber(raw.at)) return null;
@@ -47596,7 +47671,7 @@ function parseCharacterMemory(raw) {
   const branchId = parseOptionalId(raw.branchId);
   if (branchId === false) return null;
   return {
-    id,
+    id: id2,
     characterId,
     at: raw.at,
     content: raw.content,
@@ -47634,8 +47709,8 @@ function parseWorldTriggerCondition(raw) {
 }
 function parseWorldTrigger(raw) {
   if (!isObject(raw)) return null;
-  const id = parseId(raw.id);
-  if (!id) return null;
+  const id2 = parseId(raw.id);
+  if (!id2) return null;
   if (typeof raw.enabled !== "boolean") return null;
   if (!isString(raw.title) || raw.title.length === 0 || raw.title.length > W0_LIMITS.maxTriggerTitle) return null;
   if (raw.conditionSummary !== void 0 && (!isString(raw.conditionSummary) || raw.conditionSummary.length > W0_LIMITS.maxTriggerSummary)) return null;
@@ -47651,7 +47726,7 @@ function parseWorldTrigger(raw) {
   if (raw.createdAt !== void 0 && !isNumber(raw.createdAt)) return null;
   if (raw.updatedAt !== void 0 && !isNumber(raw.updatedAt)) return null;
   return {
-    id,
+    id: id2,
     enabled: raw.enabled,
     title: raw.title,
     ...isString(raw.conditionSummary) ? { conditionSummary: raw.conditionSummary } : {},
@@ -47695,15 +47770,15 @@ function parseWorldActionSourceRef(raw) {
   if (!isObject(raw)) return null;
   const kind = raw.kind;
   if (kind !== "region" && kind !== "point" && kind !== "character" && kind !== "worldBook" && kind !== "trigger") return null;
-  const id = parseId(raw.id);
-  if (!id) return null;
+  const id2 = parseId(raw.id);
+  if (!id2) return null;
   if (raw.label !== void 0 && (!isString(raw.label) || raw.label.length > W0_LIMITS.maxSourceLabel)) return null;
-  return { kind, id, ...isString(raw.label) ? { label: raw.label } : {} };
+  return { kind, id: id2, ...isString(raw.label) ? { label: raw.label } : {} };
 }
 function parseWorldAction(raw) {
   if (!isObject(raw)) return null;
-  const id = parseId(raw.id);
-  if (!id) return null;
+  const id2 = parseId(raw.id);
+  if (!id2) return null;
   if (!isNumber(raw.at)) return null;
   if (!isString(raw.kind) || !WORLD_ACTION_KINDS.includes(raw.kind)) return null;
   const actorId = parseOptionalId(raw.actorId);
@@ -47739,7 +47814,7 @@ function parseWorldAction(raw) {
   if (focusCardId === false) return null;
   if (raw.summary !== void 0 && (!isString(raw.summary) || raw.summary.length > W0_LIMITS.maxActionSummary)) return null;
   return {
-    id,
+    id: id2,
     at: raw.at,
     kind: raw.kind,
     ...actorId !== void 0 ? { actorId } : {},
@@ -47763,8 +47838,8 @@ function parseWorldAction(raw) {
 }
 function parseWorldOutcome(raw) {
   if (!isObject(raw)) return null;
-  const id = parseId(raw.id);
-  if (!id) return null;
+  const id2 = parseId(raw.id);
+  if (!id2) return null;
   const actionId = parseId(raw.actionId);
   if (!actionId) return null;
   if (!isString(raw.kind) || !WORLD_OUTCOME_KINDS.includes(raw.kind)) return null;
@@ -47776,7 +47851,7 @@ function parseWorldOutcome(raw) {
   if (raw.seed !== void 0 && !isNumber(raw.seed)) return null;
   if (raw.at !== void 0 && !isNumber(raw.at)) return null;
   return {
-    id,
+    id: id2,
     actionId,
     kind: raw.kind,
     ...triggerId !== void 0 ? { triggerId } : {},
@@ -47822,8 +47897,8 @@ function parseEntityTemporalField(raw) {
 }
 function parseEntityRecord(raw) {
   if (!isObject(raw)) return null;
-  const id = parseId(raw.id);
-  if (!id) return null;
+  const id2 = parseId(raw.id);
+  if (!id2) return null;
   const worldId = parseId(raw.worldId);
   if (!worldId) return null;
   if (!isString(raw.type) || raw.type.length === 0 || raw.type.length > W0_LIMITS.maxEntityTypeName) return null;
@@ -47867,7 +47942,7 @@ function parseEntityRecord(raw) {
   if (raw.updatedAt !== void 0 && !isNumber(raw.updatedAt)) return null;
   if (raw.authorNote !== void 0 && (!isString(raw.authorNote) || raw.authorNote.length > W0_LIMITS.maxRevisionNote)) return null;
   return {
-    id,
+    id: id2,
     worldId,
     type: raw.type,
     name: raw.name,
@@ -47881,8 +47956,8 @@ function parseEntityRecord(raw) {
 }
 function parseDefinitionRevision(raw) {
   if (!isObject(raw)) return null;
-  const id = parseId(raw.id);
-  if (!id) return null;
+  const id2 = parseId(raw.id);
+  if (!id2) return null;
   const worldId = parseId(raw.worldId);
   if (!worldId) return null;
   if (!isNumber(raw.createdAt)) return null;
@@ -47933,7 +48008,7 @@ function parseDefinitionRevision(raw) {
     };
   }
   return {
-    id,
+    id: id2,
     worldId,
     createdAt: raw.createdAt,
     authorNote: raw.authorNote,
@@ -48040,8 +48115,8 @@ function parseStateEffect(raw) {
 }
 function parseStateEvent(raw) {
   if (!isObject(raw)) return null;
-  const id = parseId(raw.id);
-  if (!id) return null;
+  const id2 = parseId(raw.id);
+  if (!id2) return null;
   const worldId = parseId(raw.worldId);
   if (!worldId) return null;
   const branchId = parseOptionalId(raw.branchId);
@@ -48066,7 +48141,7 @@ function parseStateEvent(raw) {
   if (reversesEventId === false) return null;
   if (raw.createdAt !== void 0 && !isNumber(raw.createdAt)) return null;
   return {
-    id,
+    id: id2,
     worldId,
     // 正史线统一归一化为 null（缺失 = 正史）
     branchId: branchId ?? null,
@@ -48167,8 +48242,8 @@ function parseCheckpointRuntime(raw) {
 }
 function parseWorldCheckpoint(raw) {
   if (!isObject(raw)) return null;
-  const id = parseId(raw.id);
-  if (!id) return null;
+  const id2 = parseId(raw.id);
+  if (!id2) return null;
   const worldId = parseId(raw.worldId);
   if (!worldId) return null;
   if (raw.name !== void 0 && (!isString(raw.name) || raw.name.length > W0_LIMITS.maxCheckpointName)) return null;
@@ -48191,7 +48266,7 @@ function parseWorldCheckpoint(raw) {
     const runtime = parseCheckpointRuntime(raw.runtime);
     if (runtime === null) return null;
     return {
-      id,
+      id: id2,
       worldId,
       ...isString(raw.name) ? { name: raw.name } : {},
       kind: raw.kind,
@@ -48209,7 +48284,7 @@ function parseWorldCheckpoint(raw) {
     };
   }
   return {
-    id,
+    id: id2,
     worldId,
     ...isString(raw.name) ? { name: raw.name } : {},
     kind: raw.kind,
@@ -48294,8 +48369,8 @@ function parseCardSessionCheckpoint(raw) {
 }
 function parseCardAgentProfile(raw) {
   if (!isObject(raw)) return null;
-  const id = parseId(raw.id);
-  if (!id) return null;
+  const id2 = parseId(raw.id);
+  if (!id2) return null;
   if (!isString(raw.cardType) || !CARD_TYPES.includes(raw.cardType)) return null;
   const sourceCardId = parseId(raw.sourceCardId);
   if (!sourceCardId) return null;
@@ -48316,7 +48391,7 @@ function parseCardAgentProfile(raw) {
   if (raw.createdAt !== void 0 && !isNumber(raw.createdAt)) return null;
   if (raw.updatedAt !== void 0 && !isNumber(raw.updatedAt)) return null;
   return {
-    id,
+    id: id2,
     cardType: raw.cardType,
     sourceCardId,
     enabled: raw.enabled,
@@ -48336,8 +48411,8 @@ function parseCardAgentProfile(raw) {
 }
 function parseCardAgentSession(raw) {
   if (!isObject(raw)) return null;
-  const id = parseId(raw.id);
-  if (!id) return null;
+  const id2 = parseId(raw.id);
+  if (!id2) return null;
   const profileId = parseId(raw.profileId);
   if (!profileId) return null;
   const storyId = parseId(raw.storyId);
@@ -48361,7 +48436,7 @@ function parseCardAgentSession(raw) {
   if (raw.lastUsedAt !== void 0 && !isNumber(raw.lastUsedAt)) return null;
   if (raw.updatedAt !== void 0 && !isNumber(raw.updatedAt)) return null;
   return {
-    id,
+    id: id2,
     profileId,
     storyId,
     branchId,
@@ -48376,8 +48451,8 @@ function parseCardAgentSession(raw) {
 }
 function parseStoryEntryAnchor(raw) {
   if (!isObject(raw)) return null;
-  const id = parseId(raw.id);
-  if (!id) return null;
+  const id2 = parseId(raw.id);
+  if (!id2) return null;
   const sourceCardId = parseId(raw.sourceCardId);
   if (!sourceCardId) return null;
   if (!isString(raw.cardType) || !CARD_TYPES.includes(raw.cardType)) return null;
@@ -48397,7 +48472,7 @@ function parseStoryEntryAnchor(raw) {
   if (raw.createdAt !== void 0 && !isNumber(raw.createdAt)) return null;
   if (raw.completenessNote !== void 0 && !isString(raw.completenessNote)) return null;
   return {
-    id,
+    id: id2,
     sourceCardId,
     cardType: raw.cardType,
     ...eventId !== void 0 ? { eventId } : {},
@@ -48451,8 +48526,8 @@ function parseWorldAgentTravelGuide(raw) {
 }
 function parseWorldAgentProfile(raw) {
   if (!isObject(raw)) return null;
-  const id = parseId(raw.id);
-  if (!id) return null;
+  const id2 = parseId(raw.id);
+  if (!id2) return null;
   const worldId = parseId(raw.worldId);
   if (!worldId) return null;
   if (!isString(raw.status) || !WORLD_AGENT_STATUSES.includes(raw.status)) return null;
@@ -48475,7 +48550,7 @@ function parseWorldAgentProfile(raw) {
   if (raw.createdAt !== void 0 && !isNumber(raw.createdAt)) return null;
   if (raw.updatedAt !== void 0 && !isNumber(raw.updatedAt)) return null;
   return {
-    id,
+    id: id2,
     worldId,
     status: raw.status,
     baselineVersion: raw.baselineVersion,
@@ -48676,8 +48751,8 @@ function findByNameExact(tables, table, branchId, name) {
       if (Array.isArray(aliases)) hit = aliases.some((alias) => asId7(alias) === needle);
     }
     if (hit) {
-      const id = asId7(row3.id);
-      if (id) ids2.push(id);
+      const id2 = asId7(row3.id);
+      if (id2) ids2.push(id2);
     }
   }
   return { ids: [...new Set(ids2)].sort((left, right) => left < right ? -1 : left > right ? 1 : 0), scanned: rows4.length };
@@ -48709,21 +48784,21 @@ async function handleSqlMapAction(session, action, body) {
   }
   const db = session.repo.db, read = createTableReadPort(db);
   const required = [];
-  const requireRef = (kind, id) => {
-    const text16 = String(id ?? "").trim();
+  const requireRef = (kind, id2) => {
+    const text16 = String(id2 ?? "").trim();
     if (text16) required.push({ kind, id: text16 });
   };
   let refsCache = null;
   const refs = () => refsCache ?? (refsCache = collectKnownRefs(read, session.branchId, { requiredRefs: required }));
   const beforeLocations = new Set(read.selectWhere("locations", { branch_id: session.branchId, status: "active" }, 1e3).map((row3) => String(row3.id)));
   const find = (table, value) => {
-    const id = String(value ?? ""), row3 = read.selectOne(table, session.branchId, id) ?? read.selectOne(table, session.branchId, id.replace(/^(?:loc|npc|item):/, "")) ?? read.selectOne(table, session.branchId, `${table === "locations" ? "loc" : table === "characters" ? "npc" : "item"}:${id}`);
+    const id2 = String(value ?? ""), row3 = read.selectOne(table, session.branchId, id2) ?? read.selectOne(table, session.branchId, id2.replace(/^(?:loc|npc|item):/, "")) ?? read.selectOne(table, session.branchId, `${table === "locations" ? "loc" : table === "characters" ? "npc" : "item"}:${id2}`);
     if (!row3) throw new AtlasDbError("REF_UNKNOWN", `目标${table === "locations" ? "地点" : table === "characters" ? "人物" : "物品"}不存在`, {});
     requireRef(table === "locations" ? "location" : table === "characters" ? "character" : "item", row3.id);
     return row3;
   };
-  const ref2 = (id) => {
-    const entry = refs().find((r) => r.id === id);
+  const ref2 = (id2) => {
+    const entry = refs().find((r) => r.id === id2);
     if (!entry) throw new AtlasDbError("REF_UNKNOWN", "目标不在本次只读目录中", {});
     return entry.alias;
   };
@@ -48849,7 +48924,7 @@ async function handleSqlMapAction(session, action, body) {
     const name = String(body.name ?? body.playerName ?? "").trim();
     if (!name) throw new AtlasDbError("INVALID_PAYLOAD", "主角名字不能为空", {});
     const candidates = pageAllRows(read, "characters", session.branchId, 500).filter((row3) => String(row3.status ?? "active") === "active");
-    const matches = findByNameExact(read, "characters", session.branchId, name).ids.map((id) => read.selectOne("characters", session.branchId, id)).filter((row3) => row3 !== null).filter((row3) => String(row3.status ?? "active") === "active");
+    const matches = findByNameExact(read, "characters", session.branchId, name).ids.map((id2) => read.selectOne("characters", session.branchId, id2)).filter((row3) => row3 !== null).filter((row3) => String(row3.status ?? "active") === "active");
     if (matches.length > 1) throw new AtlasDbError("REF_AMBIGUOUS", "主角名字匹配了多个档案，不能随机选择", { matches: matches.map((row3) => String(row3.id)) });
     const demoted = candidates.filter((row3) => row3.role === "protagonist" && row3.name !== name);
     for (const candidate of demoted) requireRef("character", candidate.id);
@@ -48924,9 +48999,9 @@ async function handleSqlMapAction(session, action, body) {
       previews.set(session, drafts);
     }
     while (drafts.size >= 4) {
-      const id = drafts.keys().next().value;
-      await session.repo.discardPrepared(drafts.get(id).commit.token);
-      drafts.delete(id);
+      const id2 = drafts.keys().next().value;
+      await session.repo.discardPrepared(drafts.get(id2).commit.token);
+      drafts.delete(id2);
     }
     drafts.set(previewId, { commit, sourceHash });
     const candidate = session.repo.getCandidate(previewId).db, newLocations = read.selectWhere("locations", { branch_id: session.branchId, status: "active" }, 1e3);
@@ -49348,7 +49423,7 @@ function summarizeRollbackPlan(plan, input = {}) {
     clockBeforeS: plan.clockBeforeS,
     clockTargetS: plan.clockTargetS,
     tableCounts: tableCounts2,
-    affectedMaps: withheld ? [] : [...maps].filter((id) => id.length > 0).sort(),
+    affectedMaps: withheld ? [] : [...maps].filter((id2) => id2.length > 0).sort(),
     affectedProgressScopes: withheld ? [] : [...scopes].sort(),
     withheld,
     issues: Array.isArray(plan.issues) ? plan.issues : []
@@ -49520,7 +49595,7 @@ async function retry(session, input) {
   let operations = history.operations.map((value, index) => ({ ...history.operation_meta[index], value }));
   const allFailedIds = new Set(rejected.flatMap((g) => g.opIds));
   const contexts = history.operation_context ?? [];
-  const context2 = contexts.find((ctx) => ctx.opIds.some((id) => allFailedIds.has(id)));
+  const context2 = contexts.find((ctx) => ctx.opIds.some((id2) => allFailedIds.has(id2)));
   const contextualIds = new Set(contexts.flatMap((ctx) => ctx.opIds));
   operations = operations.filter((op) => context2 ? context2.opIds.includes(op.opId) : !contextualIds.has(op.opId));
   const failedIds = new Set(operations.filter((op) => allFailedIds.has(op.opId)).map((op) => op.opId));
@@ -49697,8 +49772,8 @@ function branch(session) {
   return queryBound(session.repo.db, "SELECT * FROM branches WHERE id=?", [session.branchId])[0];
 }
 function protagonist(session) {
-  const id = branch(session).pov_character_id;
-  if (id) return String(id);
+  const id2 = branch(session).pov_character_id;
+  if (id2) return String(id2);
   const rows4 = queryBound(session.repo.db, "SELECT id FROM characters WHERE branch_id=? AND role='protagonist' AND status='active'", [session.branchId]);
   return rows4.length === 1 ? String(rows4[0].id) : void 0;
 }
@@ -50508,7 +50583,7 @@ async function runSqlRetry(session, input) {
         const attemptedOps = new Set(result.groups.flatMap((g) => g.opIds));
         receipt.groups = receipt.groups.flatMap((g) => {
           if (g.status !== "rejected" && g.status !== "blocked") return [g];
-          const remaining = g.opIds.filter((id) => !attemptedOps.has(id));
+          const remaining = g.opIds.filter((id2) => !attemptedOps.has(id2));
           return remaining.length ? [{ ...g, opIds: remaining, issues: g.issues.filter((i) => !i.opId || !attemptedOps.has(i.opId)) }] : [];
         });
         for (const group2 of result.groups) {
