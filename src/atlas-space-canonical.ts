@@ -61,6 +61,9 @@ export type SpaceCanonicalFurnishing = {
   widthM: number;
   heightM: number;
   quality: 'layout' | 'confirmed';
+  wall?: 'north' | 'east' | 'south' | 'west';
+  nearDoor?: boolean;
+  asFurniture?: boolean;
 };
 
 export type SpaceCanonicalV1 = {
@@ -79,7 +82,7 @@ const asId = (value: unknown): string | null => (typeof value === 'string' && va
 const finite = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value);
 const asText = (value: unknown): string | null => (typeof value === 'string' && value ? value : null);
 
-/** 单轴合法性：有限、正、在 0.2–20000 米之间。 */
+/** 单轴合法性：有限且至少 0.2 米；区域与建筑共用同一尺寸合同。 */
 function validSide(value: unknown): value is number {
   return finite(value) && value >= SPACE_MIN_SIDE_M;
 }
@@ -144,6 +147,9 @@ function readFurnishing(raw: unknown, locationId: string): SpaceCanonicalFurnish
     widthM: raw.widthM,
     heightM: raw.heightM,
     quality: raw.quality === 'confirmed' ? 'confirmed' : 'layout',
+    ...(typeof raw.wall === 'string' && ['north','east','south','west'].includes(raw.wall) ? { wall: raw.wall as SpaceCanonicalFurnishing['wall'] } : {}),
+    ...(typeof raw.nearDoor === 'boolean' ? { nearDoor: raw.nearDoor } : {}),
+    ...(raw.asFurniture === true ? { asFurniture: true } : {}),
   };
 }
 
@@ -401,7 +407,7 @@ export function spaceCanonicalHolder(
 }
 
 /** 从某张图已保存的场景里找该地点在同一物理空间里的轮廓（父图足迹）。 */
-function footprintInScene(scene: Row | null, locationId: string, map: Row): { widthM: number; heightM: number } | null {
+function footprintInScene(scene: Row | null, locationId: string, map: Row, locationKind: unknown): { widthM: number; heightM: number } | null {
   if (!scene) return null;
   const layout = plain(scene.layout) ? scene.layout : null;
   if (!layout) return null;
@@ -414,6 +420,9 @@ function footprintInScene(scene: Row | null, locationId: string, map: Row): { wi
       if (!plain(entry)) continue;
       if (asId(entry.id) !== locationId) continue;
       let w=entry.w,h=entry.h;
+      // A schematic overview zone is an allocation envelope, not room size.
+      if (pool === layout.shapes && ['building','floor','room','vehicle'].includes(String(locationKind))
+        && !['confirmed','exact'].includes(String(entry.quality)) && !(validSide(w) && validSide(h))) continue;
       if(Array.isArray(entry.polygon)&&entry.polygon.length>=3){
         const points=entry.polygon.map(p=>Array.isArray(p)?p:plain(p)?[p.x,p.y]:[]);
         if(points.every(p=>p.length===2&&finite(p[0])&&finite(p[1]))){w=Math.max(...points.map(p=>p[0] as number))-Math.min(...points.map(p=>p[0] as number));h=Math.max(...points.map(p=>p[1] as number))-Math.min(...points.map(p=>p[1] as number));}
@@ -478,7 +487,7 @@ export function locationSpaceSize(input: LocationSpaceSizeInput): LocationSpaceS
   if (parentMapId) {
     const parentMap = input.maps.find((row) => asId(row.id) === parentMapId) ?? null;
     if (parentMap) {
-      const footprint = footprintInScene(sceneOf(parentMap.frame_json, input.branchId ?? null, parentMapId), input.locationId, parentMap);
+      const footprint = footprintInScene(sceneOf(parentMap.frame_json, input.branchId ?? null, parentMapId), input.locationId, parentMap, locationRow?.kind);
       if (footprint) return { ...footprint, quality: 'estimated', source: 'parent-footprint', referenceId: parentMapId };
     }
   }
@@ -535,7 +544,7 @@ export function resolveMapSpaceSize(input: MapSpaceSizeInput): MapSpaceSizeResul
   if (parentMapId && parentMapId !== asId(input.mapRow.id)) {
     const parentMap = input.maps.find((row) => asId(row.id) === parentMapId) ?? null;
     if (parentMap) {
-      const footprint = footprintInScene(sceneOf(parentMap.frame_json, input.branchId ?? null, parentMapId), containerId, parentMap);
+      const footprint = footprintInScene(sceneOf(parentMap.frame_json, input.branchId ?? null, parentMapId), containerId, parentMap, locationRow?.kind);
       if (footprint) parentFootprint = { ...footprint, mapId: parentMapId };
     }
   }

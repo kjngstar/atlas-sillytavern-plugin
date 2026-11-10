@@ -17,7 +17,7 @@
  */
 
 import { createTableReadPort, pageAllRows } from './atlas-db-readport.ts';
-import { collectMapLocations } from '../vendor/atlas-spatial/index.mjs';
+import { collectMapLocations, collectTownParcels, FLOOR_FURNITURE_TYPES } from '../vendor/atlas-spatial/index.mjs';
 import { readMetricDimensions } from '../vendor/atlas-spatial/index.mjs';
 import { mergeLayoutConstraints } from './atlas-spatial-request.ts';
 import { collectTaskRefs } from './atlas-sql-task-refs.ts';
@@ -25,7 +25,7 @@ import { buildStagePrompt } from './atlas-ops-prompts.ts';
 import { normalizeFrame, normalizeSqlMapFrame } from './atlas-spatial-frame.ts';
 import { ATLAS_RUNTIME_LIMITS } from './atlas-runtime-limits.ts';
 import { workBatchSize } from './atlas-work-batching.ts';
-import { normalizeModelBatching, planningOutputTokens } from './atlas-model-batching.ts';
+import { normalizeGenerationOptions, normalizeModelBatching, planningOutputTokens } from './atlas-model-batching.ts';
 import { stableHexHash } from './atlas-hash.ts';
 import { resolveLocationDetailTier } from './atlas-world-build-plan.ts';
 import { readWorldFacts } from './atlas-world-build-state.ts';
@@ -43,6 +43,7 @@ import type { ModelBatchRequest, ModelOperation, TurnInput } from './atlas-ops-c
 import type { LayoutKind, LayoutTask, PlanIssue } from './atlas-world-contract.ts';
 import { CAPABILITY_CORRIDOR_BINDING, CAPABILITY_SPACE_CANONICAL, CAPABILITY_SPATIAL_PROFILE, hasSpatialCapability } from './atlas-world-contract.ts';
 import { formatTaskContext } from './atlas-prompt-layers.ts';
+import { COMBINED_SPATIAL_OPS, STREET_TOWN_PROMPT, FLOOR_PLACEMENT_PROMPT, OVERVIEW_PLACEMENT_PROMPT } from './atlas-spatial-planning.ts';
 import {
   locationSpaceSize,
   readSpaceCanonical,
@@ -109,7 +110,7 @@ const FLOOR_CONTAINER_KINDS = new Set(['building', 'floor', 'room', 'vehicle']);
 
 /** 单房间示意幅面的基准边长（米）：没有尺度依据时的估计，绝不写成 1 格 = 1 米。 */
 const FLOOR_BASE_SIDE_M = 24;
-const ROOM_BASE_SIDE_M = 12;
+const ROOM_BASE_SIDE_M = 8;
 const CITY_BASE_SIDE_M = 1000;
 
 /** 兜底幅面：frame 损坏时用它继续出图，但会记一条 warning，不静默把 NaN 当尺寸。 */
@@ -162,7 +163,7 @@ export function unknownLayoutEntityRefs(operations:readonly ModelOperation[],ref
     // Local IDs (contents.id/features.id/actors.near/items.on) are intentionally excluded.
     const entityFields: Record<string, readonly string[]> = {
       zones: ['id', 'near'], links: ['id'], features: ['zoneId'],
-      districts: ['id'], buildings: ['id', 'districtId'], rooms: ['id'],
+      districts: ['id'], buildings: ['id', 'districtId', 'near'], rooms: ['id'],
       contents: ['roomId'], actors: ['id', 'roomId'], items: ['id'],
     };
     check((spec as Record<string, unknown>).corridorLocationRef);
@@ -234,6 +235,7 @@ function measure(
   cols: number,
   rows: number,
   metersPerCell: unknown,
+  standalone: boolean,
 ): { width: number; height: number; units: 'meters' | 'cells' } {
   const calibrated = finite(metersPerCell) && metersPerCell > 0;
   const maxSide = Math.max(cols, rows);
@@ -243,9 +245,9 @@ function measure(
   }
   if (calibrated) return { width: cols * metersPerCell, height: rows * metersPerCell, units: 'meters' };
   const containerKind = String(container?.kind ?? '');
-  // 单间房按一间房的尺度估计；车厢/楼层/建筑等具体图沿用 24 m 的整层底边，
-  // 避免「大空间被硬塞成超小房间」（M4-21 完成定义）。宽度比仍按 frame 的 cols:rows 保持。
-  const base = containerKind === 'room'
+  // 未知尺寸的单间先按够用的室内尺度估计。已知占地会在后续解析时覆盖这个兜底。
+  const compact = containerKind === 'room' || standalone && ['building','other'].includes(containerKind);
+  const base = compact
     ? ROOM_BASE_SIDE_M
     : kind === 'city'
       ? CITY_BASE_SIDE_M
@@ -438,7 +440,7 @@ export function deriveLayoutSites(tables: TableReadPort, branchId: string): Deri
       corridorEntityId: boundCorridorIdOf(map),
       members: ownForProfile,
       routes: routes.filter((row) => String(row.branch_id ?? branchId) === branchId
-        && (String(row.from_location_id ?? '') === containerId || String(row.to_location_id ?? '') === containerId)),
+        && (String(row.map_id ?? '') === mapId || String(row.from_location_id ?? '') === containerId || String(row.to_location_id ?? '') === containerId)),
     });
     const kind = classify(map, locations, container, profile);
     if (kind === null) continue;
@@ -461,7 +463,10 @@ export function deriveLayoutSites(tables: TableReadPort, branchId: string): Deri
       rows = FALLBACK_ROWS;
     }
 
-    const own = ownForProfile;
+    const scene = normalizeFrame(map.frame_json).atlasScene as { layout?: { streetPattern?: string } } | undefined;
+    const own = kind==='city'&&scene?.layout?.streetPattern==='main-street'
+      ? [...new Map([...ownForProfile,...collectTownParcels(ownForProfile,locations,branchId)].map(row=>[row.id,row])).values()]
+      : ownForProfile;
     const containerKind = String(container?.kind ?? '');
     const standalone = kind === 'floor' && (own.length === 0 || containerKind==='room'&&own.every(row=>row.kind==='other'))
       && (containerKind === 'room' || containerKind === 'vehicle' || containerKind === 'floor' || containerKind === 'building'
@@ -473,7 +478,7 @@ export function deriveLayoutSites(tables: TableReadPort, branchId: string): Deri
       container,
       frameCols: cols,
       frameRows: rows,
-      extent: measure(kind, container, cols, rows, map.meters_per_cell),
+      extent: measure(kind, container, cols, rows, map.meters_per_cell, standalone),
       standalone,
       own,
       spaceSize: null,
@@ -597,6 +602,7 @@ export function buildSqlLayoutTask(
   input: TurnInput,
   turnId: string,
   report?: { issues: PlanIssue[] },
+  options?: { canonicalRefs?: boolean; combinedSpatial?: boolean; eagerLocationIds?:readonly string[] },
 ): LayoutTask<ModelBatchRequest> | null {
   const tables = createTableReadPort(db);
   const derived = deriveLayoutSites(tables, branchId);
@@ -631,12 +637,13 @@ export function buildSqlLayoutTask(
     // Parent geography is assembled first; remote interiors are generated only
     // when explicitly requested. Single-child overview wrappers need no model.
     const activePath=new Set<string>();
-    for(const locationId of occupied){
+    const eager=new Set(options?.eagerLocationIds??[]);
+    for(const locationId of [...occupied,...eager]){
       let id:string|null=locationId;const seen=new Set<string>();
       while(id&&!seen.has(id)){seen.add(id);const entry=mapByContainer.get(id);if(entry)activePath.add(entry.mapId);id=parentOf(id);}
     }
     chosen=entries.filter(entry=>activePath.has(entry.mapId)
-      ? occupiedSet.has(String(entry.container?.id))||entry.own.length>0&&(entry.kind!=='overview'||entry.own.length>1)
+      ? occupiedSet.has(String(entry.container?.id))||eager.has(String(entry.container?.id))||entry.own.length>0&&(entry.kind!=='overview'||entry.own.length>1)
       : entry.container===null&&entry.own.length>1);
     chosen.sort((a,b)=>depth(a)-depth(b)||byId(a.mapId,b.mapId));
   } else if (Array.isArray(input.layoutMaps)) {
@@ -705,6 +712,7 @@ export function buildSqlLayoutTask(
     // 否则「前景能解析、布局解析不到」会再次变成 alias 漂移。
     requiredRefs: input.requiredRefs,
   });
+  if(options?.canonicalRefs)for(const entry of catalogue.knownRefs)entry.alias=entry.id;
   const ref = (id: unknown): string | undefined => catalogue.knownRefs.find((item) => item.id === id)?.alias;
 
   // P08/R05（REF04）：必要引用本身装不下 → 本批布局**一次都不发**，错误明确；
@@ -835,6 +843,9 @@ export function buildSqlLayoutTask(
           id:item.localId,type:item.type,name:item.name,w:item.widthM,h:item.heightM,
           quality:item.quality,
           ...(item.itemId?{item:ref(item.itemId)}:{}),
+          ...(item.wall?{wall:item.wall}:{}),
+          ...(item.nearDoor!==undefined?{nearDoor:item.nearDoor}:{}),
+          ...(item.asFurniture?{asFurniture:true}:{}),
         })),
         furnishingReview: Object.values((entry.spaceSize.canonical?.furnishing??[]).reduce<Record<string, string[]>>((groups,item)=>{
           const name=item.name.trim();
@@ -884,11 +895,11 @@ export function buildSqlLayoutTask(
   const hasFloor = layoutKinds.includes('floor'), hasCity = layoutKinds.includes('city'), hasOverview = layoutKinds.includes('overview');
   const request = buildStagePrompt({
     phase: 'geography',
-    allowedOps: ['map.layout.request', 'noop'],
+    allowedOps: options?.combinedSpatial ? COMBINED_SPATIAL_OPS : ['map.layout.request', 'noop'],
     batchId: `layout_${turnId}`,
     mapScope: JSON.stringify(scopes),
     geoMissing: '必须为以上地图生成或更新可绘制空间布局，每张图一行 map.layout.request。仅有坐标点不算完成。',
-    geoSources: '第一步验证的位置依据将在发送布局请求前附加；本阶段不接收原始剧情或世界书。',
+    geoSources: options?.combinedSpatial || normalizeGenerationOptions(input.generationOptions).spatialPipeline==='combined' ? '空间事实与原始依据随观察保留；使用本批提供的空间来源和已登记事实规划，不再另行请求摘录。' : '第一步验证的位置依据将在发送布局请求前附加；本阶段不接收原始剧情或世界书。',
     mapLayoutIds: catalogue.knownRefs.map((item) => `${item.alias}=${item.id}`).join('\n'),
     mapLayoutFrame: [
       'extent 是程序给定的幅面；kind 与 units 以每张图给出的值为准，不得改写。',
@@ -904,14 +915,19 @@ export function buildSqlLayoutTask(
     ].join('\n'),
   });
   if(work)request.messages[1].content+='\n【整组地图规划】本批可同时包含不同种类和多层父子地图；一次返回所有列出地图的约束。hierarchy 标明父图与共享空间。父子共用 childSpaces/spaceSize 尺寸，程序从父到子求解坐标、继承轮廓；不为每层再请求，不输出独立坐标或改变父子归属。';
-  request.messages[1].content += '\n每个操作外层只含 op、ref、data 和可选 why。op 固定 map.layout.request；ref 使用本图 map 引用；data 包含给定 kind 和 spec。下面提供本图完整合法 JSON 示例。幅面用程序给定 extent。'
+  request.messages[1].content += '\n每条布局操作外层只含 op、ref、data 和可选 why。布局操作的 op 固定 map.layout.request；ref 使用本图 map 引用；data 包含给定 kind 和 spec。下面提供本图完整合法 JSON 示例。幅面用程序给定 extent。'
     + (hasOverview?'\noverview 的 spec 可含 surface、zones、links、features。zone 用 id、name、role、size，可选 sector 与 near。role 取 city/settlement/forest/water/mountain/ruins/district/campus/land/other；size 取 small/medium/large；sector 取八方向或 center。link 的 id 必须是已登记路线引用。feature 用局部 id、type、可选 zoneId 和 density；density 取 low/medium/high，type 取 forest_texture/ridge/shore/building_cluster/road_texture/ruins_scatter/watercourse。'
     + 'overview 的 zone 必须是本图直属地点或目录里已有的代理入口；links 只能用目录中已登记的路线引用；feature 只是本图局部装饰，永远不产生新实体、也不产生新道路。':'')
     + (hasCity?'\ncity 的 districts 每项必须含 id、name、bank、order；bank 取 west/east，order 为整数。buildings 每项必须含 id、name、districtId、w、h。districts 至少一项；没有已登记街区时，以城市容器的地点引用作为自身街区。每个建筑的 districtId 必须对应本次或已保存街区，不能省略街区声明。新城市默认 enclosure="open"；无河流依据时 riverWidth=0。':'')
-    + (hasFloor?'\nfloor 的 rooms 每项用 id/name/w/h/side，side 只能 north 或 south；可选 role=indoor/outdoor/garden，分别表示室内、开放院落、园林。contents 每项用 id/name/type/roomId/w/h，type 只能 shelf/desk/bench/reading/stairs/table/chair/bed/cabinet/doorway/light/decor；actors 每项用 id/roomId，可选 near=陈设ID；items 每项用 id/on=陈设ID。所有键都必须双引号，不得照抄省略号或伪 JSON。':'')
-    + '\n布局阶段不新建 SQL 实体：所有可交互地点必须已经在目录里。但建设阶段允许新增地点，两者不冲突——不要因为布局不新建实体就停止补全世界。actors/items 是本批有目录引用且在生成器额度内的相关者，不是整张人物表；未发送者仍保存在 SQL，由程序维护位置和地点名单，不能创建替身来凑数。'
-    + '\n不要输出其他操作。';
+    + (hasFloor?'\nfloor 的 rooms 每项用 id/name/w/h/side，side 只能 north 或 south；可选 role=indoor/outdoor/garden，分别表示室内、开放院落、园林。contents 每项用 id/name/type/roomId/w/h，type 只能 '+FLOOR_FURNITURE_TYPES.join('/')+'；actors 每项用 id/roomId，可选 near=陈设ID；items 每项用 id/on=陈设ID。所有键都必须双引号，不得照抄省略号或伪 JSON。':'')
+    + (options?.combinedSpatial ? '\n本批先用 location.upsert 声明必要的新地点，再用已有引用或同批合法 new: 引用输出布局；新容器用 data.container_ref，省略地图 ref。' : '\n布局阶段不新建 SQL 实体：所有可交互地点必须已经在目录里。但建设阶段允许新增地点，两者不冲突——不要因为布局不新建实体就停止补全世界。')
+    + 'actors/items 是本批有目录引用且在生成器额度内的相关者，不是整张人物表；未发送者仍保存在 SQL，由程序维护位置和地点名单，不能创建替身来凑数。'
+    + (options?.combinedSpatial ? '\n只输出本批地理与布局协议允许的操作。' : '\n不要输出其他操作。');
   request.messages[1].content += '\n父图中的本地点轮廓是下钻边界；子图用于细化同一个空间，不重画成一座无关的城市。相邻街区维持父图的相对方位，不能把外城区、内城区、中心区都复制成同一幅城市模板。size=large/medium/small 必须维持相对面积顺序；没有实体依据的 road_texture 不输出，真实道路仅使用已登记 links。';
+  if(hasCity)request.messages[1].content+='\ncity 建筑有明确邻近关系时，在该 buildings 项写 near=参照建筑引用；有明确方位才写 sector=north/east/south/west，有明确两建筑外墙净距才写 gapM=实际米数。';
+  if(hasCity&&!options?.combinedSpatial)request.messages[1].content+='\n'+STREET_TOWN_PROMPT;
+  if(hasOverview&&!options?.combinedSpatial)request.messages[1].content+='\n'+OVERVIEW_PLACEMENT_PROMPT;
+  if(hasFloor)request.messages[1].content+='\n'+FLOOR_PLACEMENT_PROMPT;
   request.anchor = input.anchor;
   request.messages[1].content+='\n细节责任：detail.tier=important 的已登记地点按角色锚点、明确剧情或来源事实补齐细节；ordinary 使用有限、够用的细节。重要性不改变已有尺寸、作者锁，也不把推测设施的延后内部自动升级为开局必建。';
   request.promptInput = {
@@ -928,7 +944,9 @@ export function buildSqlLayoutTask(
       request.messages[1].content+='\n【本图合法 JSON 外层示例；按资料补齐 contents，不照搬为空布局】\n'+JSON.stringify({op:'map.layout.request',ref:scope.map,data:{kind:'floor',spec:{rooms:scope.baselineRooms,actors:scope.actors.map(a=>({id:a.ref,roomId:a.roomId}))}},why:'依据已登记空间生成估计布局'});
     }
     request.messages[1].content += '\n普通阅览桌用 type="table"，椅子单独用 type="chair"；reading 是桌子加四把椅子的整套组合，占地 w/h 均至少 2 米，不能用于 2×1 米的单张桌子。所有陈设用正数 w/h，完整占地必须装进房间。';
-    request.messages[1].content += '\nitems[].on 只能绑定本房间中具有支撑面的 table/desk/shelf/cabinet（reading 组合的桌面也可）。不能把物品绑定到 chair/bed/doorway/decor 上，也不能把椅子本身作为物品放在另一把椅子上。资料没有支撑关系时省略该物品绑定，由程序按真实归属放置地面标记，不要猜测它在桌上。';
+    request.messages[1].content += '\n资料明确给出成套陈设时，bar 表示吧台、酒架和备用桶（整组至少 3.2×2.2 米），kitchen-line 表示相连的灶台、备餐台和餐具架（至少 2.6×0.65 米），barrels 表示三个并排酒桶（至少 2.1×0.65 米）。用整组占地，组内构件由程序放置，不重复提交，也不把不同位置的陈设强行合组。';
+    request.messages[1].content += '\n独立陈设每件各用一个 ID。barrel 酒桶、bar-counter 吧台、bottle-shelf 酒架、stove 灶台、prep-table 备餐台、sink 独立水槽、crate 木箱、basket 货筐、anvil 铁砧、workbench 工作台、screen 屏风。资料分别提到时按件登记，例如一只酒桶用 barrel。选用组合时，已含的部件不再重复登记。';
+    request.messages[1].content += '\nitems[].on 绑定本房间内有支撑面的陈设，如 table、desk、shelf、cabinet、prep-table、workbench、bar-counter 或组合的台面。资料没有支撑关系时省略绑定，由程序按真实归属放置地面标记。';
     request.messages[1].content += '\n空间身份规则：spaceSize.furnishingInventory 和 childSpaces[].furnishing 是同一物理空间已经登记的陈设。必须沿用其中的 id；省略的既有陈设仍会保留，不要换名或换局部 id 再造一套。已有账本的空间中，新增陈设必须明确 additional=true，且确有新增依据；仅换父图/子图或补布局不属于新增。门洞不是地面家具，不要在 contents 里估计 doorway；程序根据房间边界与已有连接生成门，不能把门摆在房间中间。';
     request.messages[1].content += '\n旧图恢复规则：furnishingReview 列出同名陈设候选，必须逐组核查，不能把历史错误重复当作必须保留的物理事实。quality=layout 是布局估计，不是作者确认。有明确数量依据的两把同名椅子应保留；同一厨房操作台或照明曾在父子图分别估计、但没有第二件依据时，保留一个既有 id，并用 spec.deletes.contents 显式删除另一个 id。禁止仅靠同名由程序自动合并，也不允许删作者确认或绑定不同真实物品的两件陈设。why 中说明核查结论；删除使用候选中的完整 id。';
     request.messages[1].content += '\n层级归属规则：childSpaces.detailScope=descendants 表示该轮廓内部还有已登记子空间，本层只画容器轮廓与通路。大厅的长桌和厨房的操作台应由大厅、厨房各自的空间账本管理，不能又给包含它们的楼层轮廓摆一份。若 savedConstraints 曾在楼层轮廓重复摆放这些后代陈设，用 spec.deletes.contents 显式移除该层重复投影；真实归属于楼层公共通道的陈设保持原身份。';
@@ -981,7 +999,7 @@ export function buildSqlLayoutTask(
       ...scopes.map((scope, index) => `${scope.map}=${String(scope.name ?? '')}(${scope.kind} ${scope.extent.width}×${scope.extent.height}${scope.units}${pending[index].map.scale_locked ? ' 比例尺已锁定' : ''})`),
       ...(input.requiredRefs ?? []).map((item) => `${ref(item.id) ?? item.id}=必要引用(${item.kind})`),
     ],
-    allowedOpsAndKinds: `map.layout.request、noop；本批地图 kind 只能是 ${layoutKinds.join('/')}（以每张图给定值为准，不得改写）`,
+    allowedOpsAndKinds: `${options?.combinedSpatial ? COMBINED_SPATIAL_OPS.join('、') : 'map.layout.request、noop'}；本批地图 kind 只能是 ${layoutKinds.join('/')}（以每张图给定值为准，不得改写）`,
     extents: scopes.map((scope) => {
       const mpp = scope.frame.metersPerCell;
       const units = typeof mpp === 'number' && mpp > 0 ? `1 格 = ${mpp} 米`

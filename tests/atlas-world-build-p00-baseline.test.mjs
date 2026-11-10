@@ -120,7 +120,7 @@ test('F06 旧行为：未标定 vehicle 100×100 格被估成 24×24 m', async (
   assert.equal(entry.extent.width / 100, 0.24);
 });
 
-test('F06 旧行为：room 与 city 各自走固定基线，没有「类型化家具档案」', async () => {
+test('F06 未标定的单间使用紧凑估计，城镇保留独立基线', async () => {
   const seed = await makeSeedWith(SQL);
   insertLocation(seed, loc('L_ROOM', { kind: 'room', name: '匿名房间' }));
   insertLocation(seed, loc('L_CITY', { kind: 'city', name: '匿名城镇' }));
@@ -132,7 +132,8 @@ test('F06 旧行为：room 与 city 各自走固定基线，没有「类型化�
   const derived = deriveLayoutSites(createTableReadPort(seed.db), BRANCH);
 
   const room = entryOf(derived, 'M_ROOM');
-  assert.equal(room.extent.width, 12, '单间房按 12 m 估');
+  assert.equal(room.extent.width, 8);
+  assert.equal(room.extent.height, 8);
 
   const city = entryOf(derived, 'M_CITY');
   // city solver 要求 900×700 画布，于是 100×100 格被放大到 1000×1000 m

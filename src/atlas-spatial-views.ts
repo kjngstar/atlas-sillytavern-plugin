@@ -113,6 +113,7 @@ export function querySpatialScene(ctx: ViewContext, query: ViewQuery): ViewResul
   const routeRows = queryBound(ctx.db, 'SELECT * FROM routes WHERE branch_id = ?', [ctx.branchId]) as Array<Record<string, unknown>>;
   const locationById = new Map<string, Record<string, unknown>>();
   for (const row of locationRows) locationById.set(String(row.id), row);
+  const pointLocationIds=locationRows.filter(row=>row['mobility']==='mobile'||row['kind']==='other'&&(row['area_geometry_json']==null||row['area_geometry_json']==='null')).map(row=>String(row['id']));
   const visibility = sqlVisibility(ctx);
   // Author signatures are never compared for POV: even a boolean could reveal
   // hidden structural changes. POV reports alignment as unverified instead.
@@ -208,7 +209,7 @@ export function querySpatialScene(ctx: ViewContext, query: ViewQuery): ViewResul
     }
 
     if (scene && projection.ok && projection.scene) {
-      const hydrated = hydrateScene(scene, projection as unknown as Record<string, unknown>);
+      const hydrated = hydrateScene(scene, projection as unknown as Record<string, unknown>, {pointLocationIds});
       if (hydrated.ok && hydrated.scene) {
         scene = hydrated.scene;
         if (Array.isArray(hydrated.issues)) issues.push(...hydrated.issues);

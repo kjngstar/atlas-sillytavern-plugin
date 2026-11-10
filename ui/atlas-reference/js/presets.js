@@ -29,7 +29,7 @@ function connection(c,keepKey=false){
  if(!['openai-compatible','sillytavern'].includes(c.provider))fail('连接方式不支持');
  if(typeof c.temperature!=='number'||!Number.isFinite(c.temperature)||c.temperature<0||c.temperature>2)fail('温度必须介于 0 和 2');
  if(!Number.isSafeInteger(c.maxTokens)||c.maxTokens<0)fail('输出上限必须为非负安全整数；0 表示不指定');
- const timeoutMs=c.timeoutMs??60000;
+ const timeoutMs=c.timeoutMs??300000;
  if(!Number.isInteger(timeoutMs)||timeoutMs<1000||timeoutMs>1200000)fail('请求超时必须是 1000 至 1200000 毫秒的整数');
  const out={toolCalling:c.toolCalling===true,id:identity(c.id),name:text(c.name,'连接名称'),provider:c.provider,url,model:text(c.model,'模型名称',true).trim(),temperature:c.temperature,maxTokens:c.maxTokens,timeoutMs,rememberKey:keepKey&&c.rememberKey===true};
  if(keepKey&&out.rememberKey)out.apiKey=text(c.apiKey||'','API Key',true);

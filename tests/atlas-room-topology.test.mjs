@@ -10,6 +10,18 @@ const floor=map('floor-map','floor',24,24),kitchen=map('kitchen-map','kitchen',4
 const locations=[{...location('floor',null,null),kind:'floor'},location('hall'),location('kitchen')];
 const routes=[{id:'hall-kitchen',branch_id:'b',status:'open',kind:'door',from_location_id:'hall',to_location_id:'kitchen',bidirectional:1}];
 const spec={rooms:[{id:'hall',side:'north',w:12,h:8},{id:'kitchen',side:'south',w:4,h:3}],contents:[]};
+
+for(const [name,w,h,sizes]of [['邮局',12,8,[[4,4],[6,5]]],['小艇',9,4,[[3,3],[5,3]]]])test(`${name}明确两间直连空间在真实外廓内保留尺寸，不强塞走廊`,()=>{
+ const row=map('local-map','shell',w,h),ids=['a','b'];
+ const rows=[{...location('shell',null,null),kind:'building'},...ids.map((id,i)=>({...location(id,'shell','local-map'),area_geometry_json:{kind:'dimensions',widthM:sizes[i][0],heightM:sizes[i][1],quality:'confirmed',source:'story'}}))];
+ const built=Kit.buildLayoutContext({scope,mapRow:row,maps:[row],locations:rows,routes:[{id:'door',branch_id:'b',from_location_id:'a',to_location_id:'b',kind:'door',status:'open',bidirectional:1}]});
+ assert.equal(built.ok,true,JSON.stringify(built.issues));
+ const out=Kit.generateFloor({width:w,height:h,rooms:ids.map((id,i)=>({id,w:sizes[i][0],h:sizes[i][1],side:i?'south':'north'}))},{...built.context,currentScope:scope});
+ assert.equal(out.ok,true,JSON.stringify(out.issues));
+ assert.equal(out.scene.layout.rooms.length,2);
+ for(const r of out.scene.layout.rooms){const size=sizes[ids.indexOf(r.id)];assert.equal(r.w,size[0]);assert.equal(r.h,size[1]);assert.ok(r.x>=0&&r.y>=0&&r.x+r.w<=w+1e-7&&r.y+r.h<=h+1e-7);}
+ assert.equal(out.scene.layout.doors.filter(d=>d.routeId==='door').length,2);
+});
 function context(row=floor,extra={}){
  const built=Kit.buildLayoutContext({scope,mapRow:row,maps:[floor,kitchen],locations,routes,...extra});
  assert.equal(built.ok,true,JSON.stringify(built.issues));return {...built.context,currentScope:scope};

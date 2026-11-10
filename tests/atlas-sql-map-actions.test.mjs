@@ -67,9 +67,10 @@ test('failed layout transport cannot count a retained old scene as a scene saved
 });
 test('生成时坏 JSON 不阻止已登记独立场地的基础形状，模型细节仍如实延期',async()=>{
  const f=await fixture();try{
-  f.setResponse([...initial,{op:'location.upsert',ref:'new:yard',data:{name:'验收庭院',kind:'other',parent_ref:'new:school'}}].map(o=>JSON.stringify(o)).join('\n'));
+  f.setResponse([...initial.filter(op=>op.ref!=='new:friend'),{op:'location.upsert',ref:'new:yard',data:{name:'验收庭院',kind:'other',parent_ref:'new:school'}},{op:'character.upsert',ref:'new:friend',data:{name:'同学',identity:'同班学生',location_ref:'new:yard'}}].map(o=>JSON.stringify(o)).join('\n'));
   await bootstrap(f);
   const yard=row(f,'locations','验收庭院'),map=queryBound(f.session.repo.db,'SELECT * FROM maps WHERE container_location_id=?',[yard.id])[0];
+  assert.ok(map,JSON.stringify({characters:queryBound(f.session.repo.db,'SELECT name,location_id FROM characters')}));
   const frame=JSON.parse(map.frame_json);delete frame.atlasScene;delete frame.atlasLayoutContext;
   f.session.repo.db.run('UPDATE maps SET frame_json=? WHERE id=?',[JSON.stringify(frame),map.id]);
   f.setLayoutResponse('{broken JSON');

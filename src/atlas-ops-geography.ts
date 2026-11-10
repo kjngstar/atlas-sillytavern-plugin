@@ -241,7 +241,9 @@ export function compileRoutePropose(op: ParsedOperation, ctx: CompileContext): C
     else toId = r.entry.id;
   }
 
-  const rowId = existingRow?.entry ? existingRow.entry.id : ctx.makeId('route', op.opId, ref && ref.startsWith('new:') ? ref : `route:${fromId}:${toId}`);
+  // Use the same bare alias as the declaration pass, so same-response layouts
+  // resolve to the route row that is actually written.
+  const rowId = existingRow?.entry ? existingRow.entry.id : ctx.makeId('route', op.opId, ref && ref.startsWith('new:') ? ref.slice(4).trim() : `route:${fromId}:${toId}`);
   const before = existingRow?.entry ? ctx.tables.selectOne('routes', ctx.branchId, rowId) : null;
   if (existingRow?.entry && !before) {
     result.issues.push(issue('REF_UNKNOWN', '$.ref', `路线行不存在：${rowId}`, op));

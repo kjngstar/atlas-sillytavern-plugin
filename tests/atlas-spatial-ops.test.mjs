@@ -56,6 +56,21 @@ function errorsOf(out) {
   return out.issues.filter((i) => i.severity === 'error');
 }
 
+test('a street town can request a footprint for a building in its own district map', async () => {
+  const seed = await fresh();
+  try {
+    seed.db.run('UPDATE maps SET container_location_id=? WHERE branch_id=? AND id=?', [IDS.L1, BRANCH, IDS.M1]);
+    seed.db.run("UPDATE locations SET kind='district', parent_location_id=? WHERE branch_id=? AND id=?", [IDS.L1, BRANCH, IDS.L2]);
+    seed.db.run("UPDATE locations SET kind='building', parent_location_id=? WHERE branch_id=? AND id=?", [IDS.L2, BRANCH, IDS.L3]);
+    const spec = { districts: [{ id: IDS.L2, bank: 'west', order: 0 }], buildings: [{ id: IDS.L3, districtId: IDS.L2, w: 12, h: 8 }] };
+    const compileCity = (spec) => compileText(seed, JSON.stringify({ op: 'map.layout.request', ref: IDS.M1, data: { kind: 'city', spec } })).out;
+    assert.deepEqual(errorsOf(compileCity({ ...spec, streetPattern: 'main-street' })), []);
+    assert.equal(errorsOf(compileCity(spec))[0]?.code, 'LAYOUT_REQUEST_CONFLICT');
+    seed.db.run('UPDATE locations SET parent_location_id=? WHERE branch_id=? AND id=?', [IDS.L1, BRANCH, IDS.L3]);
+    assert.equal(errorsOf(compileCity({ ...spec, streetPattern: 'main-street' }))[0]?.code, 'LAYOUT_REQUEST_CONFLICT');
+  } finally { seed.close(); }
+});
+
 test('明确删除的陈设 ID 穿过编译边界，防止几何层重新并回旧约束',async()=>{
  const seed=await fresh();
  const {out}=compileText(seed,JSON.stringify({op:'map.layout.request',ref:'M2',data:{kind:'floor',spec:{rooms:[{id:'L3',w:5,h:4,side:'north'}],deletes:{contents:['duplicate-seat']}}}}));
@@ -214,6 +229,30 @@ test('P07-09 重复请求：幂等，第二次不再写行', async () => {
   assert.equal(second.out.results[0].result.mutations.length, 0, '重复相同请求不产生新变更');
   assert.equal(second.out.results[0].result.readSet.length, 1, '仍要回报读集');
   assert.equal(second.out.results[0].result.readSet[0].rowId, MAP_FLOOR);
+});
+
+test('相同布局方案曾失败时，明确重新提交会重新排队执行', async () => {
+  const seed = await fresh();
+  const text = '{"op":"map.layout.request","ref":"M2","data":{"kind":"floor","spec":{"rooms":[{"id":"L3","side":"north"}]}}}';
+  const first = compileText(seed, text);
+  const initial = first.out.results[0].result.mutations[0].after;
+  const frame = structuredClone(initial.frame_json);
+  frame.atlasLayoutRequest.status = 'failed';
+  frame.atlasLayoutRequest.failedAtTurnId = 'old-failed-turn';
+  frame.atlasLayoutRequest.issues = [{code:'ITEM_CONTAINER_NOT_FOUND'}];
+  seed.db.run('UPDATE maps SET frame_json = ?, row_rev = ? WHERE branch_id = ? AND id = ?', [
+    JSON.stringify(frame), initial.row_rev, BRANCH, MAP_FLOOR,
+  ]);
+  const retry = compileText(seed, text);
+  assert.deepEqual(errorsOf(retry.out), []);
+  const mutations = retry.out.results[0].result.mutations;
+  assert.equal(mutations.length, 1);
+  const request = mutations[0].after.frame_json.atlasLayoutRequest;
+  assert.equal(request.inputSignature, frame.atlasLayoutRequest.inputSignature);
+  assert.equal(request.status, undefined);
+  assert.equal(request.failedAtTurnId, undefined);
+  assert.equal(request.issues, undefined);
+  seed.db.close();
 });
 
 test('P07-10 同批独立请求：后一个不抹掉前一个的房间', async () => {

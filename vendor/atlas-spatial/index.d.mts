@@ -37,13 +37,17 @@ export type OverviewLayout={kind:'overview';id:string;name:string;bounds:Bounds;
  * `corridorLocationRef` 是命名走廊**唯一**的新增输入：省略=保持既有绑定，`null`=显式解除，
  * 字符串=本图已登记的真实地点引用（解析后的规范 ID）。几何永远由程序算，模型不给走廊坐标。
  */
+export type IndependentFurnishingType='barrel'|'bar-counter'|'bottle-shelf'|'stove'|'prep-table'|'sink'|'crate'|'basket'|'anvil'|'workbench'|'screen';
+export const INDEPENDENT_FURNISHING_TYPES:ReadonlyArray<IndependentFurnishingType>;
+export type FloorFurnitureType='shelf'|'desk'|'bench'|'reading'|'stairs'|'table'|'chair'|'bed'|'cabinet'|'doorway'|'light'|'decor'|'bar'|'kitchen-line'|'barrels'|IndependentFurnishingType;
+export const FLOOR_FURNITURE_TYPES:ReadonlyArray<FloorFurnitureType>;
 export type FloorSpec={
   mapId?:string;rebuild?:boolean;width?:number;height?:number;corridorWidth?:number;
   corridorLocationRef?:string|null;
   rooms?:Array<{id:string;name?:string;side:'north'|'south';role?:'indoor'|'outdoor'|'garden';w?:number;h?:number}>;
-  contents?:Array<{id:string;name?:string;roomId:string;additional?:boolean;type:'shelf'|'desk'|'bench'|'reading'|'stairs'|'table'|'chair'|'bed'|'cabinet'|'doorway'|'light'|'decor';w:number;h:number}>;
+  contents?:Array<{id:string;name?:string;roomId:string;additional?:boolean;type:FloorFurnitureType;w:number;h:number;wall?:'north'|'east'|'south'|'west';nearDoor?:boolean}>;
   actors?:Array<{id:string;name?:string;roomId:string;near?:string}>;
-  items?:Array<{id:string;name?:string;on:string}>;
+  items?:Array<{id:string;name?:string;on:string;asFurniture?:boolean}>;
   deletes?:{rooms?:string[];contents?:string[];actors?:string[];items?:string[]};
 };
 /** 生成后的室内通道。`entityId` 只在绑定真实走廊后出现；匿名辅助通道没有实体身份。 */
@@ -123,8 +127,9 @@ export declare function publicSpaceCanonical(canonical:unknown,options?:{viewMod
   size:{widthM:number;heightM:number;quality:'estimated'|'confirmed';locked:boolean;basis?:{kind:string;referenceId:string|null;note:string}}|null;
   furnishing:Array<{localId:string;type:string;name:string;itemId:string|null;widthM:number;heightM:number;quality:'layout'|'confirmed'}>;
 }|null;
-export declare function hydrateScene(scene:SceneDocument,projection:Record<string,any>):{ok:boolean;scene:SceneDocument|null;issues:Diagnostic[]};
+export declare function hydrateScene(scene:SceneDocument,projection:Record<string,any>,options?:{pointLocationIds?:string[]}):{ok:boolean;scene:SceneDocument|null;issues:Diagnostic[]};
 export declare function collectMapLocations(input:{mapRow:Record<string,any>;maps?:any[];locations?:any[]}):Record<string,any>[];
+export declare function collectTownParcels(members:Record<string,any>[],locations:Record<string,any>[],branchId:string):Record<string,any>[];
 export declare function buildLayoutContext(input:{scope:Scope;mapRow:Record<string,any>;maps?:any[];locations?:any[];characters?:any[];items?:any[];routes?:any[]}):{ok:boolean;context?:GenerateContext;issues:Diagnostic[]};
 export declare function createSpatialRenderer(options:{canvas:HTMLCanvasElement;onSelect?:(entity:any)=>void;onHover?:(entity:any,point:Point|null)=>void;onViewport?:(viewport:any)=>void;onIssue?:(issue:Diagnostic)=>void;theme?:Record<string,string>;scaleBarWidth?:number;ownsGestures?:boolean;painterFactory?:Function;animate?:boolean}):Renderer;
 export declare function compileSceneGroup(options:{request:{kind:'floor'|'city'|'overview';spec:Record<string,unknown>};scope:Scope;currentScope:Scope;mapRow:Record<string,any>;locations:any[];characters?:any[];items?:any[];routes?:any[];maps?:any[];turnId:string;operationId:string;spaceSize?:unknown;childSpaces?:Record<string,{widthM:number;heightM:number;quality?:string;locked?:boolean}>;autoPlan?:boolean;planningProjection?:boolean}):Record<string,any>;

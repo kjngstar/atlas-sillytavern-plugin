@@ -26,6 +26,7 @@ import { PROMPT_POLICY_VERSION } from './atlas-prompt-layers.ts';
 import { SPATIAL_CAPABILITIES } from './atlas-world-contract.ts';
 import { DEFAULT_WORK_BATCHING, normalizeWorkBatching, validWorkBatching, type WorkBatchingSettings } from './atlas-work-batching.ts';
 import { DEFAULT_MODEL_BATCHING, normalizeModelBatching, validModelBatching, type ModelBatchingSettings } from './atlas-model-batching.ts';
+import { ATLAS_RUNTIME_LIMITS } from './atlas-runtime-limits.ts';
 
 /**
  * C02 / E01：推进输出协议的类型。
@@ -658,7 +659,7 @@ function parseLegacyPreset(raw: unknown): LegacyPresetShape | null {
   if (apiKey === null) return null;
   const maxTokens = isFiniteIntIn(record.maxTokens, MIN_MAX_TOKENS, MAX_MAX_TOKENS) ? record.maxTokens : 0;
   const temperature = isFiniteIn(record.temperature, MIN_TEMPERATURE, MAX_TEMPERATURE) ? record.temperature : 0.7;
-  const timeoutMs = isFiniteIntIn(record.timeoutMs, MIN_TIMEOUT_MS, MAX_TIMEOUT_MS) ? record.timeoutMs : 30_000;
+  const timeoutMs = isFiniteIntIn(record.timeoutMs, MIN_TIMEOUT_MS, MAX_TIMEOUT_MS) ? record.timeoutMs : ATLAS_RUNTIME_LIMITS.modelTimeoutMs;
   const systemPrompt = typeof record.systemPrompt === "string" ? record.systemPrompt : "";
   return { name: record.name.trim(), endpoint: record.endpoint, model: record.model.trim(), apiKey, maxTokens, temperature, topP: 0.95, timeoutMs, systemPrompt };
 }

@@ -120,10 +120,23 @@ export function collectKnownRefs(
 }
 
 export function collectEntityRefs(tables: TableReadPort, branchId: string, refs: readonly KnownRef[] = collectKnownRefs(tables,branchId)): string[] {
+  const aliasOf=(id:unknown)=>id===null||id===undefined?null:refs.find(ref=>ref.id===id)?.alias??null;
   return refs.map(ref => {
     const table=CATALOG.find(entry=>entry[2]===ref.kind)?.[0];
     const row=table?tables.selectOne(table,branchId,ref.id):null;
-    return `${ref.alias}=${String(row?.name ?? row?.title ?? ref.kind)}（${ref.kind}）`;
+    let identity:Record<string,unknown>|null=null;
+    if(ref.kind==='location'&&row){
+      let aliases:unknown=row.aliases_json??[];
+      if(typeof aliases==='string'){try{aliases=JSON.parse(aliases);}catch{aliases=[];}}
+      let area:unknown=row.area_geometry_json;
+      if(typeof area==='string'){try{area=JSON.parse(area);}catch{area=null;}}
+      const dimensions=area&&typeof area==='object'&&!Array.isArray(area)&&(area as Record<string,unknown>).kind==='dimensions'?area:undefined;
+      identity={kind:row.kind,parent_ref:aliasOf(row.parent_location_id),aliases,
+        map_ref:aliasOf(row.map_id),mobility:row.mobility,anchor_ref:aliasOf(row.anchor_location_id),area:dimensions};
+    }else if(ref.kind==='route'&&row){
+      identity={from_ref:aliasOf(row.from_location_id),to_ref:aliasOf(row.to_location_id),distance_m:row.distance_m,map_ref:aliasOf(row.map_id)};
+    }
+    return `${ref.alias}=${String(row?.name ?? row?.title ?? ref.kind)}（${ref.kind}）${identity?' '+JSON.stringify(identity):''}`;
   });
 }
 export type OperationContext = {

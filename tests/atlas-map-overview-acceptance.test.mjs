@@ -42,6 +42,17 @@ function overviewFixture(){
  const result=projectMapView({view:view([map]),mapId:'world',scope:{chatId:'test',branchId:'main',revision:0,viewMode:'author'}});
  return {map,scene:result.scene};
 }
+test('计算幅面不冒充场地边界，真实边界、路线与地形仍保留，隐藏容器不泄漏',()=>{
+ const {map,scene}=overviewFixture();map.containerLocationId='owner';map.containerLocationKind='other';
+ scene.layout.selfArea={locationId:'owner',name:'当前大场所',source:'frame',quality:'layout',polygon:[{x:0,y:0},{x:100,y:0},{x:100,y:100},{x:0,y:100}]};
+ const fallback=referenceGeometry(map,scene);assert.equal(fallback.geo.selfArea,null);assert.ok(fallback.geo.overviewRoutes.length);
+ scene.layout.selfArea.source='canonical';scene.layout.selfArea.quality='confirmed';
+ const canonical=referenceGeometry(map,scene);assert.equal(canonical.geo.selfArea.pts.length,4);
+ assert.deepEqual(canonical.geo.overviewRoutes,fallback.geo.overviewRoutes);
+ assert.deepEqual(canonical.geo.overviewFeatures,fallback.geo.overviewFeatures);
+ assert.equal(referenceGeometry(map,scene,{viewMode:'pov',visibleLocationIds:['place','other']}).geo.selfArea,null);
+ assert.ok(referenceGeometry(map,scene,{viewMode:'pov',visibleLocationIds:['owner','place','other']}).geo.selfArea);
+});
 test('SQL 概览的范围与路线保留到原 UI；沿用同一坐标变换和估计标记',()=>{
  const {map,scene}=overviewFixture(),geometry=referenceGeometry(map,scene);
  assert.equal(geometry.geo.overviewShapes.length,1);assert.equal(geometry.geo.overviewShapes[0].pts.length,4);

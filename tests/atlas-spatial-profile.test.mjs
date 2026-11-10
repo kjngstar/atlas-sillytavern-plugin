@@ -24,6 +24,8 @@ import { createTableReadPort } from '../src/atlas-db-readport.ts';
 import { compileSqlSceneMaps } from '../src/atlas-sql-scene-maps.ts';
 import { buildSqlLayoutTask, deriveLayoutSites } from '../src/atlas-sql-layout-task.ts';
 import { queryMapView } from '../src/atlas-db-views.ts';
+import { querySpatialScene } from '../src/atlas-spatial-views.ts';
+import { projectReferenceData } from '../ui/atlas-reference-data.mjs';
 import { completeLayoutClosure } from '../src/atlas-layout-closure.ts';
 import { applyPendingSpatialRequests } from '../src/atlas-spatial-candidate.ts';
 import { queryBound } from '../src/atlas-db-runtime.ts';
@@ -40,6 +42,19 @@ const SQL = await (await import('sql.js')).default();
 const BRANCH = IDS.branchMain;
 const TURN = 'turn_profile';
 const SCOPE = { chatId: IDS.chatA, branchId: BRANCH, revision: 5, viewMode: 'author' };
+
+test('停靠载具不要求街区图生成静态室内足迹，未知锚点仍明确不支持',()=>{
+  const vehicle={id:'boat',kind:'vehicle',mobility:'mobile',anchor_location_id:'pier'};
+  const input={map:{id:'port-map',frame_json:{}},container:{id:'port',kind:'district'},members:[{id:'office',kind:'building'},{id:'pier',kind:'other'},vehicle]};
+  const resolved=resolveSpatialProfile(input);
+  assert.equal(resolved.layoutKind,'city');
+  assert.deepEqual(resolved.unsupported,[]);
+  assert.equal(resolved.partial,false);
+  const unknown=resolveSpatialProfile({...input,members:[{...vehicle,anchor_location_id:null}]});
+  assert.deepEqual(unknown.unsupported.map(m=>m.id),['boat']);
+  assert.equal(vehicle.kind,'vehicle');
+  assert.equal(vehicle.mobility,'mobile');
+});
 
 // 复合驿站：场地 + 已知建筑 + 开放停靠区；建筑里有房间；官道与沿途地点。
 const SITE = 'L_SITE';
@@ -155,6 +170,33 @@ function writeProfile(seed, mapId, mode, attempt = 'attempt_profile') {
 
 const frameOf = (seed, mapId) => JSON.parse(selectOne(seed.db, 'maps', BRANCH, mapId).frame_json);
 const entryOf = (derived, mapId) => derived.entries.find((entry) => entry.mapId === mapId);
+
+test('小店首次出图不用街区的示意色块作为物理尺寸', async () => {
+  const seed = await makeSeedWith(SQL);
+  try {
+    const shop = 'compact-shop', shopMap = 'compact-shop-map', streetMap = 'compact-street-map';
+    const polygon = [{x:0,y:0},{x:30,y:0},{x:30,y:20},{x:0,y:20}];
+    const shape = {id:shop,quality:'estimated',polygon};
+    const frame = {cols:100,rows:80,atlasScene:{
+      mapId:streetMap,branchId:BRANCH,units:'meters',layout:{kind:'overview',shapes:[shape]},
+    }};
+    insertRows(seed.db, 'maps', [mapRow(streetMap, {frame_json:frame})]);
+    insertRows(seed.db, 'entity_keys', [{branch_id:BRANCH,id:shop,kind:'location'}]);
+    insertRows(seed.db, 'locations', [loc(shop, {kind:'building',map_id:streetMap})]);
+    insertRows(seed.db, 'maps', [mapRow(shopMap, {container_location_id:shop})]);
+    const entry = entryOf(deriveLayoutSites(createTableReadPort(seed.db), BRANCH), shopMap);
+    assert.equal(entry.spaceSize.resolution.source, 'first-estimate');
+    assert.equal(entry.extent.width, 8);
+    assert.ok(entry.extent.height < entry.extent.width);
+    Object.assign(shape, {w:30,h:20});
+    seed.db.run('UPDATE maps SET frame_json = ? WHERE id = ?', [JSON.stringify(frame), streetMap]);
+    const sized = entryOf(deriveLayoutSites(createTableReadPort(seed.db), BRANCH), shopMap);
+    assert.equal(sized.spaceSize.resolution.source, 'parent-footprint');
+    assert.deepEqual(sized.extent, {width:30,height:20,units:'meters'});
+  } finally {
+    seed.close();
+  }
+});
 const scopeOf = (task) => {
   const scopes = [];
   for (const line of String(task.request.messages[1].content).split('\n')) {
@@ -163,6 +205,51 @@ const scopeOf = (task) => {
   }
   return scopes;
 };
+test('新街区按已登记路网组织足迹和斜向连接，已有城市模板继续沿用', async () => {
+  const seed = await siteSeed();
+  try {
+    const gate = 'L_STREET_GATE', links = ['R_STREET_A','R_STREET_B'];
+    seed.db.run("UPDATE locations SET kind='district' WHERE branch_id=? AND id=?", [BRANCH,SITE]);
+    insertRows(seed.db,'entity_keys',[{branch_id:BRANCH,id:gate,kind:'location'}]);
+    insertRows(seed.db,'locations',[loc(gate,{name:'街口',kind:'other',parent_location_id:SITE,map_id:MAP_SITE})]);
+    insertRows(seed.db,'routes',[
+      routeRow(links[0],BLD,YARD,{map_id:MAP_SITE,kind:'road',geometry_quality:'confirmed'}),
+      routeRow(links[1],YARD,gate,{map_id:MAP_SITE,kind:'path'}),
+    ]);
+    const port=createTableReadPort(seed.db);
+    const entry=entryOf(deriveLayoutSites(port,BRANCH),MAP_SITE);
+    assert.equal(entry.kind,'overview');
+    assert.equal(entry.profile.profile.mode,'linear');
+    const task=buildSqlLayoutTask(seed.db,BRANCH,{anchor:{chatUid:IDS.chatA,branchId:BRANCH,baseRevision:0,baseStorageRevision:0},userText:'',assistantText:'',sourceSnapshot:[],layoutMaps:[MAP_SITE]},TURN);
+    assert.equal(task.kinds[MAP_SITE],'overview');
+    const data=Object.fromEntries(['maps','locations','routes','characters','items'].map(table=>[table,port.selectWhere(table,{branch_id:BRANCH},1000)]));
+    const map=data.maps.find(row=>row.id===MAP_SITE);
+    const compiled=Kit.compileSceneGroup({request:{kind:'overview',spec:{surface:'mixed',zones:[
+      {id:BLD,role:'other',size:'small',sector:'southwest'},
+      {id:YARD,role:'land',size:'medium',sector:'center'},
+      {id:gate,role:'other',size:'small',sector:'northeast'},
+    ],links:links.map(id=>({id}))}},scope:SCOPE,currentScope:SCOPE,mapRow:map,...data,turnId:TURN,operationId:'street-network',autoPlan:true});
+    assert.equal(compiled.ok,true,JSON.stringify(compiled.issues));
+    assert.equal(compiled.scene.layout.routes.length,2);
+    assert.ok(compiled.scene.layout.routes.some(route=>route.path.slice(1).some((p,i)=>Math.abs(p.x-route.path[i].x)>.01&&Math.abs(p.y-route.path[i].y)>.01)));
+    const saved=applyGroups(seed.db,[compiled.group],applyCtx('street-network'));
+    assert.equal(saved.groups[0].status,'applied',JSON.stringify(saved));
+    assert.equal(selectOne(seed.db,'routes',BRANCH,links[0]).geometry_quality,'estimated','已确认连通关系但没有路径的路线，首次几何仍标示意');
+    const ctx={db:seed.db,branchId:BRANCH,revision:5,chatId:IDS.chatA,viewMode:'player'};
+    const mapView=queryMapView(ctx,{kind:'map'}),sceneView=querySpatialScene(ctx,{kind:'scene'});
+    const read=sceneView.items.find(s=>s.mapId===MAP_SITE).scene;
+    assert.equal(read.layout.routes.length,2,'SQL 读口的路线水合不能抹掉刚保存的道路');
+    for(const r of read.layout.routes)assert.deepEqual(r.path,compiled.scene.layout.routes.find(s=>s.id===r.id).path);
+    const view=projectReferenceData({mapView,sceneView,viewMode:'player'});
+    const nodes=node=>[node,...(node.children??[]).flatMap(nodes)];
+    assert.equal(nodes(view.ROOT).find(n=>n.id===MAP_SITE).geo.townPlan.streets.length,2,'实际街区绘图接到道路和建筑足迹');
+    seed.db.run('DELETE FROM routes WHERE branch_id=? AND id IN (?,?)',[BRANCH,...links]);
+    assert.equal(entryOf(deriveLayoutSites(createTableReadPort(seed.db),BRANCH),MAP_SITE).kind,'overview');
+    const previousCity=resolveSpatialProfile({map:{...map,frame_json:{atlasScene:{layout:{kind:'city'}}}},container:{id:SITE,kind:'district'},members:data.locations,routes:data.routes});
+    assert.equal(previousCity.layoutKind,'city');
+  } finally { seed.close(); }
+});
+
 test('房间内已有陈设账本的 other 子空间沿用室内布局，作者室外选择仍优先',async()=>{
  const seed=await siteSeed();try{
   const area='L_LOCAL_AREA',mapId='M_LOCAL_AREA';

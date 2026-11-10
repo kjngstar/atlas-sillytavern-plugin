@@ -38,9 +38,13 @@ export function canonicalForScene(scene,previous,locationId,authorSize,deletedCo
   const groups=Array.isArray(layout.groups)?layout.groups.filter(g=>plain(g)&&g.roomId===locationId):[];
   const items=Array.isArray(layout.items)?layout.items.filter(plain):[];
   const itemBySupport=new Map();
+  const furnitureItems=new Set();
   for(const item of items){
     const on=typeof item.on==='string'&&item.on?item.on:(typeof item.containerId==='string'&&item.containerId?item.containerId:null);
-    if(typeof item.id==='string'&&item.id&&on&&!itemBySupport.has(on))itemBySupport.set(on,item.id);
+    if(typeof item.id==='string'&&item.id&&on&&(!itemBySupport.has(on)||item.asFurniture===true&&!furnitureItems.has(on))){
+      itemBySupport.set(on,item.id);
+      if(item.asFurniture===true)furnitureItems.add(on);
+    }
   }
   const prevList=Array.isArray(previous?.furnishing)?previous.furnishing.filter(plain):[];
   const prevByLocal=new Map(prevList.filter(e=>typeof e.localId==='string').map(e=>[e.localId,e]));
@@ -53,7 +57,9 @@ export function canonicalForScene(scene,previous,locationId,authorSize,deletedCo
     const prev=prevByLocal.get(localId);
     const widthM=Number.isFinite(content.w)&&content.w>0?content.w:(prev&&Number.isFinite(prev.widthM)?prev.widthM:0.2);
     const heightM=Number.isFinite(content.h)&&content.h>0?content.h:(prev&&Number.isFinite(prev.heightM)?prev.heightM:0.2);
-    furnishing.push({localId,type:typeof content.type==='string'&&content.type?content.type:(prev?.type??'decor'),name:typeof content.name==='string'&&content.name?content.name:(prev?.name??content.id),itemId:itemBySupport.get(content.id)??null,widthM,heightM,quality:prev?.quality==='confirmed'?'confirmed':'layout'});
+    furnishing.push({localId,type:typeof content.type==='string'&&content.type?content.type:(prev?.type??'decor'),name:typeof content.name==='string'&&content.name?content.name:(prev?.name??content.id),itemId:itemBySupport.get(content.id)??null,widthM,heightM,quality:prev?.quality==='confirmed'?'confirmed':'layout',
+      ...(content.wall?{wall:content.wall}:{}),...(content.nearDoor!==undefined?{nearDoor:content.nearDoor}:{}),
+      ...(furnitureItems.has(content.id)?{asFurniture:true}:{})});
   }
   for(const prev of prevList){
     if(deletedContents.includes(prev.localId)||deletedContents.includes(parseSpaceLocalId(prev.localId)?.contentId))continue;
@@ -122,7 +128,7 @@ export function sceneLocationGeometry(scene){
   const corridorBound=layout.kind==='floor'&&layout.corridor&&typeof layout.corridor.entityId==='string'&&layout.corridor.entityId
     ? [{...layout.corridor,id:layout.corridor.entityId}]:[];
   const parts=layout.kind==='floor'?[...layout.rooms,...(layout.areas??[]),...corridorBound]
-    :layout.kind==='city'?[...layout.districts,...layout.buildings.filter(b=>!b.decorative)]
+    :layout.kind==='city'?[...layout.districts,...layout.buildings.filter(b=>!b.decorative),...(layout.bridgeLocations??[])]
       :(layout.shapes??[]).filter(s=>s&&s.placement!=='proxy');
   const centroid=polygon=>{let x=0,y=0;for(const q of polygon){x+=q.x;y+=q.y;}return {x:x/polygon.length,y:y/polygon.length};};
   return parts.filter(p=>p.placement!=='proxy').map(p=>{const polygon=Array.isArray(p.polygon)?p.polygon.map(q=>Array.isArray(q)?{x:q[0],y:q[1]}:q):[{x:p.x,y:p.y},{x:p.x+p.w,y:p.y},{x:p.x+p.w,y:p.y+p.h},{x:p.x,y:p.y+p.h}];

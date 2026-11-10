@@ -19,7 +19,7 @@ export function projectMapView({view,mapId,scope}={}){
     if(!['location','character','item'].includes(p.kind))continue;
     let polygon=null;const area=geometry(p.area,'$.points.area');
     if(area?.kind==='polygon'&&Array.isArray(area.points)&&area.points.length>=3&&area.points.every(q=>finite(q.x)&&finite(q.y)))polygon=area.points.map(q=>({x:q.x*k,y:q.y*k}));
-    pins.push({id:p.entityId,entityId:p.entityId,name:String(p.name??''),type:p.kind==='character'?'person':p.kind,mapId,x:p.x*k,y:p.y*k,quality:p.markerQuality??p.precision??'approximate',locationId:p.locationId??null,radius:finite(p.radius)?p.radius*k:null,polygon});
+    pins.push({id:p.entityId,entityId:p.entityId,name:String(p.name??''),type:p.kind==='character'?'person':p.kind,mapId,x:p.x*k,y:p.y*k,quality:p.markerQuality??p.precision??'approximate',locationId:p.locationId??null,radius:finite(p.radius)?p.radius*k:null,polygon,...(p.isProtagonist===true?{isProtagonist:true}:{})});
   }
   const xs=pins.map(p=>p.x),ys=pins.map(p=>p.y);
   const bounds=finite(frameWidth)&&frameWidth>0&&finite(frameHeight)&&frameHeight>0?{x:finite(frame.origin_x)?frame.origin_x*k:0,y:finite(frame.origin_y)?frame.origin_y*k:0,w:frameWidth*k,h:frameHeight*k}:{x:Math.min(0,...xs)-k,y:Math.min(0,...ys)-k,w:Math.max(k,(Math.max(0,...xs)-Math.min(0,...xs))+2*k),h:Math.max(k,(Math.max(0,...ys)-Math.min(0,...ys))+2*k)};
@@ -54,7 +54,7 @@ export function filterSceneForView(scene,{scope,visibleLocations=[],visibleChara
   if(!author){
     // Never pass internal diagnostics, input constraints or unknown extension fields to POV.
     const top=['kind','version','generator','mapId','branchId','sourceRevision','units','metersPerCell','metricQuality'];
-    const keys={floor:['id','name','kind','bounds','corridor','rooms','areas','hostArea','groups','bodies','doors','windows','lamps','doorSwings','actors','items','path'],city:['id','name','kind','bounds','wall','origin','river','riverPolygon','districts','roads','segments','gates','buildings','dock'],overview:['id','name','kind','bounds','surface','pins','shapes','routes','features','selfArea']};
+    const keys={floor:['id','name','kind','bounds','corridor','rooms','areas','hostArea','groups','bodies','doors','windows','lamps','doorSwings','actors','items','path'],city:['id','name','kind','bounds','wall','origin','river','riverPolygon','districts','roads','segments','gates','buildings','dock','streetPattern'],overview:['id','name','kind','bounds','surface','pins','shapes','routes','features','selfArea']};
     const saved=d.layout;d=Object.fromEntries(top.filter(k=>d[k]!==undefined).map(k=>[k,d[k]]));d.layout=Object.fromEntries((keys[saved.kind]??[]).filter(k=>saved[k]!==undefined).map(k=>[k,saved[k]]));
   }
   const s=d.layout;
@@ -79,7 +79,13 @@ export function filterSceneForView(scene,{scope,visibleLocations=[],visibleChara
   }else if(s.kind==='city'){
     s.districts=s.districts.filter(d=>allowed(d.id,'location')).map(name);const districts=new Set(s.districts.map(d=>d.id));
     s.buildings=s.buildings.filter(b=>districts.has(b.districtId)&&(b.decorative||allowed(b.id,'location'))).map(name);
-    if(!author){s.roads=s.roads.filter(r=>r.id==='avenue'||[...districts].some(id=>r.id==='road:'+id));const roads=new Set(s.roads.map(r=>r.id));s.segments=s.segments.filter(r=>roads.has(r.roadId));}
+    if(!author){
+      s.roads=s.roads.filter(r=>typeof r.id==='string'&&(r.id==='avenue'||r.id.startsWith('road:')&&districts.has(r.id.slice(5))||
+        s.streetPattern==='main-street'&&r.id.startsWith('town:')&&(!r.districtId||districts.has(r.districtId))
+        &&(!r.bridgeLocationId||L.has(r.bridgeLocationId))));
+      const roads=new Set(s.roads.map(r=>r.id));
+      s.segments=s.segments.filter(r=>roads.has(r.roadId));
+    }
   }else{
     s.pins=s.pins.filter(p=>allowed(p.id,p.type)).map(name);s.shapes=(s.shapes??[]).filter(p=>allowed(p.id,'location')).map(name);
     // 审查必修2：overview 路线过滤——隐藏路线不下发 POV；路线必须具备端点引用作可见性依据，
@@ -125,20 +131,21 @@ function stripLayoutForPov(s){
       path:pickPoints,
     },
     city:{
-      wall:pickPoints,riverPolygon:pickPoints,
+      streetPattern:p=>p,
+      wall:pickPoint,riverPolygon:pickPoint,
       origin:p=>pick(p,'x','y'),
       river:p=>pick(p,'cx','amplitude','width','height'),
       dock:p=>pick(p,'x','y','width'),
-      districts:p=>({...pick(p,'id','name'),...(Array.isArray(p.polygon)?{polygon:pickPoints(p.polygon)}:{}),...(plain(p.site)?{site:pickPoint(p.site)}:{})}),
-      roads:p=>({...pick(p,'id','name','roadId','width'),...(plain(p.a)?{a:pickPoint(p.a)}:{}),...(plain(p.b)?{b:pickPoint(p.b)}:{})}),
-      segments:p=>({...pick(p,'id','roadId','width'),...(plain(p.a)?{a:pickPoint(p.a)}:{}),...(plain(p.b)?{b:pickPoint(p.b)}:{})}),
+      districts:p=>({...pick(p,'id','name'),...(['lake','forest','woods'].includes(p.role)?{role:p.role}:{}),...(Array.isArray(p.polygon)?{polygon:pickPoints(p.polygon)}:{}),...(plain(p.site)?{site:pickPoint(p.site)}:{})}),
+      roads:p=>({...pick(p,'id','name','roadId','width'),...(p.kind==='path'?{kind:'path'}:{}),...(plain(p.a)?{a:pickPoint(p.a)}:{}),...(plain(p.b)?{b:pickPoint(p.b)}:{})}),
+      segments:p=>({...pick(p,'id','roadId','width'),...(p.kind==='bridge'?{kind:'bridge'}:{}),...(plain(p.a)?{a:pickPoint(p.a)}:{}),...(plain(p.b)?{b:pickPoint(p.b)}:{})}),
       gates:p=>pick(p,'id','name','x','y'),
       buildings:p=>pick(p,'id','name','districtId','x','y','w','h','decorative'),
     },
     overview:{
       surface:p=>p,
       pins:p=>({...pick(p,'id','entityId','name','type','mapId','x','y','quality','locationId','radius'),...(Array.isArray(p.polygon)?{polygon:pickPoints(p.polygon)}:{})}),
-      shapes:p=>({...pick(p,'id','name'),...(Array.isArray(p.polygon)?{polygon:pickPoints(p.polygon)}:{})}),
+      shapes:p=>({...pick(p,'id','name'),...(['forest','water'].includes(p.role)?{role:p.role}:{}),...(Array.isArray(p.polygon)?{polygon:pickPoints(p.polygon)}:{})}),
       routes:p=>({...pick(p,'id','kind','mapId','quality','dashed','progress','fromLocationId','toLocationId'),...(Array.isArray(p.path)?{path:pickPoints(p.path)}:{})}),
       // 装饰只有视觉字段；type/zoneId/density 之外的一切（structureKey/placement/内部标记）一律不下发。
       features:p=>({...pick(p,'id','type','zoneId','density','decorative','quality','width','widthClass','fromSector','toSector'),...(Array.isArray(p.path)?{path:pickPoints(p.path)}:{}),...(Array.isArray(p.polygon)?{polygon:pickPoints(p.polygon)}:{})}),
@@ -202,17 +209,41 @@ export function publicSpaceCanonical(canonical,{viewMode='author',visibleLocalId
   for(const entry of Array.isArray(canonical.furnishing)?canonical.furnishing:[]){
     if(!plain(entry)||typeof entry.localId!=='string'||!entry.localId)continue;
     if(visible?!visible.has(entry.localId):pov)continue;
-    furnishing.push({localId:entry.localId,type:entry.type,name:entry.name,itemId:typeof entry.itemId==='string'&&entry.itemId?entry.itemId:null,widthM:entry.widthM,heightM:entry.heightM,quality:entry.quality==='confirmed'?'confirmed':'layout'});
+    furnishing.push({localId:entry.localId,type:entry.type,name:entry.name,itemId:typeof entry.itemId==='string'&&entry.itemId?entry.itemId:null,widthM:entry.widthM,heightM:entry.heightM,quality:entry.quality==='confirmed'?'confirmed':'layout',
+      ...(entry.wall?{wall:entry.wall}:{}),...(entry.nearDoor!==undefined?{nearDoor:entry.nearDoor}:{}),...(entry.asFurniture?{asFurniture:true}:{})});
   }
   return {version:1,locationId:canonical.locationId,revision:Number.isInteger(canonical.revision)&&canonical.revision>=0?canonical.revision:0,size,furnishing};
 }
 /** Reconcile saved visual anchors with the same-revision SQL position projection. */
-export function hydrateScene(scene,projection){
+export function hydrateScene(scene,projection,{pointLocationIds=[]}={}){
   if(!projection?.ok||!projection.scene||scene.mapId!==projection.scene.mapId||scene.branchId!==projection.scene.branchId)return failure('PROJECTION_SCOPE_MISMATCH','$','几何文档与 SQL 现状不属于同一地图');
   if(scene.units!==projection.scene.units||scene.metersPerCell!==projection.scene.metersPerCell)return failure('PROJECTION_METRIC_MISMATCH','$','已保存布局需要重新按当前尺度验证');
-  const d=clone(scene),s=d.layout;if(s.kind!=='floor')return {ok:true,scene:d,issues:[]};
+  const d=clone(scene),s=d.layout;
+  if(s.kind==='overview'){
+    // Routes belong to the same-revision SQL projection, including visibility
+    // and geometry validation; saved template links may lag a route update.
+    s.routes=clone(projection.scene.layout.routes??[]);
+    return {ok:true,scene:d,issues:[]};
+  }
+  if(s.kind==='city'){
+    // Open places without a footprint and anchored vehicles use the current
+    // SQL point projection. They are markers, never invented fixed buildings.
+    const allowed=new Set(pointLocationIds),b=s.bounds;
+    s.pins=(projection.scene.layout.pins??[]).filter(p=>p.type==='location'&&allowed.has(p.id)&&finite(p.x)&&finite(p.y)&&p.x>=b.x&&p.y>=b.y&&p.x<=b.x+b.w&&p.y<=b.y+b.h).map(clone);
+    return {ok:true,scene:d,issues:[]};
+  }
+  if(s.kind!=='floor')return {ok:true,scene:d,issues:[]};
   const pins=projection.scene.layout.pins??[],coarse=projection.coarseList??[],P=new Map(pins.map(p=>[p.id,p])),C=new Map(coarse.map(p=>[p.entityId,p]));
   s.actors=s.actors.filter(a=>{const p=P.get(a.id),c=C.get(a.id);return p?.locationId===a.roomId||c?.locationId===a.roomId;}).map(a=>{const p=P.get(a.id);return p&&p.quality!=='layout'?{...a,x:p.x,y:p.y,quality:p.quality,name:p.name}:a;});
   s.items=s.items.filter(a=>{const p=P.get(a.id);return p?.locationId===a.roomId;}).map(a=>{const p=P.get(a.id);return p&&p.quality!=='layout'?{...a,x:p.x,y:p.y,quality:p.quality,name:p.name}:a;});
+  const rooms=new Map([...(s.rooms??[]),...(s.areas??[]),...(s.hostArea?[s.hostArea]:[])].map(r=>[r.id,r]));
+  for(const [key,type] of [['actors','person'],['items','item']]){
+    const represented=new Set(s[key].map(p=>p.id));
+    for(const p of pins){
+      const room=rooms.get(p.locationId);
+      if(p.type!==type||represented.has(p.id)||!room||!finite(p.x)||!finite(p.y)||p.x<room.x||p.y<room.y||p.x>room.x+room.w||p.y>room.y+room.h)continue;
+      s[key].push({...clone(p),roomId:p.locationId});represented.add(p.id);
+    }
+  }
   s.path=[];return {ok:true,scene:d,issues:[]};
 }

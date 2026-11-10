@@ -3,6 +3,10 @@ import { visibleWorkbenchMaps } from './atlas-workbench-data.mjs';
 import { projectReferenceFlows } from './atlas-reference-flows.mjs';
 import { projectMapContext } from './atlas-map-context.mjs';
 import { projectSpaceNavigation } from './atlas-space-navigation.mjs';
+import { projectExplorationMaps } from './atlas-exploration-map.mjs';
+import { cityLocality } from './atlas-street-map.mjs';
+import { projectLocalSiteMaps } from './atlas-local-site-map.mjs';
+import { townPlan } from './atlas-town-plan.mjs';
 
 /** Descriptive categories, independent of the actual parent/child map tree. */
 const MAP_CATEGORY_NAMES = {
@@ -160,6 +164,18 @@ export function referenceGeometry(map, document, {viewMode='author',visibleLocat
   const rect = r => {const [x,y]=xy(r);return {x,y,w:r.w*scale,h:r.h*scale};};
   const metric = document?.units==='meters' ? 1/scale : typeof map.metersPerCell==='number'&&map.metersPerCell>0 ? map.metersPerCell/scale : null;
   const protagonistIds=new Set((map.points??[]).filter(p=>p.isProtagonist===true).map(p=>p.entityId));
+  const naturalTerrain = layout?.kind === 'city' ? (map.points ?? []).flatMap(p => {
+    if (p.kind !== 'location' || p.entityId === map.containerLocationId || (viewMode === 'pov' && p.hidden)) return [];
+    const terrain = text(p.terrain).trim().toLowerCase();
+    const kind = ['forest', 'woodland', '林地', '森林', '林区'].includes(terrain) ? 'forest'
+      : ['deep_forest', '深林', '密林'].includes(terrain) ? 'woods'
+      : ['water', 'lake', 'river', '湖泊', '湖区', '河流', '水域'].includes(terrain) ? 'water' : null;
+    if (!kind || p.area?.kind !== 'polygon' || p.area.points?.length < 3 || !Array.isArray(p.area.points)) return [];
+    const converted = p.area.points.map(q => toScenePoint(q, 'cells', document.units, map.metersPerCell));
+    const pin = toScenePoint(p, 'cells', document.units, map.metersPerCell);
+    if (!pin || converted.some(q => !q)) return [];
+    return [{id:p.entityId,name:p.name,kind,pts:converted.map(xy),pin:{...pin,id:p.entityId,name:p.name,type:'location',quality:p.markerQuality}}];
+  }) : [];
   const rawPins = layout ? [
     ...pins, ...(layout.actors??[]).map(p=>({...p,isProtagonist:p.isProtagonist===true||protagonistIds.has(p.id),type:'person'})), ...(layout.items??[]).map(p=>({...p,type:'item'})),
     ...(layout.rooms??[]).map(r=>({...r,type:'location',silent:true,x:r.x+r.w/2,y:r.y+r.h/2})),
@@ -173,8 +189,12 @@ export function referenceGeometry(map, document, {viewMode='author',visibleLocat
       ?[{...layout.corridor,id:layout.corridor.entityId,type:'location',silent:true,
         x:layout.corridor.x+layout.corridor.w/2,y:layout.corridor.y+layout.corridor.h/2}]
       :[]),
-    ...(layout.districts??[]).filter(d=>d.polygon?.length>=3&&d.polygon.every(finite)).map(d=>({...d,type:'location',silent:true,x:d.polygon.reduce((n,p)=>n+point(p)[0],0)/d.polygon.length,y:d.polygon.reduce((n,p)=>n+point(p)[1],0)/d.polygon.length})),
+    ...(layout.districts??[]).filter(d=>d.polygon?.length>=3&&d.polygon.every(finite)).map(d=>{
+      if(d.role&&finite(d.site)){const [x,y]=point(d.site);return {...d,type:'location',x,y};}
+      return {...d,type:'location',silent:true,x:d.polygon.reduce((n,p)=>n+point(p)[0],0)/d.polygon.length,y:d.polygon.reduce((n,p)=>n+point(p)[1],0)/d.polygon.length};
+    }),
     ...(layout.buildings??[]).filter(p=>!p.decorative).map(r=>({...r,type:'location',x:r.x+r.w/2,y:r.y+r.h/2})),
+    ...naturalTerrain.filter(p=>!(layout.districts??[]).some(d=>d.id===p.id)).map(p=>p.pin),
   ] : (map.points??[]).map(p=>({...p,id:p.entityId,type:p.kind==='character'?'person':p.kind}));
   const unitDiagnostics=[];
   if(layout){
@@ -187,7 +207,8 @@ export function referenceGeometry(map, document, {viewMode='author',visibleLocat
     const sceneUnits=document?.units==='meters'?'meters':'cells';
     const metersPerCell=Number.isFinite(map.metersPerCell)&&map.metersPerCell>0?map.metersPerCell:null;
     const represented=new Set(rawPins.map(p=>text(p.entityId??p.id)));
-    for(const p of (map.points??[]).filter(p=>p.mobility==='mobile'||p.kind==='character'||p.kind==='item')){
+    for(const p of (map.points??[]).filter(p=>p.mobility==='mobile'||p.kind==='character'||p.kind==='item'||
+      layout.kind==='overview'&&p.kind==='location'&&['exact','confirmed'].includes(p.markerQuality))){
       // POV 下隐藏载具既不进画面，也不产生诊断（诊断同样可能泄露实体身份）。
       if((viewMode==='pov'||p.mobility==='mobile')&&p.hidden===true||represented.has(text(p.entityId)))continue;
       const converted=toScenePoint(p,'cells',sceneUnits,metersPerCell);
@@ -200,7 +221,8 @@ export function referenceGeometry(map, document, {viewMode='author',visibleLocat
       represented.add(text(p.entityId));
     }
   }
-  const uniquePins=[...new Map(rawPins.filter(finite).map(p=>[`${p.type}:${p.entityId??p.id}`,p])).values()];
+  // 当前容器由标题与已有墙体/边界说明，不再把自己当成图内的子地点。
+  const uniquePins=[...new Map(rawPins.filter(p=>finite(p)&&text(p.entityId??p.id)!==text(map.containerLocationId)).map(p=>[`${p.type}:${p.entityId??p.id}`,p])).values()];
   /**
    * M6-03③：示意坐标不许被「升格」成精确。
    *
@@ -217,11 +239,36 @@ export function referenceGeometry(map, document, {viewMode='author',visibleLocat
   if(layout?.kind==='city') {
     kind='city';
     const river=layout.river;
-    geo={districts:(layout.districts??[]).filter(d=>d.polygon?.length>=3&&d.polygon.every(finite)).map((d,i)=>({id:d.id,name:d.name,c:COLORS[i%COLORS.length],pts:d.polygon.map(xy)})),
+    const knownAreas=new Map((map.points??[]).map(p=>[p.entityId,p.area?.quality]));
+    const recordedFootprints=new Map((map.points??[]).flatMap(p=>{
+      const area=p.area;
+      if(p.kind!=='location'||(viewMode==='pov'&&p.hidden)||area?.kind!=='polygon'||
+        !['confirmed','exact'].includes(area.quality)||!(area.points?.length>=3))return [];
+      const points=area.points.map(q=>toScenePoint(q,'cells',document.units,map.metersPerCell));
+      return points.every(Boolean)?[[p.entityId,points.map(xy)]]:[];
+    }));
+    const calibrated=metric>0&&['confirmed','exact'].includes(document?.metricQuality??map.scaleQuality);
+    const districts=(layout.districts??[]).filter(d=>d.polygon?.length>=3&&d.polygon.every(finite));
+    const terrainKinds=new Map([['lake','water'],['forest','forest'],['woods','woods']]);
+    const cityTerrain=new Map(naturalTerrain.map(({pin,...area})=>[area.id,area]));
+    for(const d of districts){
+      if(terrainKinds.has(d.role)&&!cityTerrain.has(d.id))cityTerrain.set(d.id,{id:d.id,name:d.name,kind:terrainKinds.get(d.role),pts:d.polygon.map(xy)});
+    }
+    geo={districts:districts.filter(d=>!cityTerrain.has(d.id)).map((d,i)=>cityLocality({id:d.id,name:d.name,c:COLORS[i%COLORS.length],quality:['confirmed','exact'].includes(knownAreas.get(d.id))?knownAreas.get(d.id):d.quality,site:finite(d.site)?xy(d.site):null,pts:d.polygon.map(xy)},{template:typeof layout.structureKey==='string'&&!calibrated&&!layout.streetPattern,hasBuildings:(layout.buildings??[]).some(b=>!b.decorative&&b.districtId===d.id)})),
       river:river?Array.from({length:41},(_,i)=>{const y=(river.height??b.h)*i/40;return xy({x:river.cx+Math.sin((y/(river.height||b.h)*2-.35)*Math.PI)*river.amplitude,y});}):null,
       riverWidth:river?.width?river.width*scale:null,wallPoints:(layout.wall??[]).filter(finite).map(xy),
-      cityBuildings:(layout.buildings??[]).filter(p=>!p.decorative).map(r=>({...rect(r),id:r.id,name:r.name})),
-      avenues:(layout.roads??[]).filter(r=>finite(r.from??r.a)&&finite(r.to??r.b)).map(r=>({from:xy(r.from??r.a),to:xy(r.to??r.b)})),pois:[]};
+      surface:layout.streetPattern&&[...cityTerrain.values()].some(d=>d.kind==='forest'||d.kind==='woods')?'forest':map.defaultTerrain,
+      streetPattern:layout.streetPattern,
+      cityTerrain:[...cityTerrain.values()],
+      cityRiverArea:(layout.riverPolygon??[]).filter(finite).map(xy),
+      cityBridges:(layout.segments??[]).filter(s=>s.kind==='bridge'&&finite(s.a)&&finite(s.b)).map(s=>({
+        roadId:s.roadId,points:[xy(s.a),xy(s.b)],width:Number.isFinite(s.width)&&s.width>0?s.width*scale:null,
+      })),
+      templateCity:typeof layout.structureKey==='string'&&!calibrated,
+      cityBuildings:(layout.buildings??[]).filter(p=>!p.decorative).map(r=>({...rect(r),id:r.id,name:r.name,quality:r.quality,
+        proxy:placementOf(r)==='proxy',pts:recordedFootprints.get(r.id)})),
+      cityBlocks:(layout.buildings??[]).filter(p=>p.decorative).map(r=>({...rect(r),decorative:true})),
+      avenues:(layout.roads??[]).filter(r=>finite(r.from??r.a)&&finite(r.to??r.b)).map(r=>({id:r.id,name:r.name,kind:r.kind,quality:r.quality??'layout',width:Number.isFinite(r.width)&&r.width>0?r.width*scale:null,from:xy(r.from??r.a),to:xy(r.to??r.b)})),pois:[]};
   } else if(layout?.kind==='overview') {
     // A SQL overview already contains validated geometry. Keep its paths and
     // footprints instead of reducing the whole map to unconnected markers.
@@ -246,6 +293,8 @@ export function referenceGeometry(map, document, {viewMode='author',visibleLocat
         const proxy=placementOf(s)==='proxy';
         return {id:text(s.id),name:text(s.name),c:COLORS[i%COLORS.length],
           role:text(s.role)||null,
+          // Only locked polygons and dimensioned shapes describe a building's footprint.
+          hasFootprint:['confirmed','exact'].includes(s.quality??s.area?.quality)||(s.w>0&&s.h>0),
           quality:proxy?'proxy':text(s.quality||s.area?.quality)||qualityById.get(s.id)||'estimated',
           proxy,placement:proxy?'proxy':null,
           locked:s.locked&&finite(s.locked)?xy(s.locked):null,
@@ -268,6 +317,8 @@ export function referenceGeometry(map, document, {viewMode='author',visibleLocat
       selfArea:(()=>{
         const sa=layout.selfArea;
         if(!sa||typeof sa!=='object'||!Array.isArray(sa.polygon)||sa.polygon.length<3||!sa.polygon.every(finite))return null;
+        // frame 是计算画布，不是场地轮廓；旧存档的兜底矩形也不能当边界显示。
+        if(sa.source!=='canonical'&&sa.quality!=='confirmed')return null;
         const owner=text(sa.locationId);
         if(!author&&!(owner&&visible.has(owner)))return null;
         return {locationId:owner||null,name:text(sa.name)||null,
@@ -301,7 +352,7 @@ export function referenceGeometry(map, document, {viewMode='author',visibleLocat
      * `solid` 只反映场景给了什么，不替场景编造。
      */
     const furnSource=(layout.groups??[]).filter(Boolean).length
-      ? (layout.groups??[]).filter(Boolean).flatMap(g=>(g.bodies??[]).filter(Boolean).map(b=>({body:b,groupId:b.groupId??g.id,roomId:b.roomId??g.roomId})))
+      ? (layout.groups??[]).filter(Boolean).flatMap(g=>(g.bodies??[]).filter(Boolean).map((b,i)=>({body:b,groupId:b.groupId??g.id,roomId:b.roomId??g.roomId,label:i===0&&!(layout.items??[]).some(item=>item.asFurniture&&item.containerId===g.id)?text(g.name):''})))
       : (layout.bodies??[]).filter(Boolean).map(b=>({body:b,groupId:b.groupId??null,roomId:b.roomId??null}));
     const activeRooms=new Set((layout.actors??[]).filter(a=>a.isProtagonist===true||protagonistIds.has(a.id)).map(a=>a.roomId));
     geo={corridor:{...corridor,
@@ -310,7 +361,7 @@ export function referenceGeometry(map, document, {viewMode='author',visibleLocat
       entityId:layout.corridor?.entityId??null,name:text(layout.corridor?.name)||null,
       y:corridor.y+corridor.h/2},
       hostArea:hostArea?{...rect(hostArea),id:hostArea.id,name:hostArea.name}:null,
-      rooms:[...functionalAreas.map(r=>({...rect(r),id:r.id,name:r.name,kind:'other',status:r.quality==='confirmed'?'功能分区':'功能分区 · 估计',tint:'57,224,160',live:false})),...(layout.rooms??[]).filter(r=>r.id!==hostArea?.id).map((r,i)=>({...rect(r),id:r.id,name:r.name,kind:r.id===map.containerLocationId&&map.containerLocationKind==='vehicle'?'vehicle':'room',
+      rooms:[...functionalAreas.map(r=>({...rect(r),id:r.id,name:r.name,kind:'other',status:r.quality==='confirmed'?'功能分区':'功能分区 · 估计',tint:'57,224,160',live:false})),...(layout.rooms??[]).filter(r=>r.id!==hostArea?.id).map((r,i)=>({...rect(r),id:r.id,name:r.name,isContainer:r.id===map.containerLocationId,kind:r.id===map.containerLocationId&&map.containerLocationKind==='vehicle'?'vehicle':'room',
         role:r.role??'indoor',
         status:text(r.status)||null,
         tint:r.role==='garden'?'57,224,160':r.role==='outdoor'?'255,194,71':['67,224,255','155,107,255','57,224,160','127,212,255'][i%4],live:activeRooms.has(r.id)}))],
@@ -318,10 +369,10 @@ export function referenceGeometry(map, document, {viewMode='author',visibleLocat
       windows:(layout.windows??[]).map((w,i)=>{const [x,y]=xy(w);return {id:text(w.id)||`window:${i}`,roomId:text(w.roomId)||null,x,y,w:(Number.isFinite(w.width)?w.width:1.2)*scale};}),
       lamps:(layout.lamps??[]).map((l,i)=>{const [x,y]=xy(l);return {id:text(l.id)||`light:${i}`,roomId:text(l.roomId)||null,x,y,
         elevation:Number.isFinite(l.elevation)?l.elevation:null};}),
-      furn:furnSource.map(({body,groupId,roomId},i)=>{
+      furn:furnSource.map(({body,groupId,roomId,label},i)=>{
         const r=rect(body),type=text(body.type)||null;
         return {id:text(body.id)||`${text(groupId)||'furn'}:${type??'decor'}:${i}`,
-          name:text(body.name),type,t:type?LEGACY_FURN_CLASS[type]??type:'decor',
+          name:text(body.name),label:text(label),type,t:type?LEGACY_FURN_CLASS[type]??type:'decor',
           gid:text(groupId)||null,roomId:text(roomId)||null,
           // POV 清洗会把 body.type 剥掉：此时不猜它是什么，明确标 detail=false，
           // 让渲染层画中性块而不是编一个「桌子」出来。
@@ -330,6 +381,21 @@ export function referenceGeometry(map, document, {viewMode='author',visibleLocat
           proxy:placementOf(body)==='proxy',
           r:[r.x,r.y,r.x+r.w,r.y+r.h]};
       })};
+  }
+  if (['city','district'].includes(containerKind) && (layout?.kind === 'city' || layout?.kind === 'overview')) {
+    const visible = new Set(visibleLocationIds);
+    const routePaths = new Map((geo.overviewRoutes ?? []).map(route => [route.id, route.points]));
+    geo.townRoutes = (map.routes ?? []).flatMap(route => {
+      if (!['road', 'path'].includes(route.kind)) return [];
+      if (viewMode === 'pov' && (route.hidden || !visible.has(route.fromLocationId) || !visible.has(route.toLocationId))) return [];
+      const geometry = route.geometry;
+      let points = routePaths.get(route.routeId);
+      if (geometry?.mapId === map.mapId && geometry.points?.length >= 2) {
+        const converted = geometry.points.map(p => toScenePoint(p, geometry.units, document.units, map.metersPerCell));
+        if (converted.every(Boolean)) points = converted.map(xy);
+      }
+      return points ? [{ id: route.routeId, kind: route.kind, points, status: route.status, quality: route.geometryQuality }] : [];
+    });
   }
   return {kind,geo,marks,metric,
     // N03：跨单位又缺尺度时不下发坏坐标，但保留可定位的提示（POV 下隐藏对象连提示都不产生）。
@@ -444,7 +510,13 @@ export function projectReferenceData({state={},mapView,sceneView,catalogView,tas
     for(const mark of n.marks){if(mark.type==='poi'){const location=locationMap.get(mark.id),target=nodes.get(location?.childMapIds[0]);mark.node=target&&target!==n?{id:target.id,known:target.known!==false}:null;mark.placeId=mark.id;if(mobileIds.has(mark.id)){mark.type='vehicle';mark.sub=location.anchorLocationId?'停靠载具':'载具位置';}}}
   }
   projectMapContext(nodes,out.LOCATIONS,{inTransit});
-  projectSpaceNavigation(nodes,out.LOCATIONS,{scenes});
+  projectSpaceNavigation(nodes,out.LOCATIONS,{scenes,maps});
+  projectLocalSiteMaps(nodes,out.LOCATIONS,{maps});
+  for (const node of nodes.values()) {
+    const plan = townPlan(node,locationMap);
+    if (plan) node.geo.townPlan = plan;
+  }
+  projectExplorationMaps(nodes,out.LOCATIONS,{maps,viewMode});
   const mapAt=id=>locationMap.get(id)?.childMapIds[0]??locationMap.get(id)?.mapId??null;
   out.CAST=catalog.filter(c=>c.entityKind==='character').map((c,i)=>{const p=pointIndex.get(c.entityId);return {id:c.entityId,name:c.name,initial:Array.from(c.name??'人').at(-1)||'人',role:p?.isProtagonist?'主角':'人物',c:COLORS[i%COLORS.length],
     state:c.locationId?'present':'unknown',tag:'已记录',locationId:c.locationId,mapNodeId:p?.mapId??mapAt(c.locationId)??c.mapId,description:c.summary??'',doing:'尚无行动记录',mind:'尚无后台想法记录',carry:[],known:true,

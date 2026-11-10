@@ -20,7 +20,7 @@ import { AtlasDbError, queryBound } from './atlas-db-runtime.ts';
 import { decodeRow } from './atlas-db-codec.ts';
 import type { ApplyGroupsContext, ApplyGroupsResult } from './atlas-db-commit.ts';
 import { reconcileOccupantsSpec, placeLooseItems } from './atlas-spatial-occupants.ts';
-import { applySceneGroup, buildSceneMutation, compileSceneGroup, collectMapLocations } from '../vendor/atlas-spatial/index.mjs';
+import { applySceneGroup, buildSceneMutation, compileSceneGroup, collectMapLocations, collectTownParcels } from '../vendor/atlas-spatial/index.mjs';
 import {
   SPATIAL_REQUEST_KEY,
   alignSqlFrameToPhysicalSize,
@@ -528,8 +528,12 @@ export function collectSceneMemberIds(input: {
   // 不能因此把本图里的容器房间、家具与直接位于容器的角色当成已经搬走。
   const currentMap = maps.find((row) => String(row.id) === mapId && String(row.status ?? 'active') === 'active');
   const ownContainer = currentMap ? containerKey(currentMap.container_location_id, locationIds) : null;
-  const memberLocations = new Set<string>(currentMap
-    ? collectMapLocations({ mapRow: currentMap, maps, locations }).map((row) => String(row.id)) : []);
+  const directMembers = currentMap ? collectMapLocations({ mapRow: currentMap, maps, locations }) : [];
+  const memberLocations = new Set<string>(directMembers.map(row => String(row.id)));
+  const scene = normalizeFrame(currentMap?.frame_json).atlasScene as { layout?: { streetPattern?: string } } | undefined;
+  if(currentMap&&scene?.layout?.streetPattern==='main-street'){
+    for(const row of collectTownParcels(directMembers,locations,String(currentMap.branch_id)))memberLocations.add(String(row.id));
+  }
   if (ownContainer) memberLocations.add(ownContainer);
   const routeRows = input.routes ?? [];
   const memberRoutes = new Set(routeRows.filter((row) => String(row.map_id ?? '') === mapId && row.status !== 'closed').map((row) => String(row.id)));
@@ -855,7 +859,7 @@ export function applyPendingSpatialRequests(input: ApplyPendingInput): ApplyPend
           expectedRowRev: Number(mapRow.row_rev ?? 1),
           turnId,
           operationId: `${job.operationId}:fit`,
-          source: { kind: basis, referenceId: spaceSize.locationId },
+          source: { kind: basis, referenceId: spaceSize.locationId, quality: spaceSize.resolution.quality },
         });
         issues.push(...alignment.issues);
         // 空间权威（作者确认 / canonical）与幅面表达不了时：**明确列冲突并停止这张图**，

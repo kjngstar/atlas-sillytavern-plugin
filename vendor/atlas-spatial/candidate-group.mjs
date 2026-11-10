@@ -1,9 +1,11 @@
-import {buildLayoutContext} from './host-context.mjs';
+import {buildLayoutContext,readSpaceCanonical} from './host-context.mjs';
 import {generateFloor,generateCity,generateOverview} from './generation.mjs';
 import {buildSceneMutation,sceneLocationGeometry,canonicalForScene} from './storage.mjs';
 import {projectChildFurnishing} from './space-projection.mjs';
+import {collectMapLocations,collectTownParcels} from './map-membership.mjs';
 import {clone,finite,plain,diagnostic,failure,stable,parseSpaceLocalId,FRAME_SPACE_CANONICAL_KEY,bytes,LIMITS,readMetricDimensions} from './contracts.mjs';
 const GENERATORS={floor:generateFloor,city:generateCity,overview:generateOverview};
+const readJson=value=>{try{return typeof value==='string'?JSON.parse(value):value;}catch{return null;}};
 /** Compile one layout request to the existing AtomicGroup shape. No database writes. */
 export function compileSceneGroup({request,scope,currentScope,mapRow,locations,characters,items,routes=[],maps=[],turnId,operationId,spaceSize=null,childSpaces={},autoPlan=false,planningProjection=false}={}){
   try{
@@ -11,11 +13,37 @@ export function compileSceneGroup({request,scope,currentScope,mapRow,locations,c
   if(!generate)return failure('LAYOUT_KIND_UNSUPPORTED','$.request.kind','使用 floor/city/overview；其他空间沿用现有轮廓');
   const built=buildLayoutContext({scope,mapRow,maps,locations,characters,items,routes});if(!built.ok)return built;
   const dimensionFacts=Object.fromEntries((locations??[]).filter(l=>l.branch_id===scope.branchId&&l.status==='active'&&l.map_id===mapRow.id).flatMap(l=>{
-    const area=typeof l.area_geometry_json==='string'?JSON.parse(l.area_geometry_json):l.area_geometry_json;
+    const area=readJson(l.area_geometry_json);
     const size=area?.quality==='confirmed'?readMetricDimensions(area):null;
     return size?[[l.id,{...size,quality:'confirmed',source:'author'}]]:[];
   }));
   const ctx={...built.context,currentScope,childSpaces:{...childSpaces,...dimensionFacts},autoPlan,planningProjection},spec=clone(request.spec),membershipIssues=[];
+  if(request.kind==='city'&&(spec.streetPattern??(spec.rebuild===true?undefined:ctx.previousScene?.constraints?.streetPattern))==='main-street'){
+    const members=collectMapLocations({mapRow,maps,locations});
+    const parcels=collectTownParcels(members,locations,scope.branchId).filter(row=>row.map_id!==mapRow.id);
+    if(autoPlan)ctx.townParcels=parcels;
+    for(const row of parcels){
+      ctx.locationsById[row.id]=row;
+      ctx.placement[row.id]='proxy';
+      const area=readJson(row.area_geometry_json);
+      const size=readMetricDimensions(area);
+      if(size&&area.quality==='confirmed')ctx.childSpaces[row.id]=size;
+      else if(!ctx.childSpaces[row.id]){
+        const child=maps.find(map=>map.branch_id===scope.branchId&&map.status==='active'&&map.container_location_id===row.id);
+        const canonical=readSpaceCanonical(readJson(child?.frame_json)?.[FRAME_SPACE_CANONICAL_KEY],row.id);
+        if(canonical?.size)ctx.childSpaces[row.id]=canonical.size;
+      }
+    }
+    const bridgeIds=new Set(members.filter(row=>row.map_id===mapRow.id&&row.mobility!=='mobile'
+      &&row.kind==='other'&&(row.terrain==='bridge'||/(?:桥|\bbridge)$/iu.test(String(row.name??'').trim()))
+      &&!ctx.locks.points[row.id]&&!ctx.locks.areas[row.id]).map(row=>row.id));
+    if(autoPlan)ctx.townBridgeConnections=routes.filter(row=>row.branch_id===scope.branchId&&row.map_id===mapRow.id
+      &&row.status!=='closed'&&['road','path'].includes(row.kind)).flatMap(row=>{
+      const from=row.from_location_id,to=row.to_location_id;
+      if(bridgeIds.has(from))return [{id:from,districtId:to}];
+      return bridgeIds.has(to)?[{id:to,districtId:from}]:[];
+    });
+  }
   // P12/R03 §19.2：宿主解析出的尺寸权威（按「作者确认 → canonical → 父图足迹 → 首次估计」的顺序）
   // 是**本轮生成的物理依据**。发生确认矛盾时宿主选的是作者事实，而 frame 里的 canonical 可能还是
   // 待裁决的旧事实 —— 生成器不能拿旧账本去画新图（那会画出另一个物理尺寸，等于发布半边变化）。
@@ -82,6 +110,48 @@ export function compileSceneGroup({request,scope,currentScope,mapRow,locations,c
     if(stable([before.grid_x,before.grid_y,before.coord_precision,area])===stable([after.grid_x,after.grid_y,after.coord_precision,after.area_geometry_json]))continue;
     after.row_rev=before.row_rev+1;after.updated_turn_id=turnId;
     mutations.push({table:'locations',rowId:before.id,before:clone(before),after,sourceOpIds:[operationId],basis:{kind:'layout',mapId:mapRow.id,quality:geo.precision}});readSet.push({table:'locations',rowId:before.id,rowRev:before.row_rev});
+  }
+  if(result.scene.layout.kind==='overview'){
+    // The read view hydrates routes from SQL. Publish the generated links in
+    // the same atomic group so a successfully saved map keeps its roads.
+    const scale=result.scene.units==='meters'?result.scene.metersPerCell:1;
+    if(finite(scale)&&scale>0)for(const link of result.scene.layout.routes??[]){
+      const before=routes.find(r=>r.id===link.id&&r.branch_id===scope.branchId&&r.map_id===mapRow.id);
+      if(!before||before.status==='closed'||link.path?.length<2)continue;
+      const hasGeometry=before.geometry_json!=null&&before.geometry_json!=='null';
+      if(before.geometry_quality==='confirmed'&&hasGeometry)continue;
+      const geometry={kind:'line',coordinates:link.path.map(p=>[p.x/scale,p.y/scale])};
+      if(stable(readJson(before.geometry_json))===stable(geometry))continue;
+      const after={...clone(before),geometry_json:geometry,geometry_quality:'estimated',geometry_rev:Number(before.geometry_rev??0)+1,row_rev:Number(before.row_rev??0)+1,updated_turn_id:turnId};
+      mutations.push({table:'routes',rowId:before.id,before:clone(before),after,sourceOpIds:[operationId],basis:{kind:'layout-route',mapId:mapRow.id,quality:'estimated'}});
+      readSet.push({table:'routes',rowId:before.id,rowRev:before.row_rev});
+    }
+  }
+  if(result.scene.layout.kind==='city'){
+    const positions=new Map(locations.map(l=>[l.id,l]));
+    for(const mutation of mutations)if(mutation.table==='locations')positions.set(mutation.rowId,mutation.after);
+    const anchor=id=>{
+      const seen=new Set();let row=positions.get(id);
+      while(row&&!seen.has(row.id)){
+        seen.add(row.id);
+        if(row.mobility==='mobile'){row=positions.get(row.anchor_location_id);continue;}
+        if(row.map_id===mapRow.id&&finite(row.grid_x)&&finite(row.grid_y)&&row.coord_precision!=='unknown')return [row.grid_x,row.grid_y];
+        row=positions.get(row.parent_location_id);
+      }
+      return null;
+    };
+    for(const before of routes){
+      if(before.branch_id!==scope.branchId||before.map_id!==mapRow.id||before.status==='closed'||before.geometry_quality==='confirmed')continue;
+      const a=anchor(before.from_location_id),b=anchor(before.to_location_id);
+      if(!a||!b||Math.hypot(a[0]-b[0],a[1]-b[1])<1e-7)continue;
+      const geometry={kind:'line',coordinates:[a,b]};
+      let raw=before.geometry_json;
+      if(typeof raw==='string'){try{raw=JSON.parse(raw);}catch{raw=null;}}
+      if(stable(raw)===stable(geometry))continue;
+      const after={...clone(before),geometry_json:geometry,geometry_quality:'estimated',geometry_rev:Number(before.geometry_rev??0)+1,row_rev:Number(before.row_rev??0)+1,updated_turn_id:turnId};
+      mutations.push({table:'routes',rowId:before.id,before:clone(before),after,sourceOpIds:[operationId],basis:{kind:'layout-route',mapId:mapRow.id,quality:'estimated'}});
+      readSet.push({table:'routes',rowId:before.id,rowRev:before.row_rev});
+    }
   }
   for(const room of [...(result.scene.layout.rooms??[]),...(result.scene.layout.corridor?.entityId?[{...result.scene.layout.corridor,id:result.scene.layout.corridor.entityId}]:[])]){
     if(room.placement==='proxy')continue;

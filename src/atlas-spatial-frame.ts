@@ -220,6 +220,8 @@ export type FrameFitInput = {
   metersPerCell?: number | null;
   minLongSide?: number;
   tolerance?: number;
+  /** Estimated footprints may use an integer grid within the same tolerance. */
+  allowApproximate?: boolean;
 };
 
 export type FrameFitResult = {
@@ -240,7 +242,8 @@ const fitIssue = (code: string, message: string): Issue => ({ code, path: '$.fra
  * - 优先**保留**已匹配的现有帧面：cols/rows 与 mpp 都能在两轴 0.5% 内表达该尺寸 → `changed:false`。
  * - 需要重算时按 `width:height` 的最简整数比放大（长边至少 `minLongSide` 格），
  *   因此两轴是**同一个** mpp，不存在「一轴对、一轴偏」的帧面。
- * - 比值本身超出 10000 格 → `FRAME_FIT_UNREPRESENTABLE`：**宁可不表达，也不把确认尺寸量化成另一事实**。
+ * - 最简比超出 10000 格时，仅估计尺寸可以在同一误差范围内选近似整数格。
+ *   确认尺寸或无法满足误差上限的估计仍返回 `FRAME_FIT_UNREPRESENTABLE`。
  */
 export function fitFrameToPhysicalSize(input: FrameFitInput): FrameFitResult {
   const tolerance = typeof input.tolerance === 'number' && input.tolerance > 0 ? input.tolerance : FRAME_FIT_TOLERANCE;
@@ -272,12 +275,21 @@ export function fitFrameToPhysicalSize(input: FrameFitInput): FrameFitResult {
   const ratioW = w / factor;
   const ratioH = h / factor;
   const multiple = Math.max(1, Math.ceil(minLong / Math.max(ratioW, ratioH)));
-  const cols = ratioW * multiple;
-  const rows = ratioH * multiple;
+  let cols = ratioW * multiple;
+  let rows = ratioH * multiple;
+  let metersPerCell = input.widthM / cols;
+  if (input.allowApproximate && Math.max(cols, rows) > FRAME_FIT_MAX_CELLS) {
+    const wide = input.widthM >= input.heightM;
+    const aspect = wide ? input.widthM / input.heightM : input.heightM / input.widthM;
+    // A rounded short side needs at least half a cell's worth of tolerance.
+    const longSide = Math.min(FRAME_FIT_MAX_CELLS, Math.ceil(Math.max(minLong, aspect / (2 * tolerance))));
+    const shortSide = Math.max(FRAME_FIT_MIN_CELLS, Math.round(longSide / aspect));
+    [cols, rows] = wide ? [longSide, shortSide] : [shortSide, longSide];
+    metersPerCell = wide ? input.widthM / cols : input.heightM / rows;
+  }
   if (cols < FRAME_FIT_MIN_CELLS || rows < FRAME_FIT_MIN_CELLS || cols > FRAME_FIT_MAX_CELLS || rows > FRAME_FIT_MAX_CELLS) {
     return { ok: false, cols: null, rows: null, metersPerCell: null, changed: true, issues: [fitIssue('FRAME_FIT_UNREPRESENTABLE', `宽高比 ${ratioW}:${ratioH} 在 1–${FRAME_FIT_MAX_CELLS} 整数格内无法表达（需要 ${cols}×${rows}）：不量化成另一个事实，先让作者校正尺寸或幅面`)] };
   }
-  const metersPerCell = input.widthM / cols;
   if (!near(cols * metersPerCell, input.widthM) || !near(rows * metersPerCell, input.heightM)) {
     return { ok: false, cols: null, rows: null, metersPerCell: null, changed: true, issues: [fitIssue('FRAME_FIT_UNREPRESENTABLE', `整数格幅面 ${cols}×${rows} 无法在 ${(tolerance * 100).toFixed(1)}% 内保持 ${input.widthM}×${input.heightM} 米`)] };
   }
@@ -295,7 +307,7 @@ export type AlignFrameInput = {
   turnId: string;
   operationId: string;
   /** 尺寸来源说明（进诊断与 scale_basis_json，便于按来源查回来）。 */
-  source?: { kind: string; referenceId?: string | null } | null;
+  source?: { kind: string; referenceId?: string | null; quality?: 'estimated' | 'confirmed' } | null;
 };
 
 export type AlignFrameResult = {
@@ -341,6 +353,7 @@ export function alignSqlFrameToPhysicalSize(input: AlignFrameInput): AlignFrameR
     cols: frame.cols,
     rows: frame.rows,
     metersPerCell: typeof before.meters_per_cell === 'number' ? before.meters_per_cell : null,
+    allowApproximate: input.source?.quality === 'estimated' && Number(before.scale_locked ?? 0) !== 1 && before.scale_quality !== 'confirmed',
   });
   if (!fit.ok) {
     return { ok: false, status: 'refused', mutation: null, fit, issues: fit.issues.map((item) => spatialIssue(item, ctx)) };

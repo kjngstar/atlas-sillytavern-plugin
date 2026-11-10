@@ -45,11 +45,11 @@ export type OccupantsInput = {
    * 账本是「哪件真实物品摆在哪件陈设上」的持久记录。请求省略 `items` 时，账本里的绑定必须
    * 顶上来——否则对账会把已摆好的物品判成「地面物品」，既掉到地上、也把账本里的 `itemId` 抹掉。
    */
-  spaceCanonical?: { furnishing?: Array<{ localId?: unknown; itemId?: unknown }> } | null;
+  spaceCanonical?: { furnishing?: Array<{ localId?: unknown; itemId?: unknown; asFurniture?: unknown }> } | null;
 };
 
 export type ActorSpec = { id: string; roomId: string; near?: string; position?: { x: number; y: number } };
-export type ItemSpec = { id: string; on: string };
+export type ItemSpec = { id: string; on: string; asFurniture?: boolean };
 
 /** 没有支撑家具组的地面物品：W05 用 placeMarkers 在房间可通行区里找点。 */
 export type LooseItemMarker = { id: string; roomId: string; name: string; type: 'item' };
@@ -86,7 +86,7 @@ function signature(actors: ActorSpec[], items: ItemSpec[]): string {
     .map((x) => `${x.id}>${x.roomId}${x.near ? `#${x.near}` : ''}`);
   const i = [...items]
     .sort((l, r) => (l.id < r.id ? -1 : l.id > r.id ? 1 : 0))
-    .map((x) => `${x.id}@${x.on}`);
+    .map((x) => `${x.id}@${x.on}${x.asFurniture ? '#furniture' : ''}`);
   return `${a.join(',')}|${i.join(',')}`;
 }
 
@@ -192,7 +192,7 @@ export function reconcileOccupantsSpec(input: OccupantsInput): OccupantsResult {
       if (!plain(raw)) continue;
       const id = text(raw.id);
       const on = text(raw.on);
-      if (id && on) prevItems.set(id, { id, on });
+      if (id && on) prevItems.set(id, { id, on, ...(typeof raw.asFurniture === 'boolean' ? { asFurniture: raw.asFurniture } : {}) });
     }
   };
   collectItems(requestSpec.items);
@@ -200,12 +200,14 @@ export function reconcileOccupantsSpec(input: OccupantsInput): OccupantsResult {
 
   /* ── P12/R03 §19.4：空间权威里的「真实物品 ↔ 陈设」绑定 ── */
   const ledgerBound = new Map<string, string>();
+  const ledgerFurniture = new Set<string>();
   for (const entry of rows(input.spaceCanonical?.furnishing as unknown as SqlRow[])) {
     const localId = text(entry?.localId);
     const itemId = text(entry?.itemId);
     if (!localId || !itemId) continue;
     const parsed = parseSpaceLocalId(localId);
     if (parsed && parsed.contentId) ledgerBound.set(itemId, parsed.contentId);
+    if (entry.asFurniture === true) ledgerFurniture.add(itemId);
   }
 
   /* ── 在途判定：本轮结算把他/它放到了别处 ── */
@@ -307,7 +309,8 @@ export function reconcileOccupantsSpec(input: OccupantsInput): OccupantsResult {
     const actualRoom = physicalRoom(text(row.location_id));
     if (on && groupIds.has(on) && groupRoomId && actualRoom && groupRoomId === actualRoom) {
       seenItems.add(id);
-      items.push({ id, on });
+      const asFurniture = raw.asFurniture ?? prevItems.get(id)?.asFurniture ?? ledgerFurniture.has(id);
+      items.push({ id, on, ...(asFurniture === true ? { asFurniture: true } : {}) });
       continue;
     }
     // 支撑组没了或跨房间：改走通用地面摆放，不删数据库行。
@@ -327,7 +330,7 @@ export function reconcileOccupantsSpec(input: OccupantsInput): OccupantsResult {
     const boundOn = ledgerBound.get(id) ?? '';
     if (boundOn && groupIds.has(boundOn) && text(groupRoom.get(boundOn)) === actualRoom) {
       seenItems.add(id);
-      items.push({ id, on: boundOn });
+      items.push({ id, on: boundOn, ...(ledgerFurniture.has(id) ? { asFurniture: true } : {}) });
       continue;
     }
     looseItemMarkers.push({ id, roomId: actualRoom, name: text(row.name) || id, type: 'item' });

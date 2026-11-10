@@ -20,6 +20,7 @@ import { querySpatialScene } from '../src/atlas-spatial-views.ts';
 import { queryCatalog } from '../src/atlas-catalog-views.ts';
 import { querySpatialFlows } from '../src/atlas-spatial-flow-views.ts';
 import { queryTasks } from '../src/atlas-task-views.ts';
+import * as Kit from '../vendor/atlas-spatial/index.mjs';
 
 const SQL = await (await import('sql.js')).default();
 const BRANCH = IDS.branchMain;
@@ -41,6 +42,38 @@ async function seeded() {
 function povCtx(ctx) {
   return { ...ctx, viewMode: 'pov' };
 }
+
+test('城市真实点投影显示开放码头与停靠船，缺失建筑仍缺失，POV 不泄露未知点',async()=>{
+  const {seed,ctx}=await seeded();
+  try{
+    const db=seed.db,base=queryBound(db,'SELECT * FROM locations WHERE branch_id=? AND id=?',[BRANCH,IDS.L3])[0];
+    addKeys(db,'location',['CITY_PIER','CITY_BOAT','CITY_MISSING']);
+    insertRows(db,'locations',[
+      {...base,id:'CITY_PIER',name:'开放码头',kind:'other',parent_location_id:IDS.L2,map_id:IDS.M2,grid_x:20,grid_y:30,coord_precision:'layout',area_geometry_json:null},
+      {...base,id:'CITY_BOAT',name:'停靠船',kind:'vehicle',mobility:'mobile',anchor_location_id:'CITY_PIER',parent_location_id:IDS.L2,map_id:IDS.M2,grid_x:null,grid_y:null,coord_precision:'unknown',area_geometry_json:null},
+      {...base,id:'CITY_MISSING',name:'未画建筑',kind:'building',parent_location_id:IDS.L2,map_id:IDS.M2,grid_x:40,grid_y:40,coord_precision:'layout',area_geometry_json:{kind:'dimensions',widthM:12,heightM:8,quality:'confirmed',source:'story'}},
+    ]);
+    db.run("UPDATE locations SET kind='district' WHERE branch_id=? AND id=?",[BRANCH,IDS.L2]);
+    db.run("UPDATE locations SET kind='building' WHERE branch_id=? AND id=?",[BRANCH,IDS.L3]);
+    db.run("UPDATE maps SET kind='site',container_location_id=?,meters_per_cell=1,scale_quality='estimated',frame_json=? WHERE branch_id=? AND id=?",[IDS.L2,JSON.stringify({cols:500,rows:300}),BRANCH,IDS.M2]);
+    const mapRow=queryBound(db,'SELECT * FROM maps WHERE branch_id=? AND id=?',[BRANCH,IDS.M2])[0];
+    mapRow.frame_json=JSON.parse(mapRow.frame_json);
+    const scope={chatId:ctx.chatId,branchId:BRANCH,revision:ctx.revision,viewMode:'author'};
+    const built=Kit.buildLayoutContext({scope,mapRow,locations:queryBound(db,'SELECT * FROM locations WHERE branch_id=?',[BRANCH]),characters:[],items:[],routes:[]});
+    const generated=Kit.generateCity({enclosure:'open',riverWidth:0,blocksPerDistrict:0,districts:[{id:IDS.L2,bank:'west',order:0}],buildings:[{id:IDS.L3,districtId:IDS.L2,w:12,h:8}]},built.context);
+    assert.equal(generated.ok,true,JSON.stringify(generated.issues));
+    db.run('UPDATE maps SET frame_json=? WHERE branch_id=? AND id=?',[JSON.stringify({cols:500,rows:300,atlasScene:generated.scene}),BRANCH,IDS.M2]);
+    const before=db.export();
+    const read=viewMode=>querySpatialScene({...ctx,viewMode},{kind:'scene',branchId:BRANCH,mapId:IDS.M2}).items.find(m=>m.mapId===IDS.M2);
+    const author=read('author');
+    for(const id of ['CITY_PIER','CITY_BOAT']){assert.ok(author.scene.layout.pins.some(p=>p.id===id));assert.ok(!author.assessment.missingIds.includes(id));}
+    assert.ok(author.assessment.missingIds.includes('CITY_MISSING'));
+    assert.equal(author.scene.layout.buildings.some(b=>b.id==='CITY_BOAT'),false);
+    const pov=JSON.stringify(read('pov'));
+    assert.ok(!pov.includes('CITY_PIER'));assert.ok(!pov.includes('CITY_BOAT'));
+    assert.deepEqual(db.export(),before,'读投影不能写存档');
+  }finally{seed.close();}
+});
 
 test('POV 人物目录无需认识自己的 knowledge 行即可导航主角，未知远方人物仍不出现',async()=>{
   const {seed,ctx}=await seeded();
@@ -178,6 +211,24 @@ function seedPovKnowledge(db) {
   });
   insertRows(db, 'knowledge', [know('K_L3', 'INFO_L3'), know('K_C3', 'INFO_C3')]);
 }
+
+test('SQL 已进入空房间的人物在只读场景中可见并参与完整性评估，秘密人物仍隔离',async()=>{
+  const {seed,ctx}=await seeded();
+  try{
+    seedPovKnowledge(seed.db);
+    const scene=classroomScene();scene.units='meters';scene.metersPerCell=1;scene.layout.actors=[];scene.layout.items=[];
+    seed.db.run("UPDATE maps SET frame_json=?,meters_per_cell=1,scale_quality='estimated' WHERE branch_id=? AND id=?",[JSON.stringify({cols:20,rows:15,atlasScene:scene}),BRANCH,IDS.M2]);
+    const before=seed.db.export();
+    const author=querySpatialScene(ctx,{kind:'scene',branchId:BRANCH,mapId:IDS.M2}).items.find(m=>m.mapId===IDS.M2);
+    const actor=author.scene.layout.actors.find(a=>a.id===IDS.C1);
+    assert.ok(actor,'已经通过 SQL 到达的人物不能因旧场景未画人而消失');
+    assert.equal(actor.roomId,IDS.L3);assert.equal(actor.x,5);assert.equal(actor.y,6);
+    assert.ok(!author.assessment.missingIds.includes(IDS.C1));
+    const pov=querySpatialScene(povCtx(ctx),{kind:'scene',branchId:BRANCH,mapId:IDS.M2});
+    assert.ok(!JSON.stringify(pov).includes(HIDDEN.actor));
+    assert.deepEqual(seed.db.export(),before,'人物展示投影不得修改存档');
+  }finally{seed.close();}
+});
 
 function writeSceneFrame(db, mapId, scene, extra = {}) {
   const frame = { origin_x: 0, origin_y: 0, reference_width_cells: 20, reference_height_cells: 15, ...extra };

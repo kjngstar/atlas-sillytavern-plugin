@@ -1,4 +1,6 @@
 import * as B from './foundation.mjs';
+import { streetTown } from './street-town.mjs';
+import { INDEPENDENT_FURNISHING_TYPES } from './contracts.mjs';
 
 
   const clone=B.clone, EPS=1e-7;
@@ -41,13 +43,47 @@ import * as B from './foundation.mjs';
   const verticalDoor=d=>d.wall==='east'||d.wall==='west';
   const inward=(d,amount)=>d.interior?pt(d.x,d.y):pt(d.x+(d.wall==='west'?amount:d.wall==='east'?-amount:0),d.y+(d.wall==='south'?-amount:amount));
   const entryRect=(d,width,depth)=>verticalDoor(d)?{x:d.wall==='east'?d.x-depth:d.x,y:d.y-width/2,w:depth,h:width}:{x:d.x-width/2,y:d.wall==='south'?d.y-depth:d.y,w:width,h:depth};
-  const SOLID_TYPES=new Set(['shelf','desk','bench','reading','table','chair','bed','cabinet']);
+  const SOLID_TYPES=new Set(['shelf','desk','bench','reading','table','chair','bed','cabinet','prep-counter',...INDEPENDENT_FURNISHING_TYPES]);
+  const SUPPORT_SURFACES=new Set(['table','desk','shelf','cabinet','bar-counter','bottle-shelf','prep-counter','prep-table','workbench']);
+  const COMPOSITE_MINIMUMS=new Map([['bar',[3.2,2.2]],['kitchen-line',[2.6,.65]],['barrels',[2.1,.65]]]);
+  const WALL_FURNITURE=new Set(['shelf','bottle-shelf','stove','sink','crate','workbench',...COMPOSITE_MINIMUMS.keys()]);
+  function validFurnishingSize({type,w,h}){
+    if(!Number.isFinite(w)||!Number.isFinite(h)||w<=0||h<=0)return false;
+    if(type==='reading')return w>=2&&h>=2;
+    const minimum=COMPOSITE_MINIMUMS.get(type);
+    return !minimum||Math.max(w,h)>=minimum[0]&&Math.min(w,h)>=minimum[1];
+  }
   function makeGroup(f,r,x,y){
-    const group={id:f.id,name:f.name,type:f.type,roomId:r.id,x,y,w:f.w,h:f.h,quality:'layout'},bodies=[];
+    const group={id:f.id,name:f.name,type:f.type,roomId:r.id,x,y,w:f.w,h:f.h,quality:'layout',
+      ...(f.wall?{wall:f.wall}:{}),...(f.nearDoor!==undefined?{nearDoor:f.nearDoor}:{})},bodies=[];
     const add=(type,bx,by,bw,bh)=>bodies.push({id:f.id+':'+type+(bodies.length?':'+bodies.length:''),type,x:bx,y:by,w:bw,h:bh});
     if(f.type==='reading'){
       add('table',x+.55,y+.55,f.w-1.1,f.h-1.1);
       for(const [dx,dy]of [[.1,.72],[f.w-.45,.72],[.1,f.h-1.07],[f.w-.45,f.h-1.07]])add('chair',x+dx,y+dy,.35,.35);
+    }else if(COMPOSITE_MINIMUMS.has(f.type)){
+      const horizontal=f.w>=f.h;
+      const length=horizontal?f.w:f.h, depth=horizontal?f.h:f.w;
+      const part=(type,along,across,width,thickness)=>{
+        if(horizontal)add(type,x+along,y+across,width,thickness);
+        else add(type,x+across,y+along,thickness,width);
+      };
+      if(f.type==='bar'){
+        // Leave the short end open for the staff aisle behind the counter.
+        part('bar-counter',0,depth-.72,length-1.05,.72);
+        part('bottle-shelf',0,0,length-1.05,.42);
+        part('barrel',length-.72,0,.72,.72);
+      }else if(f.type==='kitchen-line'){
+        const stoveWidth=length*.29, prepEnd=length*.79;
+        part('prep-counter',stoveWidth+.04,0,prepEnd-stoveWidth-.08,depth);
+        part('stove',0,0,stoveWidth,depth);
+        part('shelf',prepEnd,0,length-prepEnd,depth);
+      }else{
+        const spacing=length/3;
+        const diameter=Math.min(spacing-.06,depth,.9);
+        for(let index=0;index<3;index++)part('barrel',index*spacing+(spacing-diameter)/2,0,diameter,diameter);
+      }
+    }else if(INDEPENDENT_FURNISHING_TYPES.includes(f.type)){
+      add(f.type,x,y,f.w,f.h);
     }else if(f.type==='table'){
       add('table',x,y,f.w,f.h);
     }else if(f.type==='desk'){
@@ -130,11 +166,15 @@ import * as B from './foundation.mjs';
       const spine=verticalDoor(door)?{x:r.x,y:door.y-aisle/2,w:r.w,h:aisle}:{x:door.x-aisle/2,y:r.y,w:aisle,h:r.h},inner={x:r.x+margin,y:r.y+margin,w:r.w-margin*2,h:r.h-margin*2};
       const swings=roomDoors.map(d=>({id:'swing:'+d.id,roomId:r.id,...entryRect(d,d.width,d.width)}));doorSwings.push(...swings);
       const exact=(spec.actors||[]).filter(a=>a.roomId===r.id&&a.position).map(a=>({id:a.id,...a.position}));
+      const contents=(spec.contents||[]).filter(f=>f.roomId===r.id);
+      const tables=contents.filter(f=>f.type==='table');
+      const seatAnchors=tables.length?tables:contents.filter(f=>f.type==='workbench');
+      const singleTableId=seatAnchors.length===1?seatAnchors[0].id:null;
       const priority=f=>f.locked?2:previous?.groups?.some(g=>g.id===f.id)?1:0;
       // Reserve locked/saved furniture first, then the largest new footprint.
       // Small cabinets must not consume the only accessible counter position
       // merely because their IDs happen to sort before the counter's ID.
-      for(const f of ordered((spec.contents||[]).filter(f=>f.roomId===r.id)).sort((a,b)=>priority(b)-priority(a)||b.w*b.h-a.w*a.h)){
+      for(const f of ordered(contents).sort((a,b)=>priority(b)-priority(a)||Number(!!b.wall||b.nearDoor===true)-Number(!!a.wall||a.nearDoor===true)||b.w*b.h-a.w*a.h)){
         // Legacy doorway hints describe an opening, never a loose floor object.
         // Keep their identity on the structural door rather than inventing a second door.
         if(f.type==='doorway'){
@@ -142,7 +182,7 @@ import * as B from './foundation.mjs';
           else issues.push({id:f.id,code:'DOOR_TARGET_UNSPECIFIED'});
           continue;
         }
-        if(!Number.isFinite(f.w)||!Number.isFinite(f.h)||f.w<=0||f.h<=0||f.type==='reading'&&(f.w<2||f.h<2)){issues.push({id:f.id,code:'DETAIL_DIMENSION_INVALID'});continue;}
+        if(!validFurnishingSize(f)){issues.push({id:f.id,code:'DETAIL_DIMENSION_INVALID'});continue;}
         // 陈设塞不进房间：明确到 ID，绝不能偷偷放大到穿墙。
         if(f.type!=='light'&&f.type!=='decor'&&!f.locked&&(f.w>inner.w+EPS||f.h>inner.h+EPS)&&(f.h>inner.w+EPS||f.w>inner.h+EPS)){issues.push({id:f.id,code:'DETAIL_TOO_LARGE'});continue;}
         // Lights and door openings have non-solid bodies. Their projection can
@@ -159,15 +199,27 @@ import * as B from './foundation.mjs';
         };
         let chosen=null;
         const old=previous?.groups?.find(g=>g.id===f.id&&g.roomId===r.id&&(g.w===f.w&&g.h===f.h||!f.locked&&g.w===f.h&&g.h===f.w));
-        if(old&&(!spec.wallFirst||f.locked)&&(free(old)||!f.locked&&reachablePlacement(old)))chosen=old;
+        const samePlacement=old&&old.wall===f.wall&&!!old.nearDoor===!!f.nearDoor;
+        if(old&&samePlacement&&(!spec.wallFirst||f.locked)&&(free(old)||!f.locked&&reachablePlacement(old)))chosen=old;
         if(f.locked){const q={...f,...f.locked};if(free(q))chosen=q;else{issues.push({id:f.id,code:'DETAIL_LOCK_CONFLICT'});continue;}}
-        const candidates=[];
-        if(!chosen)for(const y of scanAxis(inner.y,inner.y+inner.h-f.h))for(const x of scanAxis(inner.x,inner.x+inner.w-f.w)){
-          const q={x,y,w:f.w,h:f.h};if(free(q)){
-            // Shelves face the outer wall; tables prefer the door-facing half. These are preferences, not coordinates.
-            const score=f.type==='shelf'?Math.abs(y-(r.side==='north'?inner.y:inner.y+inner.h-f.h)):distance(center(q),pt(r.x+r.w*.25,door.y+(r.side==='north'?-2.2:2.2)));
-            candidates.push({q,score});
+        const wallGap=q=>({north:q.y-inner.y,east:inner.x+inner.w-q.x-q.w,
+          south:inner.y+inner.h-q.y-q.h,west:q.x-inner.x})[f.wall];
+        const seatingTable=f.type==='chair'&&!f.wall&&!f.nearDoor&&singleTableId?groups.find(g=>g.id===singleTableId):null;
+        const score=q=>{
+          if(seatingTable){
+            const table=seatingTable, middle=center(table), gap=.4;
+            const seats=[pt(table.x-q.w/2-gap,middle.y),pt(table.x+table.w+q.w/2+gap,middle.y),
+              pt(middle.x,table.y-q.h/2-gap),pt(middle.x,table.y+table.h+q.h/2+gap)];
+            return Math.min(...seats.map(seat=>distance(center(q),seat)));
           }
+          const preferred=WALL_FURNITURE.has(f.type)?Math.abs(q.y-(r.side==='north'?inner.y:inner.y+inner.h-q.h)):
+            distance(center(q),pt(r.x+r.w*.25,door.y+(r.side==='north'?-2.2:2.2)));
+          return (f.wall?wallGap(q)*1000:0)+(f.nearDoor?Math.min(...roomDoors.map(d=>distance(center(q),d)))*10:0)+preferred;
+        };
+        const candidates=[];
+        const orientations=[[f.w,f.h],...((f.wall||f.nearDoor)&&f.w!==f.h?[[f.h,f.w]]:[])];
+        if(!chosen)for(const [w,h] of orientations)for(const y of scanAxis(inner.y,inner.y+inner.h-h))for(const x of scanAxis(inner.x,inner.x+inner.w-w)){
+          const q={x,y,w,h};if(free(q))candidates.push({q,score:score(q)});
         }
         if(!chosen)chosen=candidates.sort((a,b)=>a.score-b.score||a.q.y-b.q.y||a.q.x-b.q.x)[0]?.q;
         // In a narrow carriage a bench or cabinet can fit along the other axis.
@@ -193,9 +245,11 @@ import * as B from './foundation.mjs';
             const wall=q=>Math.min(q.x-inner.x,q.y-inner.y,inner.x+inner.w-q.x-q.w,inner.y+inner.h-q.y-q.h);
             return wall(a)-wall(b)||distance(center(b),door)-distance(center(a),door)||a.y-b.y||a.x-b.x;
           });
+          if(f.wall||f.nearDoor||seatingTable)alternatives.sort((a,b)=>score(a)-score(b));
           for(const q of alternatives){if(chosen||tried++>=64)break;if(reachablePlacement(q))chosen=q;}
         }
         if(!chosen){issues.push({id:f.id,code:'DETAIL_NO_SPACE'});continue;}
+        if(f.wall&&wallGap(chosen)>.26)issues.push({id:f.id,code:'DETAIL_WALL_UNPLACED',severity:'warning'});
         const g=makeGroup({...f,w:chosen.w,h:chosen.h},r,chosen.x,chosen.y);if(f.locked)g.quality='confirmed';groups.push(g);bodies.push(...g.bodies);
       }
       const outerY=r.side==='north'?r.y:r.y+r.h;
@@ -231,7 +285,7 @@ import * as B from './foundation.mjs';
       const corridorGroups=[];
       for(const f of ordered((spec.contents||[]).filter(f=>f.roomId===cid))){
         if(f.type==='doorway'){issues.push({id:f.id,code:'DOOR_TARGET_UNSPECIFIED'});continue;}
-        if(!Number.isFinite(f.w)||!Number.isFinite(f.h)||f.w<=0||f.h<=0){issues.push({id:f.id,code:'DETAIL_DIMENSION_INVALID'});continue;}
+        if(!validFurnishingSize(f)){issues.push({id:f.id,code:'DETAIL_DIMENSION_INVALID'});continue;}
         const old=previous?.groups?.find(g=>g.id===f.id&&g.roomId===cid&&g.w===f.w&&g.h===f.h);
         const free=q=>strips.some(s=>B.contains(s,q))&&!corridorGroups.some(g=>B.intersects(inflate(g,.28),q));
         let chosen=old&&free(old)?old:null;
@@ -254,8 +308,10 @@ import * as B from './foundation.mjs';
       }
     }
     for(const i of spec.items||[]){
-      const g=groups.find(g=>g.id===i.on),b=g?.bodies.find(b=>['table','desk','shelf','cabinet'].includes(b.type));
-      if(b)items.push({...i,...center(b),roomId:g.roomId,type:'item',containerId:g.id,elevation:.8,quality:'layout'});else issues.push({id:i.id,code:'ITEM_CONTAINER_NOT_FOUND'});
+      const g=groups.find(g=>g.id===i.on),b=g?.bodies.find(b=>SUPPORT_SURFACES.has(b.type));
+      if(g&&i.asFurniture===true)items.push({...i,...center(g),roomId:g.roomId,type:'item',containerId:g.id,elevation:0,quality:'layout'});
+      else if(b)items.push({...i,...center(b),roomId:g.roomId,type:'item',containerId:g.id,elevation:.8,quality:'layout'});
+      else issues.push({id:i.id,code:'ITEM_CONTAINER_NOT_FOUND'});
     }
     if(!host&&bare.corridor.h>0)for(let x=1.5;x<spec.width;x+=3)lamps.push({id:'hall-light:'+x,type:'light',roomId:cid||'corridor',x,y:bare.corridor.y+.22,elevation:2.8});
     const knownSpaces=new Set([...bare.rooms.map(r=>r.id),...(cid?[cid]:[]),...(host?[host.id]:[])]);
@@ -294,19 +350,30 @@ import * as B from './foundation.mjs';
     const sorted=cuts.sort((a,b)=>a-b).filter((t,i,a)=>i===0||t-a[i-1]>1e-6),out=[];
     for(let i=1;i<sorted.length;i++){const t0=sorted[i-1],t1=sorted[i];if(t1-t0>1e-6)out.push({a:point(t0),b:point(t1),kind:water(river,point((t0+t1)/2))?'bridge':'road'});}return out;
   }
-  function city(spec,previous=null){
-    if(!Number.isFinite(spec.width)||!Number.isFinite(spec.height)||spec.width<900||spec.height<700||!Number.isFinite(spec.riverWidth)||spec.riverWidth<0||spec.riverWidth>spec.width*.15||!Array.isArray(spec.districts)||!spec.districts.length||new Set(spec.districts.map(d=>d.id)).size!==spec.districts.length||spec.districts.some(d=>!['west','east'].includes(d.bank)||!Number.isFinite(d.order)))return {ok:false,issues:[{id:spec.id,code:'CITY_INPUT_INVALID'}]};
-    const structure = v => JSON.stringify({width:v.width,height:v.height,riverWidth:v.riverWidth,seed:v.seed,districts:ordered(v.districts||[]).map(d=>[d.id,d.bank,d.order])});
+  function city(spec,previous=null,{relaxProximity=false}={}){
+    if(!Number.isFinite(spec.width)||!Number.isFinite(spec.height)||spec.width<=0||spec.height<=0||!Number.isFinite(spec.riverWidth)||spec.riverWidth<0||spec.riverWidth>spec.width*.15||!Array.isArray(spec.districts)||!spec.districts.length||new Set(spec.districts.map(d=>d.id)).size!==spec.districts.length||spec.districts.some(d=>!['west','east'].includes(d.bank)||!Number.isFinite(d.order)))return {ok:false,issues:[{id:spec.id,code:'CITY_INPUT_INVALID'}]};
+    const structure = v => JSON.stringify({
+      width:v.width,height:v.height,riverWidth:v.riverWidth,seed:v.seed,
+      districts:ordered(v.districts||[]).map(d=>v.streetPattern?[d.id,d.bank,d.order,d.role??null]:[d.id,d.bank,d.order]),
+      ...(v.streetPattern?{streetPattern:v.streetPattern}:{}),
+    });
     if(previous?.structureKey && previous.structureKey!==structure(spec))return {ok:false,issues:[{id:spec.id,code:'CITY_STRUCTURE_CHANGE_REQUIRES_REBUILD'}],kept:clone(previous)};
     const w=spec.width,h=spec.height,rng=rand(spec.seed||spec.id),origin=pt(w*.46,h*.5),raw=[];
+    // Template streets and clearances follow the local frame. Registered
+    // building footprints keep their physical dimensions even in a small site.
+    const detailScale=Math.min(1,w/900,h/700),lane=12*detailScale,pad=6*detailScale;
     for(let i=0;i<14;i++){const a=i*Math.PI/7,rr=.95+rng()*.05;raw.push(pt(origin.x+Math.cos(a)*w*.405*rr,origin.y+Math.sin(a)*h*.405*rr));}
     // G07：open 城市不生成假城墙/城门/墙附属环路；旧档（无 enclosure）继续走 hull 老路径。
     const open=spec.enclosure==='open',hullOutline=hull(raw),land0=open?[pt(0,0),pt(w,0),pt(w,h),pt(0,h)]:hullOutline;
-    const wall=open?[]:hullOutline,river={cx:w*.62,amplitude:w*.035,width:spec.riverWidth,height:h},bankGap=river.width/2+18;
+    const town=spec.streetPattern==='main-street'?streetTown(spec):null;
+    const wall=open?[]:hullOutline,river=town?.river??{cx:w*.62,amplitude:w*.035,width:spec.riverWidth,height:h},bankGap=river.width/2+18*detailScale;
     const wet=river.width>0;
-    const left=wet?clip(land0,1,0,river.cx-river.amplitude-bankGap):clip(land0,1,0,w*.55),right=wet?clip(land0,-1,0,-(river.cx+river.amplitude+bankGap)):clip(land0,-1,0,-w*.55),districts=[];
+    const left=clip(land0,1,0,town?.westLimit??(wet?river.cx-river.amplitude-bankGap:w*.55));
+    const right=clip(land0,-1,0,-(town?.eastLimit??(wet?river.cx+river.amplitude+bankGap:w*.55)));
+    const districts=[],urbanDistricts=spec.districts.filter(d=>!town||!d.role);
     for(const bank of ['west','east']){
-      const group=ordered(spec.districts.filter(d=>d.bank===bank)).sort((a,b)=>a.order-b.order),land=!wet&&group.length===spec.districts.length?land0:bank==='west'?left:right;
+      const group=ordered(urbanDistricts.filter(d=>d.bank===bank)).sort((a,b)=>a.order-b.order);
+      const land=!town&&!wet&&group.length===spec.districts.length?land0:bank==='west'?left:right;
       const ys=land.map(p=>p.y),minY=Math.min(...ys),maxY=Math.max(...ys),xs=land.map(p=>p.x),cx=(Math.min(...xs)+Math.max(...xs))/2;
       const seeds=group.map((d,i)=>({...d,site:pt(cx+(i%2?1:-1)*w*.025,minY+(maxY-minY)*(i+.5)/group.length)}));
       for(const d of seeds){let poly=land;for(const other of seeds)if(other.id!==d.id){const a=d.site,b=other.site;poly=clip(poly,2*(b.x-a.x),2*(b.y-a.y),b.x*b.x+b.y*b.y-a.x*a.x-a.y*a.y);}
@@ -314,14 +381,23 @@ import * as B from './foundation.mjs';
         districts.push({...d,mapId:spec.id,parentId:spec.parentId,polygon:poly,quality:'layout'});
       }
     }
+    for(const area of town?.terrain??[])districts.push({...area,mapId:spec.id,parentId:spec.parentId,quality:'layout'});
     const centerY=h*.5;
     const horizontalIntersections=wall.map((a,i)=>{const b=wall[(i+1)%wall.length];if((a.y-centerY)*(b.y-centerY)<=0&&a.y!==b.y)return a.x+(b.x-a.x)*(centerY-a.y)/(b.y-a.y);return null;}).filter(x=>x!==null).sort((a,b)=>a-b);
     const gates=open?[]:[{id:'gate-west',name:'西城门',x:horizontalIntersections[0],y:centerY},{id:'gate-east',name:'东城门',x:horizontalIntersections.at(-1),y:centerY}];
     const hubs=[pt(w*.31,centerY),pt(w*.77,centerY)],roads=[],segments=[],buildings=[],issues=[];
-    const addRoad=(id,a,b)=>{const road={id,a,b,width:12};roads.push(road);segments.push(...(wet?splitWater(a,b,river):[{a,b,kind:'road'}]).map((s,i)=>({...s,id:id+':'+i,roadId:id,width:12})));};
-    // 主轴：有墙时连两座城门；开放城市不依赖不存在的 gate.x，直接连两个功能枢纽。
-    addRoad('avenue',open?hubs[0]:pt(gates[0].x,centerY),open?hubs[1]:pt(gates[1].x,centerY));
-    for(const d of districts)addRoad('road:'+d.id,hubs[d.bank==='west'?0:1],d.site);
+    const addRoad=(id,a,b,width=lane,fields={})=>{
+      roads.push({id,a,b,width,...fields});
+      const parts=wet?splitWater(a,b,river):[{a,b,kind:'road'}];
+      segments.push(...parts.map((s,i)=>({...s,id:id+':'+i,roadId:id,width})));
+    };
+    if(town){
+      for(const {id,a,b,width,...fields} of town.streets)addRoad(id,a,b,width,fields);
+    }else{
+      // 有墙的主轴连城门，开放城市连街区枢纽。
+      addRoad('avenue',open?hubs[0]:pt(gates[0].x,centerY),open?hubs[1]:pt(gates[1].x,centerY));
+      for(const d of districts)addRoad('road:'+d.id,hubs[d.bank==='west'?0:1],d.site);
+    }
     if(!open){
       // The inner ring is a connected road. Its river crossings become bridges by the same rule.
       const ring=wall.map(p=>pt(origin.x+(p.x-origin.x)*.86,origin.y+(p.y-origin.y)*.86));
@@ -329,32 +405,78 @@ import * as B from './foundation.mjs';
       addRoad('ring-access-west',hubs[0],ring.reduce((a,b)=>distance(a,hubs[0])<distance(b,hubs[0])?a:b));
       addRoad('ring-access-east',hubs[1],ring.reduce((a,b)=>distance(a,hubs[1])<distance(b,hubs[1])?a:b));
     }
-    const roadClear=q=>!roads.some(r=>{const min=Math.min(...corners(q).map(p=>segmentDistance(p,r.a,r.b)),segmentDistance(center(q),r.a,r.b));return min<r.width/2+12||segmentIntersectsRect(r.a,r.b,inflate(q,12));});
+    const lotGap=town?.parcelGap??lane;
+    const lakes=(town?.terrain??[]).filter(d=>d.role==='lake').map(d=>d.polygon);
+    const dry=q=>!lakes.some(polygon=>corners(q).some(p=>polygonContains(polygon,p))||
+      polygon.some((p,i)=>segmentIntersectsRect(p,polygon[(i+1)%polygon.length],q)));
+    const roadClear=q=>!roads.some(r=>{
+      if(town)return segmentIntersectsRect(r.a,r.b,inflate(q,r.width/2+lotGap));
+      const min=Math.min(...corners(q).map(p=>segmentDistance(p,r.a,r.b)),segmentDistance(center(q),r.a,r.b));
+      return min<r.width/2+lane||segmentIntersectsRect(r.a,r.b,inflate(q,lane));
+    });
     function placeBuilding(f,decorative=false){
-      const d=districts.find(d=>d.id===f.districtId);if(!d||!Number.isFinite(f.w)||!Number.isFinite(f.h)||f.w<=0||f.h<=0)return null;
-      const xs=d.polygon.map(p=>p.x),ys=d.polygon.map(p=>p.y),candidates=[],step=Math.max(decorative?22:10,Math.max(w,h)/240);
-      for(let y=Math.min(...ys)+12;y+f.h<Math.max(...ys);y+=step)for(let x=Math.min(...xs)+12;x+f.w<Math.max(...xs);x+=step){const q={x,y,w:f.w,h:f.h};
-        if(corners(inflate(q,6)).every(p=>polygonContains(d.polygon,p))&&roadClear(q)&&!buildings.some(b=>B.intersects(inflate(b,decorative?6:12),q))){
-          const score=Math.min(...roads.map(r=>segmentDistance(center(q),r.a,r.b)))+distance(center(q),d.site)*.035+(decorative?rng()*30:0);candidates.push({q,score});
+      const d=districts.find(d=>d.id===f.districtId);if(!d||d.role==='lake'||!Number.isFinite(f.w)||!Number.isFinite(f.h)||f.w<=0||f.h<=0)return null;
+      const xs=d.polygon.map(p=>p.x),ys=d.polygon.map(p=>p.y),candidates=[],step=Math.max((decorative?22:10)*detailScale,Math.max(w,h)/240);
+      const preferredStreet=town?roads.reduce((best,r)=>
+        segmentDistance(d.site,r.a,r.b)<segmentDistance(d.site,best.a,best.b)?r:best):null;
+      for(let y=Math.min(...ys)+lane;y+f.h<Math.max(...ys);y+=step)for(let x=Math.min(...xs)+lane;x+f.w<Math.max(...xs);x+=step){const q={x,y,w:f.w,h:f.h};
+        if(corners(inflate(q,pad)).every(p=>polygonContains(d.polygon,p))&&roadClear(q)&&dry(q)&&!buildings.some(b=>B.intersects(inflate(b,f.near===b.id||b.near===f.id?0:decorative?pad:lotGap),q))){
+          const midpoint=center(q);
+          const frontage=preferredStreet?segmentDistance(midpoint,preferredStreet.a,preferredStreet.b)*.5:0;
+          const score=Math.min(...roads.map(r=>segmentDistance(midpoint,r.a,r.b)))+distance(midpoint,d.site)*.035+frontage+(decorative?rng()*30:0);
+          candidates.push({q,score});
         }
       }
       const q=candidates.sort((a,b)=>a.score-b.score||a.q.y-b.q.y||a.q.x-b.q.x)[0]?.q;
       if(!q)return null;const b={...f,...q,type:decorative?'block':'building',decorative,quality:'layout',mapId:spec.id};buildings.push(b);return b;
     }
-    const validBuilding=q=>{const d=districts.find(d=>d.id===q.districtId);return d&&corners(inflate(q,6)).every(p=>polygonContains(d.polygon,p))&&roadClear(q)&&!buildings.some(b=>B.intersects(inflate(b,12),q));};
+    const validBuilding=q=>{const d=districts.find(d=>d.id===q.districtId);return d&&d.role!=='lake'&&corners(inflate(q,pad)).every(p=>polygonContains(d.polygon,p))&&roadClear(q)&&dry(q)&&!buildings.some(b=>b.id!==q.id&&B.intersects(inflate(b,q.near===b.id||b.near===q.id?0:lotGap),q));};
     for(const f of ordered(spec.buildings||[]).filter(f=>f.locked)){
       const q={...f,...f.locked};if(validBuilding(q))buildings.push({...q,type:'building',decorative:false,quality:'confirmed',mapId:spec.id});else return {ok:false,issues:[{id:f.id,code:'BUILDING_LOCK_CONFLICT'}],kept:previous?clone(previous):null};
     }
+    const retained=new Set();
     for(const f of ordered(spec.buildings||[]).filter(f=>!f.locked)){
       const old=previous?.buildings?.find(b=>!b.decorative&&b.id===f.id&&b.districtId===f.districtId&&b.w===f.w&&b.h===f.h);
-      if(old&&validBuilding(old))buildings.push({...old,name:f.name});
+      if(old&&validBuilding(old)){buildings.push({...old,name:f.name});retained.add(f.id);}
       else if(old?.quality==='confirmed')return {ok:false,issues:[{id:f.id,code:'BUILDING_LOCK_CONFLICT'}],kept:clone(previous)};
     }
     for(const f of ordered(spec.buildings||[]).filter(f=>!buildings.some(b=>b.id===f.id)))if(!placeBuilding(f))issues.push({id:f.id,code:'BUILDING_NO_SPACE'});
-    for(const d of districts)for(let i=0;i<(spec.blocksPerDistrict??8);i++)placeBuilding({id:'texture:'+d.id+':'+i,districtId:d.id,name:'街区轮廓',w:28+rng()*24,h:25+rng()*25},true);
+    // Explicit wall gaps take precedence over the template's generic spacing.
+    // Only move estimated buildings; never relocate a confirmed footprint.
+    const nearby=ordered(spec.buildings||[]).filter(f=>f.near),nearIds=new Set(nearby.map(f=>f.id)),settled=new Set(buildings.filter(b=>!nearIds.has(b.id)).map(b=>b.id)),pending=[...nearby];
+    const unresolved=new Set();
+    const proximityFailure=id=>({ok:false,issues:[{id,code:'BUILDING_PROXIMITY_CONFLICT'}],kept:previous?clone(previous):null});
+    const adjacent=(f,a,sector)=>{
+      const gap=f.gapM??lane,q={...buildings.find(b=>b.id===f.id),...f};
+      if(sector==='east'){q.x=a.x+a.w+gap;q.y=a.y+(a.h-q.h)/2;}
+      if(sector==='west'){q.x=a.x-q.w-gap;q.y=a.y+(a.h-q.h)/2;}
+      if(sector==='north'){q.x=a.x+(a.w-q.w)/2;q.y=a.y-q.h-gap;}
+      if(sector==='south'){q.x=a.x+(a.w-q.w)/2;q.y=a.y+a.h+gap;}
+      return q;
+    };
+    while(pending.length){
+      const index=pending.findIndex(f=>settled.has(f.near)),f=pending.splice(index<0?0:index,1)[0],a=buildings.find(b=>b.id===f.near),b=buildings.find(b=>b.id===f.id);
+      const fixed=f.locked||b?.quality==='confirmed'||(relaxProximity&&town&&retained.has(f.id));
+      const options=a&&b?(f.sector?[f.sector]:['east','south','west','north']).map(sector=>adjacent(f,a,sector)):[];
+      const q=options.find(q=>validBuilding(q)&&(!fixed||Math.abs(q.x-b.x)<EPS&&Math.abs(q.y-b.y)<EPS));
+      if(q)Object.assign(b,q);
+      else if(!relaxProximity)return proximityFailure(f.id);
+      settled.add(f.id);
+    }
+    for(const f of nearby){
+      const a=buildings.find(b=>b.id===f.near),b=buildings.find(b=>b.id===f.id);
+      if(a&&b&&(f.sector?[f.sector]:['east','south','west','north']).some(sector=>{const q=adjacent(f,a,sector);return Math.abs(q.x-b.x)<EPS&&Math.abs(q.y-b.y)<EPS;}))continue;
+      if(!relaxProximity)return proximityFailure(f.id);
+      unresolved.add(f.id);
+    }
+    for(const id of unresolved)issues.push({id,code:'BUILDING_PROXIMITY_UNPLACED',severity:'warning'});
+    for(const d of districts.filter(d=>!town||!d.role))for(let i=0;i<(spec.blocksPerDistrict??8);i++)placeBuilding({id:'texture:'+d.id+':'+i,districtId:d.id,name:'街区轮廓',w:(28+rng()*24)*detailScale,h:(25+rng()*25)*detailScale},true);
     const rline=Array.from({length:81},(_,i)=>pt(riverX(river,h*i/80),h*i/80)),riverPolygon=rline.map(p=>pt(p.x-river.width/2,p.y)).concat([...rline].reverse().map(p=>pt(p.x+river.width/2,p.y)));
     const dock={id:'dock',name:'河岸码头',type:'dock',x:riverX(river,h*.68)-river.width/2,y:h*.68,bank:'west',width:river.width*.38};
-    return {ok:true,structureKey:structure(spec),id:spec.id,name:spec.name,kind:'city',enclosure:open?'open':'wall',bounds:{x:0,y:0,w,h},wall,origin,river:wet?river:null,riverPolygon:wet?riverPolygon:[],districts,roads,segments,gates,buildings,dock:wet?dock:null,issues};
+    const bridgeLocations=roads.filter(r=>r.bridgeLocationId).flatMap(road=>segments
+      .filter(s=>s.roadId===road.id&&s.kind==='bridge')
+      .map(s=>({id:road.bridgeLocationId,x:s.a.x,y:s.a.y-s.width/2,w:s.b.x-s.a.x,h:s.width})));
+    return {ok:true,structureKey:structure(spec),id:spec.id,name:spec.name,kind:'city',enclosure:open?'open':'wall',bounds:{x:0,y:0,w,h},wall,origin,river:wet?river:null,riverPolygon:wet?riverPolygon:[],districts,roads,segments,gates,buildings,dock:wet?dock:null,issues,...(town?{streetPattern:spec.streetPattern}:{}),...(bridgeLocations.length?{bridgeLocations}:{})};
   }
   function segmentIntersectsRect(a,b,r){
     let lo=0,hi=1;const dx=b.x-a.x,dy=b.y-a.y;

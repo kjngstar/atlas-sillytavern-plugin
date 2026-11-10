@@ -32,3 +32,10 @@ export function collectMapLocations({mapRow,maps=[],locations=[]}={}){
     return String(row.map_id??'')===String(mapRow.id);
   });
 }
+
+/** A town plan can show registered buildings that belong to its district maps. */
+export function collectTownParcels(members,locations,branchId){
+  const districts=new Set(members.filter(row=>row.kind==='district').map(row=>row.id));
+  return locations.filter(row=>row.branch_id===branchId&&row.status==='active'&&row.mobility!=='mobile'
+    &&row.kind==='building'&&districts.has(row.parent_location_id));
+}

@@ -15,6 +15,7 @@ import { foreignKeyCheck, queryBound } from './atlas-db-runtime.ts';
 import { stableHexHash } from './atlas-hash.ts';
 import { resolveMapTopology } from './atlas-map-topology.ts';
 import { ATLAS_RUNTIME_LIMITS } from './atlas-runtime-limits.ts';
+import { sceneExpansionLocationIds } from './atlas-scene-expansion.ts';
 import type { SqlSession } from './atlas-sql-session.ts';
 import type { TopologyLocation, TopologyMap } from './atlas-world-contract.ts';
 
@@ -59,7 +60,7 @@ export function inspectSqlWorld(session: SqlSession) {
     'SELECT (SELECT COUNT(*) FROM locations WHERE branch_id=?) locations,(SELECT COUNT(*) FROM characters WHERE branch_id=?) characters,(SELECT COUNT(*) FROM items WHERE branch_id=?) items',
     [b, b, b],
   )[0];
-  const missing = queryBound(
+  const unmapped = queryBound(
     db,
     "SELECT l.id FROM locations l WHERE l.branch_id=? AND l.status='active' AND NOT EXISTS (SELECT 1 FROM maps m WHERE m.branch_id=l.branch_id AND m.container_location_id=l.id AND m.status='active')",
     [b],
@@ -74,6 +75,10 @@ export function inspectSqlWorld(session: SqlSession) {
     [b],
   );
   const routeRows = queryBound(db, 'SELECT id, from_location_id, to_location_id FROM routes WHERE branch_id=?', [b]);
+  const expanded=sceneExpansionLocationIds({locations:locationRows,
+    characters:queryBound(db,"SELECT location_id,status FROM characters WHERE branch_id=? AND status='active'",[b]),
+    items:queryBound(db,"SELECT location_id,status FROM items WHERE branch_id=? AND status='active'",[b])});
+  const missing=unmapped.filter(row=>expanded.has(String(row.id)));
   const diagnostics = buildInspectDiagnostics({
     branchId: b,
     rootMapId: branch.root_map_id ? String(branch.root_map_id) : null,
@@ -102,7 +107,7 @@ export function inspectSqlWorld(session: SqlSession) {
   const inferenceCount = topologyIssues.filter((issue) => issue.kind === 'inference').length + unknownContainment.length + isolatedComponents.length;
   const reasons: string[] = [];
   if (foreignKeys.length) reasons.push('存在引用错误；保存候选会拒绝该状态，请从完整备份恢复');
-  if (missing.length || rootMissing) reasons.push('部分地点缺少内部地图，可重建地图结构并记录回退');
+  if (missing.length || rootMissing) reasons.push('部分有内部结构或在场实体的地点缺少地图，可重建地图结构并记录回退');
   if (errorCount) reasons.push(`地图包含关系有 ${errorCount} 处明确错误（父环/缺父/重复容器/自容器图等），需作者经候选组修复`);
   if (inferenceCount) reasons.push(`有 ${inferenceCount} 处需要推断或人工确认（未知包含、孤立交通分量等），可能合法，不自动判错`);
   if (reasons.length === 0) reasons.push('地点、人物、物品和地图引用检查通过');

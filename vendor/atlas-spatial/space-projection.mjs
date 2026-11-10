@@ -36,9 +36,14 @@ export function projectChildFurnishing(spec,ctx){
     for(const entry of canonical?.furnishing??[]){
       if(!plain(entry)||!parseSpaceLocalId(entry.localId)||spec.deletes?.contents?.includes(entry.localId)||spec.deletes?.contents?.includes(parseSpaceLocalId(entry.localId).contentId))continue;
       const existing=spec.contents.find(row=>row.id===entry.localId&&row.roomId===room);
-      if(existing){if(entry.quality==='confirmed'){existing.w=entry.widthM;existing.h=entry.heightM;}}
-      else spec.contents.push({id:entry.localId,roomId:room,type:entry.type,name:entry.name,w:entry.widthM,h:entry.heightM});
-      if(entry.itemId&&ctx.itemsById?.[entry.itemId]?.location_id===room&&!spec.items.some(row=>row.id===entry.itemId))spec.items.push({id:entry.itemId,on:entry.localId});
+      if(existing){
+        if(entry.quality==='confirmed'){existing.w=entry.widthM;existing.h=entry.heightM;}
+        if(existing.wall===undefined&&entry.wall)existing.wall=entry.wall;
+        if(existing.nearDoor===undefined&&entry.nearDoor!==undefined)existing.nearDoor=entry.nearDoor;
+      }
+      else spec.contents.push({id:entry.localId,roomId:room,type:entry.type,name:entry.name,w:entry.widthM,h:entry.heightM,
+        ...(entry.wall?{wall:entry.wall}:{}),...(entry.nearDoor!==undefined?{nearDoor:entry.nearDoor}:{})});
+      if(entry.itemId&&ctx.itemsById?.[entry.itemId]?.location_id===room&&!spec.items.some(row=>row.id===entry.itemId))spec.items.push({id:entry.itemId,on:entry.localId,...(entry.asFurniture?{asFurniture:true}:{})});
     }
   }
   return spec;

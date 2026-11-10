@@ -8,7 +8,7 @@ Atlas 是一个 SillyTavern 世界引擎扩展。它从世界书与聊天剧情�
 
 [安装](#安装) · [快速上手](#快速上手) · [界面与皮肤](#界面与皮肤) · [常见问题](#常见问题) · [开发与文档](#开发与文档)
 
-当前版本：[v0.9.100](https://github.com/kjngstar/atlas-sillytavern-plugin/releases/tag/v0.9.100)。修复父子地图导航、邻近地点布局和稀疏地图取景，并移除缺少依据的内容数量与长度上限。更新与验证范围见 [0.9.100 更新说明](docs/atlas-0.9.100-更新说明.md)。
+当前主分支版本为 0.9.101，新增沿街镇图、分层地图表现和室内陈设摆放改进。[更新说明](docs/atlas-0.9.101-更新说明.md)记录了本次改动和实机验收范围。
 
 ## 能做什么
 
@@ -36,7 +36,7 @@ Atlas 是一个 SillyTavern 世界引擎扩展。它从世界书与聊天剧情�
 
 3. 刷新酒馆页面，在扩展菜单中打开「阿特拉斯 / Atlas」。
 
-链接安装使用仓库默认分支。希望保留可回溯的固定版本时，可使用上方版本 tag 的完整仓库文件。
+链接安装使用仓库默认分支。希望固定安装版本时，可下载对应提交或[版本标签](https://github.com/kjngstar/atlas-sillytavern-plugin/tags)的完整仓库文件。
 
 手动安装可将完整仓库目录放入 SillyTavern 的 `public/scripts/extensions/third-party/atlas-sillytavern-plugin/`。请保留脚本、样式、`ui/`、`dist/` 和 `manifest.json`，并确保只启用一份 Atlas。
 

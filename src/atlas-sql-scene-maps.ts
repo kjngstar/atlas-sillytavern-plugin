@@ -21,6 +21,7 @@ import { normalizeSqlMapFrame } from './atlas-spatial-frame.ts';
 import { SPATIAL_PROFILE_FRAME_KEY, writeSpatialProfile } from './atlas-spatial-profile.ts';
 import type { SpatialProfileMode } from './atlas-spatial-profile.ts';
 import { queryBound, AtlasDbError } from './atlas-db-runtime.ts';
+import { sceneExpansionLocationIds } from './atlas-scene-expansion.ts';
 import type { SqlDatabase } from './atlas-db-runtime.ts';
 import type { AtomicGroup, Issue, RowMutation } from './atlas-ops-contract.ts';
 
@@ -46,7 +47,7 @@ function containerRaw(value: unknown): string | null {
 export function compileSqlSceneMaps(input:{db:SqlDatabase;branchId:string;turnId:string;clockS:number;operationId?:string;
   makeId:(kind:string,opId:string,alias:string)=>string;calibration?:SqlMapCalibration;ensureScenes?:boolean;povName?:string;background?:{mapId:string;asset:import('./atlas-db-contract.ts').AtlasAssetRef|null};
   /** P13/R03 §20：作者显式选择/清除绘图档案（`mode:null` = 清除，回到程序推导）。 */
-  profile?:{mapId:string;mode:SpatialProfileMode|null}}):AtomicGroup|null {
+  profile?:{mapId:string;mode:SpatialProfileMode|null};plannedLocationIds?:readonly string[]}):AtomicGroup|null {
   const {db,branchId,turnId,clockS,makeId}=input,read=createTableReadPort(db);
   const locations=read.selectWhere('locations',{branch_id:branchId,status:'active'},SCENE_ROW_LIMIT+1);
   if(input.ensureScenes && Number(queryBound(db,"SELECT COUNT(*) AS n FROM locations WHERE branch_id=? AND status='active'",[branchId])[0].n)>SCENE_ROW_LIMIT)
@@ -107,12 +108,21 @@ export function compileSqlSceneMaps(input:{db:SqlDatabase;branchId:string;turnId
 
     // ── 2. 只补缺图：已存在的图一张都不重建；不为凑上限删除任何旧图 ──────
     const createBudget=Math.max(0,SCENE_ROW_LIMIT-maps.length),remainingLocationIds:string[]=[];
+    const expanded=sceneExpansionLocationIds({locations,
+      characters:read.selectWhere('characters',{branch_id:branchId,status:'active'},SCENE_ROW_LIMIT),
+      items:read.selectWhere('items',{branch_id:branchId,status:'active'},SCENE_ROW_LIMIT),plannedLocationIds:input.plannedLocationIds});
+    // A preserved child map still needs its ancestor maps for a valid hierarchy.
+    for(const key of byContainer.keys()){
+      let at=locations.find(l=>l.id===key);const seen=new Set<string>();
+      while(at?.parent_location_id&&!seen.has(String(at.id))){seen.add(String(at.id));expanded.add(String(at.parent_location_id));at=locations.find(l=>l.id===at!.parent_location_id);}
+    }
     let created=0;
     for(const location of locations){
       const id=String(location.id);
       if(byContainer.has(id))continue;
+      if(!expanded.has(id))continue;
       if(created>=createBudget){remainingLocationIds.push(id);continue;}
-      // A location is a real scene at every level, including a street or a room.
+      // Exterior-only leaves remain locations/markers on their parent's map.
       const size=String(location.kind)==='room'?CONTAINER_FRAME_CELLS.room:CONTAINER_FRAME_CELLS.other;
       const map=makeMap(makeId('map',opId,`container:${id}`),String(location.name),containerMapKind(String(location.kind)),id,size);
       change('maps',null,map);byContainer.set(id,map);maps.push(map);created+=1;

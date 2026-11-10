@@ -56,13 +56,14 @@ export function completeLayoutClosure(input:{group:AtomicGroup;maps:Row[];locati
     const members=collectMapLocations({mapRow:map,maps,locations});
     const profile=resolveSpatialProfile({map,maps,container:container??null,parentContainer:locations.find(row=>row.id===container?.parent_location_id)??null,members,routes:input.routes.filter(r=>r.map_id===mapId)});
     const pending=frame.atlasLayoutRequest as Row|undefined;
+    const pendingActive=!!pending&&(pending.status===undefined||pending.status==='pending');
     // A parent footprint establishes a non-leaf floor's size, not its internal
     // layout. Leave it for its own pending request instead of inventing a self
     // room and marking the real multi-room request completed.
-    const kind=layout||pending?.status==='pending'?profile.layoutKind:(members.length===0&&['room','floor'].includes(String(container?.kind))&&canonical?'floor':null);
+    const kind=layout||pendingActive?profile.layoutKind:(members.length===0&&['room','floor'].includes(String(container?.kind))&&canonical?'floor':null);
     if(kind!=='floor'&&kind!=='city'&&kind!=='overview')continue;
     const spaceSize=resolveMapSpaceSize({maps,locations,mapRow:map,branchId:scope.branchId});
-    let spec=structuredClone(pending?.status==='pending'?pending.spec:scene?.constraints??{}) as Row;
+    let spec=structuredClone(pendingActive?pending!.spec:scene?.constraints??{}) as Row;
     if(kind==='floor'&&removedFurnishing.size){
       const contents=(spec.contents??[]) as Row[];
       const deleted=contents.filter(f=>{const ids=removedFurnishing.get(String(f.roomId));return ids?.has(String(f.id))||ids?.has('space:'+f.roomId+':furn:'+f.id);}).map(f=>String(f.id));
@@ -95,7 +96,7 @@ export function completeLayoutClosure(input:{group:AtomicGroup;maps:Row[];locati
       const normalized=normalizePlannedFrame(map,spaceSize.resolution,locations,[...input.characters,...input.items],turnId,operationId+':linked-frame');
       if(normalized)merge(normalized);
       const alignedMap=maps.find(m=>m.id===mapId)!;
-      const aligned=alignSqlFrameToPhysicalSize({mapRow:alignedMap,widthM:spaceSize.resolution.widthM,heightM:spaceSize.resolution.heightM,scope,currentScope:scope,expectedRowRev:Number(alignedMap.row_rev),turnId,operationId:operationId+':linked-fit',source:{kind:spaceSize.resolution.source,referenceId:spaceSize.locationId}});
+      const aligned=alignSqlFrameToPhysicalSize({mapRow:alignedMap,widthM:spaceSize.resolution.widthM,heightM:spaceSize.resolution.heightM,scope,currentScope:scope,expectedRowRev:Number(alignedMap.row_rev),turnId,operationId:operationId+':linked-fit',source:{kind:spaceSize.resolution.source,referenceId:spaceSize.locationId,quality:spaceSize.resolution.quality}});
       if(!aligned.ok)return {ok:false,issues:aligned.issues};
       if(aligned.mutation)merge(aligned.mutation as RowMutation);
     }
@@ -111,10 +112,10 @@ export function completeLayoutClosure(input:{group:AtomicGroup;maps:Row[];locati
 }
 
 /** Re-express legacy estimated frames from known physical dimensions, never aliases. */
-export function normalizePlannedFrame(map:Row,size:{widthM:number;heightM:number},locations:Row[],occupants:Row[],turnId:string,operationId:string):RowMutation|null{
+export function normalizePlannedFrame(map:Row,size:{widthM:number;heightM:number;quality?:'estimated'|'confirmed'},locations:Row[],occupants:Row[],turnId:string,operationId:string):RowMutation|null{
   if(normalizeSqlMapFrame(map.frame_json).ok||Number(map.scale_locked)===1||map.scale_quality==='confirmed')return null;
   if([...locations,...occupants].some(row=>row.map_id===map.id&&row.coord_precision==='exact'))return null;
-  const fit=fitFrameToPhysicalSize({widthM:size.widthM,heightM:size.heightM,cols:null,rows:null,metersPerCell:null});
+  const fit=fitFrameToPhysicalSize({widthM:size.widthM,heightM:size.heightM,allowApproximate:size.quality==='estimated'});
   if(!fit.ok||!fit.cols||!fit.rows||!fit.metersPerCell)return null;
   const frame={...normalizeFrame(map.frame_json),cols:fit.cols,rows:fit.rows,reference_width_cells:fit.cols,reference_height_cells:fit.rows};
   return {table:'maps',rowId:String(map.id),before:map,after:{...map,frame_json:frame,meters_per_cell:fit.metersPerCell,scale_quality:'estimated',scale_basis_json:{source:'known-space-frame',widthM:size.widthM,heightM:size.heightM},calibration_rev:Number(map.calibration_rev??0)+1,row_rev:Number(map.row_rev)+1,updated_turn_id:turnId},sourceOpIds:[operationId],basis:{kind:'layout',source:'known-space-frame'}};

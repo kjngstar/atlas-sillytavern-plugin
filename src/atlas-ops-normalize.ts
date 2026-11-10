@@ -107,6 +107,7 @@ export const LAYOUT_SPEC_SCALARS = [
   // 字符串=本任务地点目录里的真实 location 引用（在 atlas-ops-refs 解析成规范 ID）。
   'corridorLocationRef',
   'riverWidth',
+  'streetPattern',
   'blocksPerDistrict',
   'surface',
   'enclosure',
@@ -258,6 +259,14 @@ export function normalizeLayoutSpec(
       };
     }
   }
+  if (spec.streetPattern !== undefined && (kind !== 'city' || spec.streetPattern !== 'main-street')) {
+    return {
+      ok: false, spec: null,
+      issues: [issue('ENUM_INVALID', '$.data.spec.streetPattern',
+        'map.layout.request: only kind=city accepts spec.streetPattern="main-street"',
+        { severity: 'error', retryable: true, opId: op?.opId, line: op?.line })],
+    };
+  }
   if (kind === 'city') {
     const enclosure = spec['enclosure'];
     if (enclosure !== undefined && enclosure !== null
@@ -379,6 +388,14 @@ export function normalizeLayoutSpec(
         };
       }
       seenIds.add(id);
+      if (kind === 'city' && key === 'districts' && entry.role !== undefined &&
+          !(['lake', 'forest', 'woods'] as readonly unknown[]).includes(entry.role)) {
+        return {
+          ok: false, spec: null,
+          issues: [issue('ENUM_INVALID', path+'.role', 'city terrain role must be lake, forest or woods',
+            { severity: 'error', retryable: true, opId: op?.opId, line: op?.line })],
+        };
+      }
       if (kind === 'overview') {
         const rejected = overviewEntryIssue(key, entry, path, op);
         if (rejected) return { ok: false, spec: null, issues: [rejected] };

@@ -12,6 +12,7 @@ import {buildTurnAnalysisExport} from '../ui/atlas-turn-analysis-export.mjs';
 import {settleWorldBuildWindow,worldBuildMapReady,worldBuildMapQuality} from '../src/atlas-world-build-execution.ts';
 import {readProgressRows} from '../src/atlas-construction-progress.ts';
 import {readWorldBuildTargets} from '../src/atlas-world-build-state.ts';
+import {createRow} from '../src/atlas-db-defaults.ts';
 
 async function fixture() {
  const seed=await makeSeed(),{db,branchId}=seed,port=createTableReadPort(db);
@@ -52,6 +53,35 @@ test('C15 completed geometry is reconciled even when a later window selected ano
   const good=f.target(IDS.M2,'failed'),bad=f.target(IDS.M1);
   const targets=f.settle([good,bad],[bad]);
   assert.equal(targets.find(t=>t.subjectId===IDS.M2).status,'done');
+ }finally{f.close();}
+});
+
+test('城市完成判定使用实际开放场所标点及已存路线，不要求停靠船成为固定建筑',async()=>{
+ const f=await fixture();try{
+  const context=id=>({branchId:f.branchId,id,turnId:f.seedTurnId,clockS:0,nowWallMs:1,rulesetVersion:'atlas-1'});
+  const insert=(table,id,kind,data)=>{
+   if(['location','character','item','faction'].includes(kind))runBound(f.db,'INSERT INTO entity_keys (branch_id,id,kind) VALUES (?,?,?)',[f.branchId,id,kind]);
+   const row=createRow(table,data,context(id));
+   runBound(f.db,`INSERT INTO ${table} (${Object.keys(row).join(',')}) VALUES (${Object.keys(row).map(()=>'?').join(',')})`,Object.values(row).map(v=>v!==null&&typeof v==='object'?JSON.stringify(v):v));return row;
+  };
+  const id='quality-port',scope={chatId:f.chatUid,branchId:f.branchId,revision:1,viewMode:'author'};
+  const generated=Kit.generateCity({riverWidth:0,enclosure:'open',districts:[{id:'port',bank:'west',order:0}],buildings:[{id:'office',districtId:'port',w:12,h:8}]},{scope,map:{id,metersPerCell:1,frame:{cols:500,rows:300}},entities:{locations:['port','office','pier'],routes:[],characters:[],items:[]}});
+  assert.equal(generated.ok,true,JSON.stringify(generated.issues));
+  const building=generated.scene.layout.buildings[0],point=[building.x+building.w/2,building.y+building.h/2];
+  insert('locations','port','location',{name:'测试港区',kind:'district'});
+  insert('maps',id,'map',{name:'测试港区',kind:'site',container_location_id:'port',meters_per_cell:1,scale_quality:'estimated',frame_json:{cols:500,rows:300,atlasScene:generated.scene}});
+  insert('locations','office','location',{name:'邮局',kind:'building',parent_location_id:'port',map_id:id,grid_x:point[0],grid_y:point[1],coord_precision:'layout'});
+  insert('locations','pier','location',{name:'开放码头',kind:'other',parent_location_id:'port',map_id:id,grid_x:20,grid_y:10,coord_precision:'layout'});
+  insert('locations','boat','location',{name:'停靠小艇',kind:'vehicle',mobility:'mobile',anchor_location_id:'pier',parent_location_id:'port',map_id:id});
+  insert('routes','port-route','route',{from_location_id:'office',to_location_id:'pier',map_id:id,geometry_quality:'estimated',geometry_json:{kind:'line',coordinates:[point,[20,10]]}});
+  const q=()=>worldBuildMapQuality(f.db,f.branchId,id);
+  assert.equal(q().dimensions.coverage,'pass',JSON.stringify(q()));
+  assert.equal(q().dimensions.navigability,'pass',JSON.stringify(q()));
+  assert.equal(q().dimensions.plausibility,'pass',JSON.stringify(q()));
+  runBound(f.db,'UPDATE routes SET geometry_json=? WHERE branch_id=? AND id=?',[JSON.stringify({kind:'line',coordinates:[[null,0]]}),f.branchId,'port-route']);
+  assert.equal(q().dimensions.navigability,'fail','坏路线不能靠有码头标点通过');
+  runBound(f.db,"UPDATE locations SET coord_precision='unknown' WHERE branch_id=? AND id=?",[f.branchId,'pier']);
+  assert.notEqual(q().dimensions.coverage,'pass','没有真实落位时仍不能判为完整');
  }finally{f.close();}
 });
 

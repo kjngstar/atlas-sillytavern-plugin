@@ -17,6 +17,7 @@
  */
 
 import test from 'node:test';
+import {resolveMapSpaceSize} from '../src/atlas-space-canonical.ts';
 import assert from 'node:assert/strict';
 import {
   makeSeedWith,
@@ -57,6 +58,22 @@ test('地点物理长宽独立保存且拒绝无效尺寸，不虚构父图坐�
       assert.ok(invalid.compiled.issues.some(i=>i.code==='SPACE_DIMENSIONS_INVALID'));
       assert.deepEqual(invalid.compiled.merged.mutations,[]);
     }
+  }finally{seed.close();}
+});
+
+test('六十公里区域尺寸可编译保存，不受建筑尺度上限截断',async()=>{
+  const seed=await makeSeedWith(SQL);
+  try{
+    const area={kind:'dimensions',widthM:60000,heightM:40000,quality:'confirmed',source:'story'};
+    const out=compile(seed,JSON.stringify({op:'location.upsert',ref:'new:sea-region',data:{name:'海域',kind:'region',area}}));
+    assert.deepEqual(out.compiled.issues.filter(i=>i.severity==='error'),[]);
+    const row=out.compiled.merged.mutations.find(m=>m.table==='locations').after;
+    assert.deepEqual(row.area_geometry_json,area);
+    assert.equal(row.grid_x,null);
+    assert.equal(row.grid_y,null);
+    const resolved=resolveMapSpaceSize({maps:[],locations:[row],mapRow:{id:'sea-map',container_location_id:row.id},branchId:row.branch_id,firstEstimate:{widthM:100,heightM:100}});
+    assert.equal(resolved.resolution.widthM,60000);
+    assert.equal(resolved.resolution.heightM,40000);
   }finally{seed.close();}
 });
 

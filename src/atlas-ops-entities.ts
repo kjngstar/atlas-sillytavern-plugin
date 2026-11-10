@@ -302,7 +302,7 @@ export function compileLocationUpsert(op: ParsedOperation, ctx: CompileContext):
   if (Object.prototype.hasOwnProperty.call(data, 'access')) changes.access_rules_json = data.access ?? null;
   if (Object.prototype.hasOwnProperty.call(data, 'area')) {
     if (isPlainObject(data.area) && data.area.kind === 'dimensions' && !readMetricDimensions(data.area)) {
-      result.issues.push(issue('SPACE_DIMENSIONS_INVALID', '$.data.area', 'dimensions 需要 0.2–20000 米的 widthM/heightM 与 confirmed/estimated 质量；尺寸不包含父图坐标', op));
+      result.issues.push(issue('SPACE_DIMENSIONS_INVALID', '$.data.area', 'dimensions 需要有限且至少 0.2 米的 widthM/heightM 与 confirmed/estimated 质量；尺寸不包含父图坐标', op));
     } else changes.area_geometry_json = data.area ?? null;
   }
   if (Object.prototype.hasOwnProperty.call(data, 'vehicle_profile')) changes.vehicle_profile_json = data.vehicle_profile ?? null;

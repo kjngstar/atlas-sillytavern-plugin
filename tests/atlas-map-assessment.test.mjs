@@ -21,6 +21,7 @@ import * as Kit from '../vendor/atlas-spatial/index.mjs';
 import { makeSeedWith, IDS, insertRows } from './fixtures/atlas-sql/seed.mjs';
 import { assessMapCompleteness } from '../src/atlas-map-assessment.ts';
 import { querySpatialScene } from '../src/atlas-spatial-views.ts';
+import { queryBound } from '../src/atlas-db-runtime.ts';
 
 const SQL = await (await import('sql.js')).default();
 const BRANCH = IDS.branchMain;
@@ -286,6 +287,8 @@ test('COMP-DTO：querySpatialScene 每张图都带 assessment，且 POV 的期�
     seed.db.run('UPDATE locations SET map_id = ? WHERE branch_id = ? AND id IN (?)'.replace('IN (?)', `IN (${[...ZONES, SECRET].map(() => '?').join(',')})`), [MAP, BRANCH, ...ZONES, SECRET]);
     // L_ZSEC 是秘密地点：作者视图可见，POV 不可见。
     seed.db.run(`UPDATE locations SET access_rules_json = ? WHERE branch_id = ? AND id = ?`, ['{"visibility":"secret"}', BRANCH, SECRET]);
+    const route=queryBound(seed.db,'SELECT * FROM routes WHERE branch_id=? AND id=?',[BRANCH,IDS.R_AB])[0];
+    insertRows(seed.db,'routes',[{...route,id:R_OK,from_location_id:ZONES[0],to_location_id:ZONES[1],map_id:MAP,geometry_json:{kind:'line',coordinates:[[1,1],[2,2]]},geometry_quality:'estimated'}]);
 
     const ctx = { db: seed.db, branchId: BRANCH, revision: 5, viewMode: 'author', povId: null, chatId: IDS.chatA };
     const author = querySpatialScene(ctx, { kind: 'scene', branchId: BRANCH }).items.find((item) => item.mapId === MAP);
@@ -294,6 +297,8 @@ test('COMP-DTO：querySpatialScene 每张图都带 assessment，且 POV 的期�
     assert.equal(author.assessment.saveState, 'saved');
     assert.equal(author.assessment.sceneState, 'ready');
     assert.equal(author.assessment.metricQuality, 'uncalibrated');
+    assert.ok(author.scene.layout.routes.some(route=>route.id===R_OK),'概览须使用实际保存且可绘制的路线');
+    assert.ok(!author.assessment.missingIds.includes(R_OK),'SQL 路线已经下发时不能再报告漏画');
     assert.ok(author.assessment.expectedIds.includes(SECRET), `作者视图应把秘密分区算进本图责任：${JSON.stringify(author.assessment.expectedIds)}`);
 
     const pov = querySpatialScene({ ...ctx, viewMode: 'pov', povId: COARSE }, { kind: 'scene', branchId: BRANCH }).items.find((item) => item.mapId === MAP);

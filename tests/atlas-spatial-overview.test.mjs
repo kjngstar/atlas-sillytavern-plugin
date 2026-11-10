@@ -54,6 +54,30 @@ function context(input = {}) {
 const generate = (spec, ctx, previousScene = null) =>
   Kit.generateOverview(spec, { ...ctx, previousScene, currentScope: SCOPE });
 
+test('细长林带按真实宽高放进街区，增量建筑保留已有地形和路线', () => {
+  const ids=['entry','forest','house','shed'];
+  const ctx=context({locations:ids.map(id=>location(id)),routes:[route('road','entry','house')],mapRow:mapRow({frame_json:{cols:160,rows:120},meters_per_cell:1,scale_quality:'confirmed'})});
+  ctx.childSpaces={forest:{widthM:90,heightM:25},house:{widthM:14,heightM:10},shed:{widthM:8,heightM:6}};
+  const spec={zones:[{id:'entry',size:'small',sector:'center'},{id:'forest',sector:'north',role:'forest'},{id:'house',near:'entry',sector:'south'}],links:[{id:'road'}],features:[{id:'trees',type:'forest_texture',zoneId:'forest'}]};
+  const first=generate(spec,ctx);
+  assert.equal(first.ok,true,JSON.stringify(first.issues));
+  assert.deepEqual(first.issues,[]);
+  const forest=first.scene.layout.shapes.find(s=>s.id==='forest');
+  assert.equal(Math.max(...forest.polygon.map(p=>p.x))-Math.min(...forest.polygon.map(p=>p.x)),90);
+  assert.equal(Math.max(...forest.polygon.map(p=>p.y))-Math.min(...forest.polygon.map(p=>p.y)),25);
+  assertAllFiniteInside(first.scene);
+  const next=generate({zones:[{id:'house',sector:'south'},{id:'shed',near:'house',sector:'east'}]},ctx,first.scene);
+  assert.equal(next.ok,true,JSON.stringify(next.issues));
+  assert.deepEqual(next.issues,[]);
+  for(const old of first.scene.layout.shapes)assert.deepEqual(next.scene.layout.shapes.find(s=>s.id===old.id),old);
+  assert.deepEqual(next.scene.layout.routes,first.scene.layout.routes);
+  const boxes=next.scene.layout.shapes.map(s=>({x0:Math.min(...s.polygon.map(p=>p.x)),x1:Math.max(...s.polygon.map(p=>p.x)),y0:Math.min(...s.polygon.map(p=>p.y)),y1:Math.max(...s.polygon.map(p=>p.y))}));
+  for(let i=0;i<boxes.length;i++)for(let j=i+1;j<boxes.length;j++){
+    const a=boxes[i],b=boxes[j];
+    assert.ok(a.x1<=b.x0||b.x1<=a.x0||a.y1<=b.y0||b.y1<=a.y0,'占地不能相交');
+  }
+});
+
 test('邻近建筑保留完整矩形轮廓，不能出现四角重叠', () => {
   const ctx=context({locations:['A-house','Z-shop'].map(id=>location(id)),mapRow:mapRow({id:'proximity-map',frame_json:{cols:10000,rows:10000},meters_per_cell:1})});
   ctx.childSpaces=Object.fromEntries(['A-house','Z-shop'].map(id=>[id,{widthM:12,heightM:8}]));
@@ -64,6 +88,28 @@ test('邻近建筑保留完整矩形轮廓，不能出现四角重叠', () => {
   const [a,b]=boxes;
   for(const box of boxes){assert.equal(box.x1-box.x0,12);assert.equal(box.y1-box.y0,8);}
   assert.ok(Math.min(a.x1,b.x1)<=Math.max(a.x0,b.x0)||Math.min(a.y1,b.y1)<=Math.max(a.y0,b.y0),'真实建筑矩形不得重叠');
+});
+
+test('街口两侧和北缘林带遵守方位，纹理随明确改动的林带范围更新', () => {
+  const ids=['gate','north-shop','south-shop','fork','west-shop','east-shop','ne','inn','forest'];
+  const ctx=context({locations:ids.map(id=>location(id)),mapRow:mapRow({frame_json:{cols:160,rows:120},meters_per_cell:1,scale_quality:'confirmed'})});
+  ctx.childSpaces=Object.fromEntries(ids.map(id=>[id,{widthM:8,heightM:6}]));
+  ctx.childSpaces.forest={widthM:90,heightM:25};ctx.childSpaces.inn={widthM:20,heightM:14};ctx.childSpaces.ne={widthM:8,heightM:8.5};
+  const first=generate({zones:[{id:'gate',sector:'southwest'},{id:'north-shop',near:'gate',sector:'north'},{id:'south-shop',near:'gate',sector:'south'},
+    {id:'fork',sector:'center'},{id:'west-shop',near:'fork',sector:'west'},{id:'east-shop',near:'fork',sector:'east'},
+    {id:'ne',sector:'northeast'},{id:'inn',near:'ne',sector:'west'},{id:'forest',near:'ne',sector:'north',role:'forest'}],features:[{id:'trees',type:'forest_texture',zoneId:'forest'}]},ctx);
+  assert.deepEqual(first.issues,[]);
+  const pins=new Map(first.scene.layout.pins.map(p=>[p.id,p]));
+  assert.ok(pins.get('north-shop').y<pins.get('gate').y);
+  assert.ok(pins.get('south-shop').y>pins.get('gate').y);
+  assert.ok(pins.get('west-shop').x<pins.get('fork').x);
+  assert.ok(pins.get('east-shop').x>pins.get('fork').x);
+  assert.ok(pins.get('forest').y<pins.get('ne').y);
+  const terrain=generate({zones:[{id:'ne',sector:'northeast'},{id:'forest',near:'ne',sector:'north',role:'forest'}],features:[{id:'trees',type:'forest_texture',zoneId:'forest'}]},ctx);
+  const next=generate({zones:[{id:'forest',near:'ne',sector:'south',role:'forest'}]},ctx,terrain.scene);
+  assert.deepEqual(next.issues,[]);
+  assert.notDeepEqual(next.scene.layout.features[0].polygon,terrain.scene.layout.features[0].polygon,'地形改变后纹理不能留在旧范围');
+  assert.ok(next.scene.layout.features[0].polygon.every(p=>p.y>pins.get('ne').y));
 });
 
 test('循环 near 从环内地点起排，排序更早的外部依赖仍保持局部间距', () => {

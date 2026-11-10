@@ -46,7 +46,8 @@ test('容器自己的房间轮廓可序列化；父地图入口只存子图 ID�
  const d=projection({mapView:view([map,child]),sceneView:view([{mapId:'inside',scene}])});
  assert.doesNotThrow(()=>JSON.stringify(d));
  assert.equal(d.ROOT.marks.find(m=>m.id==='L').node.id,'inside');
- assert.equal(d.ROOT.children[0].marks.find(m=>m.id==='L').node,null);
+ assert.equal(d.ROOT.children[0].marks.some(m=>m.id==='L'),false,'进入容器后不再把自身画成子地点图标');
+ assert.equal(d.ROOT.children[0].geo.rooms.find(r=>r.id==='L').isContainer,true,'自身墙体仍保留');
  assert.equal(d.ROOT.children[0].hasLayout,true);
  assert.equal(d.ROOT.children[0].kind,'room');
  assert.equal(d.ROOT.children[0].renderKind,'floor');
@@ -63,6 +64,15 @@ test('SQL 子地图按实际容器种类投影，site/interior 不冒充世界�
  }
 });
 function projection(extra={}){return projectReferenceData({mapView:view([map]),catalogView:view(cat),viewMode:'author',...extra});}
+test('新连接默认 5 分钟超时，经过编辑器、保存和重载后保留，已有自定义值不改写',async()=>{
+ const window={crypto:{randomUUID:()=> 'unique'},TextEncoder},ctx=vm.createContext({window,TextEncoder,URL});vm.runInContext(readFileSync(new URL('../ui/atlas-reference/js/presets.js',import.meta.url),'utf8'),ctx);
+ for(const timeoutMs of [undefined,12345,1200000]){
+  const d=referencePresetDocument({});d.connections[0]={...connection,...(timeoutMs===undefined?{}:{timeoutMs})};d.active.connectionId=connection.id;for(const a of Object.values(d.assignments))a.connectionId=connection.id;
+  let command;const store=window.AtlasPresetStore.create([],{storage:null,initialDocument:d,onPersist:async(doc,action)=>{command=referenceSettingsCommands(doc,{},action)[0];}});
+  await store.save('connection');const expected=timeoutMs??300000;
+  assert.equal(command.preset.timeoutMs,expected);const saved=applySettingsCommand(createDefaultSettingsV2(),command);assert.equal(saved.ok,true);assert.equal(referencePresetDocument(saved.settings).connections[0].timeoutMs,expected);
+ }
+});
 test('原版 API 编辑器保存 20 分钟超时，经过预设仓库与插件保存后保留',async()=>{
  const d=referencePresetDocument({});d.connections[0]={...connection,timeoutMs:120000};d.active.connectionId=connection.id;for(const a of Object.values(d.assignments))a.connectionId=connection.id;
  const window={crypto:{randomUUID:()=> 'unique'},TextEncoder},ctx=vm.createContext({window,TextEncoder,URL});vm.runInContext(readFileSync(new URL('../ui/atlas-reference/js/presets.js',import.meta.url),'utf8'),ctx);

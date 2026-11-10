@@ -88,7 +88,7 @@ test('真实城市画布只画保存的建筑轮廓和示意道路，不额外�
  const code=readFileSync(new URL('../ui/atlas-reference/js/map.js',import.meta.url),'utf8');
  const chunk=code.slice(code.indexOf('function cityMap(g)'),code.indexOf('/* ── L3 街区'));
  const blocks=[],lines=[],ctx=new Proxy({moveTo:(...p)=>lines.push(p),lineTo:(...p)=>lines.push(p)},{get:(o,k)=>o[k]??(()=>{}),set:(o,k,v)=>(o[k]=v,true)});
- const runtime=vm.createContext({ctx,st:{node:{host:true},cam:{s:1},filter:new Set()},skinColor:(_l,_p,f)=>f,hexA:c=>c,pushLabel:()=>{},rrect:(_c,...p)=>blocks.push(p)});
+ const runtime=vm.createContext({ctx,canvasStyle:null,st:{node:{host:true},cam:{s:1},filter:new Set()},skinColor:(_l,_p,f)=>f,hexA:c=>c,pushLabel:()=>{},rrect:(_c,...p)=>blocks.push(p)});
  vm.runInContext(chunk+';cityMap',runtime)({districts:[{id:'district',name:'街区',c:'#abc',pts:[[0,0],[50,0],[50,50],[0,50]]}],avenues:[{from:[10,10],to:[40,40]}],cityBuildings:[{x:20,y:20,w:8,h:6}]});
  assert.equal(blocks.length,1);assert.deepEqual(blocks[0].slice(0,4),[20,20,8,6]);assert.ok(lines.some(p=>p[0]===40&&p[1]===40));
 });

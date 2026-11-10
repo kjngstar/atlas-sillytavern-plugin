@@ -309,13 +309,27 @@ export function compileMapLayoutRequest(op: ParsedOperation, ctx: CompileContext
   result.issues.push(...refs.issues);
   if (!refs.ok || !refs.spec) return result;
   const resolvedSpec = refs.spec;
+  const frame = isPlainObject(before.frame_json) ? (before.frame_json as Record<string, unknown>) : {};
+  const saved = isPlainObject(frame['atlasLayoutRequest']) ? (frame['atlasLayoutRequest'] as Record<string, unknown>) : null;
+  const savedSpec = saved && isPlainObject(saved['spec']) ? (saved['spec'] as Record<string, unknown>) : null;
+  const savedScene = isPlainObject(frame.atlasScene) ? frame.atlasScene : null;
+  const sceneConstraints = isPlainObject(savedScene?.constraints) ? savedScene.constraints : null;
+  const streetTown = kind === 'city' && (resolvedSpec.streetPattern
+    ?? (resolvedSpec.rebuild === true ? undefined : savedSpec?.streetPattern ?? sceneConstraints?.streetPattern)) === 'main-street';
 
-  // 父图/子图混用：引用的地点必须属于这张图（未归属的地点允许，归属别图的拒绝）。
+  // A street town may project a building from its own district without taking
+  // ownership. Other cross-map references still fail the normal guard.
   for (const id of collectLocationRefs(resolvedSpec)) {
     const row = ctx.tables.selectOne('locations', ctx.branchId, id);
     if (!row) continue;
     const owner = row['map_id'] === null || row['map_id'] === undefined ? '' : String(row['map_id']);
     if (owner !== '' && owner !== mapId && id !== before.container_location_id) {
+      const parent = streetTown && row.kind === 'building' && row.status === 'active' && typeof row.parent_location_id === 'string'
+        ? ctx.tables.selectOne('locations', ctx.branchId, row.parent_location_id) : null;
+      if (parent?.kind === 'district' && parent.status === 'active' && parent.map_id === mapId
+        && parent.parent_location_id === before.container_location_id
+        && Array.isArray(resolvedSpec.buildings) && resolvedSpec.buildings.some(b => isPlainObject(b) && (b.id === id || b.near === id))
+        && !(Array.isArray(resolvedSpec.districts) && resolvedSpec.districts.some(d => isPlainObject(d) && d.id === id))) continue;
       result.issues.push(
         issue(
           LAYOUT_REQUEST_CONFLICT,
@@ -329,9 +343,6 @@ export function compileMapLayoutRequest(op: ParsedOperation, ctx: CompileContext
   }
 
   // 已保存请求 + 同批已编译结果 → 合并。
-  const frame = isPlainObject(before.frame_json) ? (before.frame_json as Record<string, unknown>) : {};
-  const saved = isPlainObject(frame['atlasLayoutRequest']) ? (frame['atlasLayoutRequest'] as Record<string, unknown>) : null;
-  const savedSpec = saved && isPlainObject(saved['spec']) ? (saved['spec'] as Record<string, unknown>) : null;
   const savedKind = saved && typeof saved['kind'] === 'string' ? String(saved['kind']) : null;
 
   let state = BATCH_STATE.get(ctx);
@@ -385,7 +396,7 @@ export function compileMapLayoutRequest(op: ParsedOperation, ctx: CompileContext
 
   // 幂等：重复相同 request 与 scene 约束不产生新变更（只回读集与依赖）。
   const savedSignature = saved && typeof saved['inputSignature'] === 'string' ? String(saved['inputSignature']) : null;
-  if (savedSignature === signature) return result;
+  if (savedSignature === signature && saved?.status !== 'failed') return result;
 
   const nextFrame: Record<string, unknown> = { ...frame };
   nextFrame['atlasLayoutRequest'] = {

@@ -244,6 +244,11 @@ export function resolveSpatialProfile(input: SpatialProfileInput): SpatialProfil
   const issues: PlanIssue[] = [];
   const path = `$.maps.${asId(input.map?.id) ?? '?'}.profile`;
   const containerKind = TEXT(input.container?.kind);
+  const frame = normalizeFrame(input.map?.frame_json);
+  const scene = PLAIN(frame.atlasScene) ? frame.atlasScene : null;
+  const layout = scene && PLAIN(scene.layout) ? scene.layout : null;
+  const pending = PLAIN(frame.atlasLayoutRequest) ? frame.atlasLayoutRequest : null;
+  const savedKind = TEXT(layout?.kind) || TEXT(pending?.kind);
   const sources: SpatialProfileResolution['sources'] = [];
 
   const stored = readSpatialProfile(input.map?.frame_json);
@@ -258,6 +263,12 @@ export function resolveSpatialProfile(input: SpatialProfileInput): SpatialProfil
   const corridorEntityId = TEXT(input.corridorEntityId) || boundCorridorIdOf(input.map) || '';
   if (stored.profile && stored.profile.basis === 'author') {
     chosen = { mode: stored.profile.mode, basis: 'author', reason: '作者显式选择档案' };
+  } else if (containerKind === 'district' && savedKind === 'overview') {
+    chosen = { mode: 'linear', basis: 'source-supported', reason: '沿用已保存街区图的地点足迹与路线模板' };
+  } else if (containerKind === 'district' && !savedKind
+    && (input.members ?? []).some(member => member.kind === 'building')
+    && (input.routes ?? []).filter(route => ['road','path'].includes(TEXT(route.kind)) && route.status !== 'closed').length >= 2) {
+    chosen = { mode: 'linear', basis: 'source-supported', reason: '街区已有建筑和多条真实道路，按地点足迹与路线组织室外布局' };
   } else if (corridorEntityId) {
     // 可信关系推导：本图绑定了一条真实的命名走廊 → 通行空间。这条比类型默认更可信，
     // 但它仍然**不覆盖**作者的显式选择（上一分支已经拦下了 author）。
@@ -304,6 +315,9 @@ export function resolveSpatialProfile(input: SpatialProfileInput): SpatialProfil
     const id = String(member.id ?? '');
     const kind = TEXT(member.kind);
     if (!kind) continue;
+    // A moored vehicle is rendered through its anchor and interior link. It
+    // does not ask the surrounding map to lay out a fixed indoor footprint.
+    if(kind==='vehicle'&&member.mobility==='mobile'&&asId(member.anchor_location_id))continue;
     if (kind === 'floor' && (chosen.mode === 'interior' || chosen.mode === 'compound')) {
       pushUnsupported(id, kind, '楼层由独立楼层入口展示，不作为同层平面房间或室外足迹');
     } else if (chosen.mode === 'outdoor' && INDOOR_KINDS.has(kind)) {

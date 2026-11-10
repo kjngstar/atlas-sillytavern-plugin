@@ -189,6 +189,7 @@ export type MapViewItem = {
     kind: 'location' | 'character' | 'item';
     mobility?: string;
     locationKind?: string;
+    terrain?: string;
     name: string;
     mapId: string;
     x: number;
@@ -386,6 +387,7 @@ export function queryMapView(ctx: ViewContext, query: ViewQuery): ViewResult {
       points.push({
         entityId: locId,
         kind: 'location',
+        ...(loc.kind==='natural'&&typeof loc.terrain==='string'?{terrain:loc.terrain}:{}),
         name: String(loc.name ?? ''),
         mapId,
         x: loc.grid_x,

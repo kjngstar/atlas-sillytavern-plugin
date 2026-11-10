@@ -30,6 +30,61 @@ const BASE = {
   ],
 };
 
+for(const [width,height]of [[500,300],[80,60]])test(`小场所 ${width}×${height} 米保留原幅面与建筑尺寸，不被城市模板下限拒绝`,()=>{
+  const result=Kit.generateCity({enclosure:'open',riverWidth:0,blocksPerDistrict:0,districts:[{id:'d1',bank:'west',order:0}],buildings:[{id:'b1',districtId:'d1',w:12,h:8},{id:'b2',districtId:'d1',w:12,h:8}]},cityCtx({map:{metersPerCell:1,frame:{cols:width,rows:height}}}));
+  assert.equal(result.ok,true,JSON.stringify(result.issues));
+  assert.deepEqual(result.scene.layout.bounds,{x:0,y:0,w:width,h:height});
+  assert.equal(result.scene.layout.buildings.length,2,JSON.stringify(result.issues));
+  for(const b of result.scene.layout.buildings){assert.equal(b.w,12);assert.equal(b.h,8);assert.ok(b.x>=0&&b.y>=0&&b.x+b.w<=width&&b.y+b.h<=height);}
+  const [a,b]=result.scene.layout.buildings;
+  assert.ok(a.x+a.w<=b.x||b.x+b.w<=a.x||a.y+a.h<=b.y||b.y+b.h<=a.y);
+});
+
+test('城市建筑明确正东4米墙距可覆盖模板留白，保存重开后保持同一约束',()=>{
+  const ctx=cityCtx({map:{metersPerCell:1,frame:{cols:500,rows:300}}});
+  const spec={enclosure:'open',riverWidth:0,blocksPerDistrict:0,districts:[{id:'d1',bank:'west',order:0}],buildings:[{id:'b1',districtId:'d1',w:12,h:8},{id:'b2',districtId:'d1',w:12,h:8}]};
+  const first=Kit.generateCity(spec,ctx);assert.equal(first.ok,true);
+  const result=Kit.generateCity({...spec,buildings:[{...spec.buildings[1],w:24,h:20,near:'b1',sector:'east',gapM:4}]},{...ctx,childSpaces:{b2:{widthM:12,heightM:8}},previousScene:first.scene});
+  assert.equal(result.ok,true,JSON.stringify(result.issues));
+  const a=result.scene.layout.buildings.find(b=>b.id==='b1'),b=result.scene.layout.buildings.find(b=>b.id==='b2');
+  assert.ok(Math.abs(b.x-a.x-a.w-4)<1e-7);
+  assert.equal(b.y,a.y);
+  assert.equal(a.w,12);assert.equal(b.w,12);
+  assert.equal(result.scene.constraints.buildings.find(b=>b.id==='b2').gapM,4);
+  const again=Kit.generateCity({buildings:[]},{...ctx,previousScene:result.scene});
+  assert.equal(again.ok,true,JSON.stringify(again.issues));
+  assert.deepEqual(again.scene.layout.buildings,result.scene.layout.buildings);
+});
+
+test('明确邻近关系不能搬动确认建筑来凑墙距',()=>{
+  const ctx=cityCtx({map:{metersPerCell:1,frame:{cols:500,rows:300}}});
+  const spec={enclosure:'open',riverWidth:0,districts:[{id:'d1',bank:'west',order:0}],buildings:[{id:'b1',districtId:'d1',w:12,h:8},{id:'b2',districtId:'d1',w:12,h:8}]};
+  const first=Kit.generateCity(spec,ctx);assert.equal(first.ok,true);
+  const old=first.scene.layout.buildings.find(b=>b.id==='b2');old.quality='confirmed';
+  const result=Kit.generateCity({buildings:[{...spec.buildings[1],near:'b1',sector:'west',gapM:4}]},{...ctx,previousScene:first.scene});
+  assert.equal(result.ok,false);
+  assert.ok(result.issues.some(i=>i.code==='BUILDING_PROXIMITY_CONFLICT'));
+  assert.deepEqual(result.kept,first.scene);
+});
+
+for(const mpp of [1,5])test(`城市重排按${mpp}米/格更新估计路线，确认路线与实际行程长度保持`,()=>{
+  const mapRow={branch_id:'b1',id:'M_C',name:'港区',container_location_id:'d1',frame_json:{cols:500/mpp,rows:300/mpp},meters_per_cell:mpp,scale_quality:'estimated',scale_locked:0,status:'active',row_rev:1};
+  const locations=[{id:'d1',kind:'district',map_id:null,parent_location_id:null},...['b1','b2'].map(id=>({id,kind:'building',map_id:'M_C',parent_location_id:'d1',grid_x:1,grid_y:1,coord_precision:'layout',area_geometry_json:{kind:'dimensions',widthM:12,heightM:8,quality:'confirmed',source:'story'}}))].map(l=>({branch_id:'b1',name:l.id,status:'active',row_rev:1,...l}));
+  const route={branch_id:'b1',id:'route',map_id:'M_C',from_location_id:'b1',to_location_id:'b2',status:'open',geometry_quality:'estimated',geometry_json:{kind:'line',coordinates:[[1,1],[2,2]]},distance_m:42,geometry_rev:1,row_rev:1};
+  const request={kind:'city',spec:{riverWidth:0,enclosure:'open',districts:[{id:'d1',bank:'west',order:0}],buildings:[{id:'b1',districtId:'d1',w:12,h:8},{id:'b2',districtId:'d1',w:12,h:8,near:'b1',sector:'east',gapM:4}]}};
+  const input={request,scope:SCOPE,currentScope:SCOPE,mapRow,maps:[mapRow],locations,characters:[],items:[],routes:[route],turnId:'layout',operationId:'layout'};
+  const out=Kit.compileSceneGroup(input);assert.equal(out.ok,true,JSON.stringify(out.issues));
+  const saved=out.group.mutations.find(m=>m.table==='routes').after;
+  const a=out.scene.layout.buildings.find(b=>b.id==='b1'),b=out.scene.layout.buildings.find(b=>b.id==='b2');
+  assert.deepEqual(saved.geometry_json.coordinates,[[(a.x+a.w/2)/mpp,(a.y+a.h/2)/mpp],[(b.x+b.w/2)/mpp,(b.y+b.h/2)/mpp]]);
+  assert.equal(saved.distance_m,42);
+  assert.equal(saved.geometry_quality,'estimated');
+  assert.deepEqual(route.geometry_json.coordinates,[[1,1],[2,2]]);
+  const locked=Kit.compileSceneGroup({...input,routes:[{...route,geometry_quality:'confirmed'}]});
+  assert.equal(locked.ok,true,JSON.stringify(locked.issues));
+  assert.ok(!locked.group.mutations.some(m=>m.table==='routes'));
+});
+
 // ───────────────────────── G07-A · 新城市默认开放：不画假城墙 ─────────────────────────
 
 test('G07：enclosure=open + riverWidth=0 → 无假城墙、无城门、无环城墙道路', () => {

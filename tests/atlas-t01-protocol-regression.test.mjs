@@ -175,9 +175,10 @@ test("T11：502 / 超时 / 空响应 / 块无效 —— 错误分类清楚，失
     const core = carrierAsCore(carrier);
     await core.handle("POST", "/worlds/import", { world: JSON.parse(JSON.stringify(world)) }, { local: true });
     await core.handle("POST", "/bindings", { action: "bind", binding: bindingFor(world) });
-    await core.handle("PUT", "/settings", {
-      worldTurn: { name: "模拟推演", endpoint: "https://mock.example.invalid/v1", model: "atlas-mock", apiKey: SECRET, timeoutMs: 30 },
+    const configured = await core.handle("PUT", "/settings", {
+      worldTurn: { name: "模拟推演", endpoint: "https://mock.example.invalid/v1", model: "atlas-mock", apiKey: SECRET, timeoutMs: 1000 },
     }, { local: true });
+    assert.equal(configured.status, 200, "超时夹具使用合法的最短等待时间，不能落入默认值");
     await core.handle("PUT", "/settings", { action: "runtime.update", worldTurnProtocol: "table-delta-v1" }, { local: true });
     const result = await core.handle("POST", "/turns/commit", commitRequest(world));
     assert.equal(result.body.error.code, ATLAS_ERROR_CODES.API_TIMEOUT, "超时 → API_TIMEOUT");

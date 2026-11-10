@@ -1054,6 +1054,28 @@ test("A7 兼容：finish_reason=stop + 合法 JSON → 成功；缺失 finish_re
   assert.equal(other.ok, true, "非 length 的停止码不由本规则判定");
 });
 
+test("API 默认等待 5 分钟，超过原 120 秒仍可收取回复，截止时会释放无响应宿主", async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { timeoutMs: _savedTimeout, ...preset } = TRUNCATION_PRESET;
+  let complete;
+  const pending = callAtlasWorldTurnApi(preset, TRUNCATION_INPUT, {
+    fetchFn: () => new Promise(resolve => {
+      complete = () => resolve(new Response(JSON.stringify({ choices: [{ message: { content: 'ok' } }] })));
+    }),
+  });
+  t.mock.timers.tick(120_001);
+  complete();
+  assert.equal((await pending).ok, true);
+
+  // 酒馆适配器可能不响应 AbortSignal，调用方仍应在默认截止时间得到明确失败。
+  const hung = callAtlasWorldTurnApi(preset, TRUNCATION_INPUT, { fetchFn: () => new Promise(() => {}) });
+  t.mock.timers.tick(299_999);
+  t.mock.timers.tick(1);
+  const result = await hung;
+  assert.equal(result.code, ATLAS_ERROR_CODES.API_TIMEOUT);
+  assert.match(result.message, /300000ms/);
+});
+
 test("API 允许等待 20 分钟，超过原 120 秒时仍继续等待并可收取回复", async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] });
   let complete;

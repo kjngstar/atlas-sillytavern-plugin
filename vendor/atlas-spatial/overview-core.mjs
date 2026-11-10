@@ -166,12 +166,13 @@ export function overview(spec,previous=null){
     const ratio=SIZE_RATIO[SIZE_SET.has(z.size)?z.size:'medium'];
     baseRadius.set(z.id,z.physicalSize?Math.max(z.physicalSize.w,z.physicalSize.h)/2:S*ratio);
   }
-  // Keep drawing sizes separate from collision envelopes: rectangle corners
-  // and the jitter in natural outlines extend beyond the nominal radius.
-  const footprintRadius=new Map(zonesIn.map(z=>[z.id,z.lockedPolygon?.length>=3
-    ?Math.max(...z.lockedPolygon.map(p=>distance(p,z.locked??centroid(z.lockedPolygon))))
-    :z.physicalSize?Math.hypot(z.physicalSize.w,z.physicalSize.h)/2
-      :Math.max(...zonePolygon(z,0,0,baseRadius.get(z.id),seed).map(p=>Math.hypot(p.x,p.y)))]));
+  // A long, narrow footprint must reserve its actual width and height, not a
+  // circumscribed circle that can be wider than the entire available band.
+  const halfExtents=(polygon,center=pt(0,0))=>({x:Math.max(...polygon.map(p=>Math.abs(p.x-center.x))),y:Math.max(...polygon.map(p=>Math.abs(p.y-center.y)))});
+  const envelopes=new Map(zonesIn.map(z=>[z.id,z.lockedPolygon?.length>=3
+    ?halfExtents(z.lockedPolygon,z.locked??centroid(z.lockedPolygon))
+    :z.physicalSize?{x:z.physicalSize.w/2,y:z.physicalSize.h/2}
+      :halfExtents(zonePolygon(z,0,0,baseRadius.get(z.id),seed))]));
   const structureKeyOf=z=>stable({role:z.role??null,size:z.size??null,...(z.physicalSize?{physicalSize:z.physicalSize}:{}),sector:z.sector??null,near:z.near??null,locked:z.locked??null,lockedPolygon:z.lockedPolygon??null,placementPolicy:3});
   const occupied=[],sites=new Map(),reasons=new Map();
   for(const z of zonesIn){
@@ -183,9 +184,8 @@ export function overview(spec,previous=null){
       const point=pt(fixed.x,fixed.y);sites.set(z.id,point);
       reasons.set(z.id,locked?'locked':'saved');
       const polygon=z.lockedPolygon??(saved?old.polygon:null);
-      const radius=polygon?.length>=3?Math.max(...polygon.map(p=>distance(p,point))):footprintRadius.get(z.id);
-      footprintRadius.set(z.id,radius);
-      occupied.push({id:z.id,point,radius});
+      if(polygon?.length>=3)envelopes.set(z.id,halfExtents(polygon,point));
+      occupied.push({id:z.id,point,envelope:envelopes.get(z.id)});
     }
   }
   const obstacles=[];
@@ -197,31 +197,40 @@ export function overview(spec,previous=null){
   while(pending.length){
     // Resolve anchors first. When all remaining nodes depend on each other,
     // start inside the actual cycle, not at an external dependent sorted first.
-    let ready=pending.findIndex(z=>!z.near||!pending.some(other=>other.id===z.near));
+    let ready=pending.map((z,i)=>({z,i})).filter(({z})=>!z.near||!pending.some(other=>other.id===z.near))
+      .sort((a,b)=>{const ea=envelopes.get(a.z.id),eb=envelopes.get(b.z.id);return eb.x*eb.y-ea.x*ea.y||a.i-b.i;})[0]?.i??-1;
     if(ready<0){
       let anchor=pending[0];const visited=new Set();
       while(!visited.has(anchor.id)){visited.add(anchor.id);anchor=pending.find(z=>z.id===anchor.near);}
       ready=pending.indexOf(anchor);
     }
     const z=pending.splice(ready,1)[0];
-    const r=footprintRadius.get(z.id);
+    const envelope=envelopes.get(z.id);
     const near=z.near?sites.get(z.near):null;
-    const nearRadius=near?footprintRadius.get(z.near)??r:0;
     // Nearby footprints need spacing based on their sizes, not on the entire
     // world's width. A direction with near is relative to that anchor.
-    const spacing=near?Math.max(r,nearRadius):z.physicalSize?r:minGap;
+    const shortRadius=e=>Math.min(e.x,e.y);
+    const spacing=near?Math.max(shortRadius(envelope),shortRadius(envelopes.get(z.near))):z.physicalSize?shortRadius(envelope):minGap;
     const angle=SECTOR_ANGLE[z.sector];
-    const offset=near?r+nearRadius+spacing*.15:0;
+    const support=(e,a)=>Math.abs(Math.cos(a))*e.x+Math.abs(Math.sin(a))*e.y;
+    const offset=near&&angle!==undefined?support(envelope,angle)+support(envelopes.get(z.near),angle)+spacing*.15:0;
     const target=near?pt(near.x+(angle===undefined?0:offset*Math.cos(angle)),near.y+(angle===undefined?0:offset*Math.sin(angle))):angle!==undefined?pt(W*(.5+.24*Math.cos(angle)),H*(.5+.24*Math.sin(angle))):pt((box.x0+box.x1)/2,(box.y0+box.y1)/2);
+    target.x=clamp(target.x,box.x0+envelope.x,box.x1-envelope.x);
+    target.y=clamp(target.y,box.y0+envelope.y,box.y1-envelope.y);
     const startIndex=hashOf(`${seed}\u0000${z.id}`)%MAX_CANDIDATES;
     let chosen=null;
     for(const factor of GAP_FACTORS){
       const gap=spacing*factor;
       for(let step=0;step<MAX_CANDIDATES;step++){
-        const index=startIndex+step,radius=gap*Math.sqrt(near?step:step+1),angle=index*GOLDEN_ANGLE;
+        const index=startIndex+step,radius=gap*Math.sqrt(step),angle=index*GOLDEN_ANGLE;
         const c=pt(target.x+radius*Math.cos(angle),target.y+radius*Math.sin(angle));
-        if(c.x<box.x0+r||c.x>box.x1-r||c.y<box.y0+r||c.y>box.y1-r)continue;
-        if(!occupied.every(o=>distance(c,o.point)+EPS>=r+(o.radius??0)+gap*.15))continue;
+        const anchor=near??pt(W/2,H/2),direction=SECTOR_ANGLE[z.sector];
+        if(direction!==undefined){
+          const dx=Math.cos(direction),dy=Math.sin(direction);
+          if(Math.abs(dx)>EPS&&(c.x-anchor.x)*dx<=0||Math.abs(dy)>EPS&&(c.y-anchor.y)*dy<=0)continue;
+        }
+        if(c.x<box.x0+envelope.x||c.x>box.x1-envelope.x||c.y<box.y0+envelope.y||c.y>box.y1-envelope.y)continue;
+        if(!occupied.every(o=>Math.abs(c.x-o.point.x)+EPS>=envelope.x+o.envelope.x+gap*.15||Math.abs(c.y-o.point.y)+EPS>=envelope.y+o.envelope.y+gap*.15))continue;
         if(!obstacles.every(o=>!pointInPolygon(o.polygon,c)))continue;
         chosen=c;break;
       }
@@ -229,7 +238,7 @@ export function overview(spec,previous=null){
     }
     if(!chosen){issues.push({id:z.id,code:'OVERVIEW_ZONE_NO_SPACE'});continue;}
     sites.set(z.id,chosen);reasons.set(z.id,near?'layout:near':'layout:center');
-    occupied.push({id:z.id,point:chosen,radius:r});
+    occupied.push({id:z.id,point:chosen,envelope});
   }
 
   // ── 步 3：几何。旧图元按结构签名原样复用；只有结构约束真的变了才局部更新。
@@ -326,13 +335,13 @@ export function overview(spec,previous=null){
   for(const f of featuresIn){
     if(!FEATURE_TYPES.has(f.type)){issues.push({id:f.id,code:'OVERVIEW_FEATURE_TYPE_INVALID'});continue;}
     const density=DENSITY_SET.has(f.density)?f.density:'medium';
-    const structureKey=stable({type:f.type,zoneId:f.zoneId??null,density,fromSector:f.fromSector??null,toSector:f.toSector??null,widthClass:f.widthClass??null,...(f.type==='road_texture'?{texturePolicy:2}:{})});
+    const zonePolygon=f.zoneId?shapePolygon.get(f.zoneId):null;
+    const structureKey=stable({type:f.type,zoneId:f.zoneId??null,...(f.zoneId?{zonePolygon:zonePolygon??null}:{}),density,fromSector:f.fromSector??null,toSector:f.toSector??null,widthClass:f.widthClass??null,...(f.type==='road_texture'?{texturePolicy:2}:{})});
     const prev=prevFeatures.get(f.id);
     if(prev&&prev.structureKey===structureKey){pushFeature(clone(prev));continue;}
     // 装饰没有 SQL 身份：一律 decorative=true / quality=estimated，模型不能自称 confirmed。
     const base={id:f.id,type:f.type,density,decorative:true,quality:'estimated',structureKey};
     if(typeof f.zoneId==='string'&&f.zoneId)base.zoneId=f.zoneId;
-    const zonePolygon=f.zoneId?shapePolygon.get(f.zoneId):null;
     if(f.zoneId&&!zonePolygon){issues.push({id:f.id,code:'OVERVIEW_FEATURE_ZONE_UNKNOWN'});continue;}
     if(f.type==='watercourse'){
       const fromSector=SECTOR_ANGLE[f.fromSector]!==undefined?f.fromSector:'west';

@@ -5,11 +5,71 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import * as Kit from '../vendor/atlas-spatial/index.mjs';
+import {navigation, contains} from '../vendor/atlas-spatial/layout-core.mjs';
+import {canonicalForScene} from '../vendor/atlas-spatial/storage.mjs';
+import {readSpaceCanonical} from '../src/atlas-space-canonical.ts';
+import {reconcileOccupantsSpec} from '../src/atlas-spatial-occupants.ts';
 
 const scope={chatId:'chat-1',branchId:'b1',revision:3,viewMode:'author'};
 const POV={...scope,viewMode:'pov'};
 const baseRooms=()=>Array.from({length:6},(_,i)=>({id:'room-'+i,name:'房间'+i,side:i%2?'north':'south',w:6,h:5}));
 const baseCtx=(locations)=>({scope,currentScope:scope,map:{id:'map-1',name:'fixture',metersPerCell:2,frame:{cols:15,rows:12}},entities:{locations,characters:['npc-1'],items:['item-1']}});
+
+test('a single table keeps its chairs and a seated character in the same part of the room', () => {
+  const id = 'tea-room';
+  const context = {...baseCtx([id]),map:{id:'map-1',name:'茶铺',containerLocationId:id,metersPerCell:1,frame:{cols:12,rows:8}}};
+  const result = Kit.generateFloor({
+    rooms:[{id,w:12,h:8,side:'north'}],
+    contents:[
+      {id:'counter',roomId:id,type:'desk',w:.8,h:3,wall:'west'},
+      {id:'table',roomId:id,type:'table',w:1.5,h:1},
+      {id:'chair-a',roomId:id,type:'chair',w:.55,h:.55},
+      {id:'chair-b',roomId:id,type:'chair',w:.55,h:.55},
+    ],
+    actors:[{id:'npc-1',roomId:id,near:'chair-a'}],
+  }, context);
+  assert.deepEqual(result.issues, []);
+  const {groups, actors} = result.scene.layout;
+  const table = groups.find(group => group.id === 'table');
+  const chairs = groups.filter(group => group.type === 'chair');
+  assert.equal(chairs.length, 2);
+  for (const seat of chairs) {
+    const x = seat.x + seat.w / 2;
+    const y = seat.y + seat.h / 2;
+    assert.ok(Math.hypot(Math.max(table.x-x, x-table.x-table.w, 0), Math.max(table.y-y, y-table.y-table.h, 0)) < 1);
+  }
+  assert.deepEqual({x:actors[0].x,y:actors[0].y}, chairs.find(seat=>seat.id==='chair-a').interaction);
+});
+
+test('a compact repair shop keeps both stools at the workbench and all five furnishings reachable',()=>{
+  const id='repair-shop',w=5,h=4.5;
+  const context={...baseCtx([id]),map:{id:'map-1',name:'修伞铺',containerLocationId:id,metersPerCell:1,frame:{cols:w,rows:h}}};
+  const result=Kit.generateFloor({
+    rooms:[{id,w,h,side:'north'}],
+    contents:[
+      {id:'furn_workbench',type:'workbench',w:2,h:1,wall:'north'},
+      {id:'furn_shelf',type:'shelf',w:.6,h:1.8,wall:'east'},
+      {id:'furn_bench',type:'bench',w:1.2,h:.5,wall:'south',nearDoor:true},
+      {id:'furn_stool_1',type:'chair',w:.6,h:.6},
+      {id:'furn_stool_2',type:'chair',w:.6,h:.6},
+    ].map(row=>({...row,roomId:id})),
+    actors:[{id:'npc-1',roomId:id,near:'furn_stool_1'}],
+  },context);
+  assert.deepEqual(result.issues,[]);
+  const {groups,actors,doors}=result.scene.layout;
+  assert.equal(doors.length,1);
+  assert.equal(groups.length,5);
+  assert.ok(groups.every(group=>group.interaction));
+  const bench=groups.find(group=>group.type==='workbench');
+  for(const stool of groups.filter(group=>group.type==='chair')){
+    const x=stool.x+stool.w/2,y=stool.y+stool.h/2;
+    assert.ok(Math.hypot(Math.max(bench.x-x,x-bench.x-bench.w,0),Math.max(bench.y-y,y-bench.y-bench.h,0))<1.25);
+  }
+  const [actor]=actors;
+  const stool=groups.find(group=>group.id===actor.near);
+  assert.equal(stool.id,'furn_stool_1');
+  assert.ok(Math.hypot(actor.x-stool.x-stool.w/2,actor.y-stool.y-stool.h/2)<1);
+});
 
 test('outdoor and garden spaces retain their role through saving, updating and POV filtering without indoor windows',()=>{
  const rooms=baseRooms().map((r,i)=>({...r,role:i===0?'garden':i===1?'outdoor':'indoor'}));
@@ -29,6 +89,130 @@ test('柜面可承载物品并保留真实容器引用',()=>{
  assert.equal(result.ok,true,JSON.stringify(result.issues));
  assert.equal(result.scene.layout.items[0]?.containerId,'cabinet');
  assert.ok(!result.issues.some(i=>i.code==='ITEM_CONTAINER_NOT_FOUND'));
+});
+
+test('工坊陈设保留墙边与门边关系，增量更新和父图投影沿用同一摆放依据',()=>{
+ const context=baseCtx(['workshop']);
+ context.map={...context.map,containerLocationId:'workshop',containerKind:'room',metersPerCell:1,frame:{cols:7,rows:5}};
+ const rooms=[{id:'workshop',w:7,h:5,side:'north'}];
+ const contents=[
+  {id:'workbench',type:'workbench',w:2,h:.8,wall:'east'},
+  {id:'anvil',type:'anvil',w:.9,h:.7,wall:'west'},
+  {id:'crate',type:'crate',w:.9,h:.7,wall:'south'},
+  {id:'basket',type:'basket',w:.6,h:.6,wall:'south'},
+  {id:'screen',type:'screen',w:1.2,h:.3,nearDoor:true},
+ ].map(row=>({...row,name:row.id,roomId:'workshop'}));
+ const requestSpec={rooms,contents,items:[{id:'item-1',on:'screen',asFurniture:true}]};
+ const actualItems=[{id:'item-1',location_id:'workshop',status:'active'}];
+ const occupants=reconcileOccupantsSpec({scene:null,requestSpec,items:actualItems});
+ const first=Kit.generateFloor({...requestSpec,...occupants.spec},context);
+ assert.equal(first.ok,true,JSON.stringify(first.issues));
+ assert.deepEqual(first.issues,[]);
+ const groups=new Map(first.scene.layout.groups.map(group=>[group.id,group]));
+ assert.ok(Math.abs(groups.get('workbench').x+groups.get('workbench').w-6.8)<1e-7);
+ assert.ok(Math.abs(groups.get('anvil').x-.2)<1e-7);
+ for(const id of ['crate','basket'])assert.ok(Math.abs(groups.get(id).y+groups.get(id).h-4.8)<1e-7);
+ const screen=groups.get('screen'),door=first.scene.layout.doors[0];
+ assert.ok(Math.hypot(screen.x+screen.w/2-door.x,screen.y+screen.h/2-door.y)<2);
+ const screenItem=first.scene.layout.items.find(item=>item.id==='item-1');
+ assert.deepEqual([screenItem.x,screenItem.y,screenItem.elevation],[screen.x+screen.w/2,screen.y+screen.h/2,0]);
+ assert.ok(first.scene.layout.groups.every(group=>group.interaction));
+ const next=Kit.generateFloor({contents:[{id:'extra',type:'chair',roomId:'workshop',w:.5,h:.5}]},{...context,previousScene:first.scene});
+ assert.equal(next.ok,true,JSON.stringify(next.issues));
+ for(const group of first.scene.layout.groups){
+  const updated=next.scene.layout.groups.find(row=>row.id===group.id);
+  assert.deepEqual([updated.x,updated.y,updated.w,updated.h,updated.bodies],[group.x,group.y,group.w,group.h,group.bodies]);
+  assert.ok(updated.interaction);
+ }
+ const canonical=canonicalForScene(first.scene,null,'workshop',null);
+ assert.deepEqual(readSpaceCanonical({atlasSpaceCanonical:canonical},'workshop').canonical,canonical);
+ assert.deepEqual(Kit.readSpaceCanonical(canonical,'workshop').furnishing,canonical.furnishing);
+ assert.equal(canonical.furnishing.find(row=>row.localId.endsWith(':workbench')).wall,'east');
+ assert.equal(canonical.furnishing.find(row=>row.localId.endsWith(':screen')).nearDoor,true);
+ assert.equal(canonical.furnishing.find(row=>row.localId.endsWith(':screen')).asFurniture,true);
+ const persisted=reconcileOccupantsSpec({scene:first.scene,requestSpec:{rooms,contents},items:actualItems,spaceCanonical:canonical});
+ assert.equal(persisted.spec.items[0].asFurniture,true);
+ const reloaded=Kit.generateFloor({}, {...context,spaceCanonical:canonical,previousScene:first.scene});
+ assert.deepEqual(reloaded.scene.layout.items,first.scene.layout.items);
+ const staleContents=contents.map(({wall,nearDoor,...row})=>row);
+ const projected=Kit.generateFloor({rooms,contents:staleContents}, {...context,spaceCanonical:canonical});
+ assert.deepEqual(projected.scene.layout.groups,first.scene.layout.groups);
+});
+
+test('家具本体与桌上工具共享陈设时，账本绑定家具本体，工具保持台面位置',()=>{
+ const context=baseCtx(['workshop']);
+ context.entities.items=['a-tool','z-bench'];
+ const first=Kit.generateFloor({rooms:[{id:'workshop',w:8,h:6,side:'north'}],
+  contents:[{id:'bench',name:'木工台',type:'workbench',roomId:'workshop',w:2,h:.8,wall:'east'}],
+  items:[{id:'a-tool',on:'bench'},{id:'z-bench',on:'bench',asFurniture:true}]},context);
+ assert.equal(first.ok,true,JSON.stringify(first.issues));
+ const items=first.scene.layout.items;
+ assert.equal(items.find(item=>item.id==='a-tool').elevation,.8);
+ assert.equal(items.find(item=>item.id==='z-bench').elevation,0);
+ const canonical=canonicalForScene(first.scene,null,'workshop',null);
+ assert.equal(canonical.furnishing[0].itemId,'z-bench');
+ assert.equal(canonical.furnishing[0].asFurniture,true);
+});
+
+test('酒馆组合陈设保留组内构件，吧台工作位和房门均可达',()=>{
+ const rooms=[
+  {id:'hall',name:'大厅',w:12,h:7,side:'north'},
+  {id:'kitchen',name:'后厨',w:8,h:5,side:'south'},
+ ];
+ const contents=[
+  {id:'bar',type:'bar',roomId:'hall',w:4.8,h:2.4},
+  {id:'worktop',type:'kitchen-line',roomId:'kitchen',w:.9,h:4},
+  {id:'casks',type:'barrels',roomId:'kitchen',w:2.4,h:.85},
+  {id:'bad',type:'bar',roomId:'hall',w:2,h:1},
+ ];
+ const result=Kit.generateFloor({rooms,contents,items:[{id:'item-1',on:'bar'}]},baseCtx(rooms.map(r=>r.id)));
+ assert.ok(result.ok,JSON.stringify(result.issues));
+ assert.deepEqual(result.issues.map(issue=>[issue.code,issue.entityId]),[['DETAIL_DIMENSION_INVALID','bad']]);
+ const layout=result.scene.layout;
+ const bar=layout.groups.find(group=>group.id==='bar');
+ const worktop=layout.groups.find(group=>group.id==='worktop');
+ assert.deepEqual(bar.bodies.map(body=>body.type),['bar-counter','bottle-shelf','barrel']);
+ assert.deepEqual(worktop.bodies.map(body=>body.type),['prep-counter','stove','shelf']);
+ assert.equal(layout.groups.find(group=>group.id==='casks').bodies.length,3);
+ assert.equal(layout.items[0].containerId,bar.id);
+ for(const group of layout.groups){
+  assert.ok(group.interaction);
+  assert.ok(group.bodies.every(body=>body.solid&&contains(group,body)));
+ }
+ const hall=layout.rooms.find(room=>room.id==='hall');
+ const door=layout.doors.find(door=>door.roomId==='hall');
+ const passage=navigation(hall,door,bar.bodies);
+ assert.ok(passage.reachable({x:bar.x+bar.w/2,y:bar.y+bar.h/2}));
+});
+
+test('独立构件各自生成实体，并在追加家具后保留旧件位置',()=>{
+ const rooms=[
+  {id:'kitchen',w:10,h:7,side:'north'},
+  {id:'workshop',w:8,h:6,side:'south'},
+  {id:'storeroom',w:7,h:6,side:'south'},
+ ];
+ const contents=[
+  ['bar-counter','kitchen',2,.7],['bottle-shelf','kitchen',1.5,.4],
+  ['stove','kitchen',1.15,.75],['prep-table','kitchen',1.3,.7],['sink','kitchen',.75,.7],
+  ['anvil','workshop',.85,.6],['workbench','workshop',1.8,.7],['screen','workshop',1.3,.3],
+  ['barrel','storeroom',.7,.7],['crate','storeroom',.9,.7],['basket','storeroom',.55,.55],
+ ].map(([type,roomId,w,h])=>({id:type,type,roomId,w,h}));
+ const context=baseCtx(rooms.map(room=>room.id));
+ const first=Kit.generateFloor({rooms,contents},context);
+ assert.ok(first.ok);
+ assert.deepEqual(first.issues,[]);
+ assert.equal(first.scene.layout.groups.length,contents.length);
+ for(const group of first.scene.layout.groups){
+  assert.equal(group.bodies.length,1);
+  const [body]=group.bodies;
+  assert.deepEqual([body.type,body.groupId,body.solid],[group.type,group.id,true]);
+  assert.ok(group.interaction);
+ }
+ const next=Kit.generateFloor({contents:[{id:'second-barrel',type:'barrel',roomId:'storeroom',w:.65,h:.65}]},
+  {...context,previousScene:first.scene});
+ assert.ok(next.ok);
+ assert.deepEqual(next.issues,[]);
+ assert.deepEqual(next.scene.layout.groups.filter(group=>group.id!=='second-barrel'),first.scene.layout.groups);
 });
 
 test('四米车厢可容纳一米深的相对座椅和暗柜；旧部分布局不能直接复用为空图',()=>{

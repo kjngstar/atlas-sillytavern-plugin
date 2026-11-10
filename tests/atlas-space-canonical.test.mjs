@@ -779,6 +779,24 @@ test('SPACE06：7.5:8、24:2 能适配未锁 frame；锁定/确认幅面不符 �
   assert.equal(after.scale_basis_json.locationId, MAP_BLD);
 });
 
+test('estimated parent footprints with fractional dimensions fit an integer grid', () => {
+  const widthM = 638, heightM = 429.033333;
+  const input = {
+    mapRow: mapRow(MAP_ROOM, { frame_json: { cols: 100, rows: 80 }, meters_per_cell: null }),
+    widthM, heightM, scope: SCOPE, currentScope: SCOPE,
+    expectedRowRev: 1, turnId: TURN, operationId: 'op_fit_estimate',
+  };
+  const aligned = alignSqlFrameToPhysicalSize({ ...input, source: { kind: 'parent-footprint', quality: 'estimated' } });
+  assert.equal(aligned.ok, true, JSON.stringify(aligned.issues));
+  const { cols, rows, metersPerCell } = aligned.fit;
+  assert.ok(Number.isInteger(cols) && Number.isInteger(rows));
+  assert.ok(Math.abs(cols * metersPerCell - widthM) / widthM <= .005);
+  assert.ok(Math.abs(rows * metersPerCell - heightM) / heightM <= .005);
+  const confirmed = alignSqlFrameToPhysicalSize({ ...input, source: { kind: 'author', quality: 'confirmed' } });
+  assert.equal(confirmed.status, 'refused');
+  assert.equal(confirmed.issues[0].code, 'FRAME_FIT_UNREPRESENTABLE');
+});
+
 // ───────────────────────── SPACE07 · fork 与 POV ─────────────────────────
 
 test('SPACE07：fork 复制 canonical 且分支独立；POV 不下发尺寸依据与隐藏家具', async () => {

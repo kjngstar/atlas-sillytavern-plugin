@@ -11,7 +11,7 @@ export const FRAME_SPACE_CANONICAL_KEY = 'atlasSpaceCanonical';
 export function readMetricDimensions(area) {
   if (!area || area.kind !== 'dimensions' || !['confirmed','estimated'].includes(area.quality)) return null;
   const {widthM,heightM}=area;
-  if (![widthM,heightM].every(v=>Number.isFinite(v)&&v>=.2&&v<=20000)) return null;
+  if (![widthM,heightM].every(v=>Number.isFinite(v)&&v>=.2)) return null;
   return {widthM,heightM};
 }
 /**
@@ -35,6 +35,14 @@ export function parseSpaceLocalId(value) {
 }
 /** Resource and algorithm budgets; registered content has no per-kind count quota. */
 export const LIMITS = Object.freeze({inputBytes:65536, sceneBytes:524288, blocksPerDistrict:24, navigationCells:180000, markers:512, overlays:256, pathPoints:2048, watercourseSegments:24});
+export const INDEPENDENT_FURNISHING_TYPES = Object.freeze([
+  'barrel', 'bar-counter', 'bottle-shelf', 'stove', 'prep-table', 'sink',
+  'crate', 'basket', 'anvil', 'workbench', 'screen',
+]);
+export const FLOOR_FURNITURE_TYPES = Object.freeze([
+  'shelf','desk','bench','reading','stairs','table','chair','bed','cabinet','doorway','light','decor','bar','kitchen-line','barrels',
+  ...INDEPENDENT_FURNISHING_TYPES,
+]);
 /** 02 §10：概览地物类型（含水系 watercourse）。与 src/atlas-ops-normalize.ts 的归一化口径逐字一致。 */
 export const OVERVIEW_FEATURE_TYPES = Object.freeze(['forest_texture','ridge','shore','building_cluster','road_texture','ruins_scatter','watercourse']);
 /** 概览表面类型。 */
@@ -139,6 +147,7 @@ export function checkSceneDocument(doc){
     collection('actors',point);collection('items',point);collection('doors',p=>point(p)&&finite(p.width)&&p.width>0);collection('windows',point);collection('lamps',point);
   }else if(shape?.kind==='city'){
     const enclosure=shape.enclosure;
+    if(shape.streetPattern!==undefined&&shape.streetPattern!=='main-street')issues.push(diagnostic('SCENE_ENUM_INVALID','$.layout.streetPattern','城镇路网类型非法'));
     if(enclosure!==undefined&&!CITY_ENCLOSURES.includes(enclosure))issues.push(diagnostic('SCENE_ENUM_INVALID','$.layout.enclosure','城市边界策略非法'));
     // G07：open 城市不允许留假城墙/城门；enclosure=wall 与旧档（无该字段）保留原多边形校验。
     if(enclosure==='open'){
@@ -151,6 +160,7 @@ export function checkSceneDocument(doc){
       bad(shape.river,p=>plain(p)&&[p.cx,p.amplitude,p.width,p.height].every(finite)&&p.width>0&&p.height>0,'$.layout.river');}
     else if(shape.riverPolygon?.length||shape.dock!==null)issues.push(diagnostic('SCENE_GEOMETRY_INVALID','$.layout.river','无河流的城市不能保留水域或码头'));
     collection('districts',p=>plain(p)&&polygon(p.polygon)&&point(p.site));collection('buildings',rect);collection('gates',point);
+    if(shape.pins!==undefined)collection('pins',inside,LIMITS.markers);
     for(const key of ['roads','segments'])collection(key,p=>plain(p)&&point(p.a)&&point(p.b)&&finite(p.width)&&p.width>0);
   }else if(shape?.kind==='overview'){
     if(shape.surface!==undefined&&!OVERVIEW_SURFACES.includes(shape.surface))issues.push(diagnostic('SCENE_ENUM_INVALID','$.layout.surface','概览表面类型非法'));

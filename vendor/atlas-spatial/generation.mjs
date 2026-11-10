@@ -1,7 +1,7 @@
 import * as E from './layout-core.mjs';
 import * as O from './overview-core.mjs';
 import {fitEstimatedFloor} from './estimated-fit.mjs';
-import {KIT_VERSION,SCENE_KIND,SCENE_VERSION,LIMITS,clone,finite,plain,stable,bytes,normalizeScope,diagnostic,failure,parseWholeArguments,checkSceneDocument,parseSpaceLocalId,OVERVIEW_FEATURE_TYPES,OVERVIEW_SURFACES,OVERVIEW_ZONE_ROLES,OVERVIEW_ZONE_SIZES,OVERVIEW_DENSITIES,OVERVIEW_SECTORS,OVERVIEW_WIDTH_CLASSES,CITY_ENCLOSURES} from './contracts.mjs';
+import {KIT_VERSION,SCENE_KIND,SCENE_VERSION,LIMITS,clone,finite,plain,stable,bytes,normalizeScope,diagnostic,failure,parseWholeArguments,checkSceneDocument,parseSpaceLocalId,OVERVIEW_FEATURE_TYPES,OVERVIEW_SURFACES,OVERVIEW_ZONE_ROLES,OVERVIEW_ZONE_SIZES,OVERVIEW_DENSITIES,OVERVIEW_SECTORS,OVERVIEW_WIDTH_CLASSES,CITY_ENCLOSURES,FLOOR_FURNITURE_TYPES} from './contracts.mjs';
 
 const label=v=>typeof v==='string'?v.slice(0,120):'';
 const ids=v=>new Set(v instanceof Set?v:Array.isArray(v)?v:[]);
@@ -52,7 +52,7 @@ function setup(value,context,kind){
   return {scope,input,map,known,spec,issues,mpp,units,metricProposal,previous:context.previousScene??null};
 }
 const same=(a,b)=>stable(normalizeScope(a))===stable(normalizeScope(b));
-function collection(s,key,kind,normalize){
+function collection(s,key,kind,normalize,previousById=null){
   const values=s.input[key]??[];
   if(!Array.isArray(values))throw new Error('COLLECTION_INVALID:'+key);
   const seen=new Set(),out=[];
@@ -61,7 +61,9 @@ function collection(s,key,kind,normalize){
     if(!plain(raw)||typeof raw.id!=='string'||!raw.id||raw.id.length>160||seen.has(raw.id)){s.issues.push(diagnostic('ENTITY_ID_INVALID',path,'缺少标识或标识重复'));continue;}
     seen.add(raw.id);
     if(kind&&!s.known[kind].has(raw.id)){s.issues.push(diagnostic('ENTITY_REF_UNKNOWN',path+'.id','实体不在程序提供的当前分支引用表中',{entityId:raw.id}));continue;}
-    try{const row=normalize(raw);out.push({...row,id:raw.id,name:label(raw.name)||raw.id});}catch(e){s.issues.push(diagnostic(String(e.message),path,'本项约束不可用，其他独立项继续处理',{entityId:raw.id}));}
+    const previous=previousById?.get(raw.id);
+    const input=previous?{...previous,...raw}:raw;
+    try{const row=normalize(input);out.push({...row,id:raw.id,name:label(input.name)||raw.id});}catch(e){s.issues.push(diagnostic(String(e.message),path,'本项约束不可用，其他独立项继续处理',{entityId:raw.id}));}
   }
   return sort(out);
 }
@@ -81,11 +83,16 @@ function deletionSet(s,key){
   return out;
 }
 function collectAndMerge(s,key,kind,normalize){
-  const requestRows=collection(s,key,kind,normalize);
-  if(s.input.rebuild===true)return requestRows;
   const saved=s.previous?.constraints;
-  if(!plain(saved)||!Array.isArray(saved[key]))return requestRows;
-  const del=deletionSet(s,key),out=new Map(requestRows.map(r=>[r.id,r]));
+  if(s.input.rebuild===true||!plain(saved)||!Array.isArray(saved[key]))return collection(s,key,kind,normalize);
+  const del=deletionSet(s,key);
+  // Overview replies can repeat a zone with only its name and sector.
+  // Keep omitted placement hints so that this does not move a saved zone.
+  const previousById=key==='zones'
+    ?new Map(saved[key].filter(row=>plain(row)&&!del.has(row.id)).map(row=>[row.id,row]))
+    :null;
+  const requestRows=collection(s,key,kind,normalize,previousById);
+  const out=new Map(requestRows.map(r=>[r.id,r]));
   for(const raw of saved[key]){
     if(!plain(raw)||typeof raw.id!=='string'||!raw.id||del.has(raw.id)||out.has(raw.id))continue;
     if(kind&&!s.known[kind].has(raw.id)){s.issues.push(diagnostic('ENTITY_REF_UNKNOWN','$.previousScene.constraints.'+key+'.id','已保存约束引用的实体不在当前分支引用表中',{entityId:raw.id}));continue;}
@@ -95,7 +102,6 @@ function collectAndMerge(s,key,kind,normalize){
 }
 function dimensions(raw){if(!finite(raw.w)||!finite(raw.h)||raw.w<=0||raw.h<=0)throw new Error('DIMENSION_INVALID');return {w:raw.w,h:raw.h};}
 /** 02 §6.4：程序陈设类型。solid 类型参与碰撞；light/decor/doorway/stairs 不挡路。 */
-const FLOOR_FURNITURE_TYPES=['shelf','desk','bench','reading','stairs','table','chair','bed','cabinet','doorway','light','decor'];
 function trustedLock(ctx,type,id){const v=ctx.locks?.[type]?.[id];return v&&finite(v.x)&&finite(v.y)?{x:v.x,y:v.y}:null;}
 const proxyPlacement=(ctx,id)=>ctx.placement?.[id]==='proxy'?{placement:'proxy'}:{};
 function finish(s,ctx,layoutFn){
@@ -111,7 +117,7 @@ function finish(s,ctx,layoutFn){
   for(const part of [...(layout.rooms??[]),...(layout.districts??[]),...(layout.buildings??[])]){
     if(ctx.placement?.[part.id]==='proxy')part.placement='proxy';else delete part.placement;
   }
-  for(const issue of layout.issues??[])s.issues.push(diagnostic(issue.code,'$.layout',issue.code==='ROOM_TOPOLOGY_SEARCH_LIMIT'?'房间连接搜索达到本地计算预算，旧场景已保留；请调整单图房间数量或布局条件':issue.code==='ROOM_CONNECTION_NO_SPACE'?'未找到同时满足房间尺寸、连接和锁定位置的布局':'空间约束未满足',{entityId:issue.id??null}));
+  for(const issue of layout.issues??[])s.issues.push(diagnostic(issue.code,'$.layout',issue.code==='ROOM_TOPOLOGY_SEARCH_LIMIT'?'房间连接搜索达到本地计算预算，旧场景已保留；请调整单图房间数量或布局条件':issue.code==='ROOM_CONNECTION_NO_SPACE'?'未找到同时满足房间尺寸、连接和锁定位置的布局':issue.code==='BUILDING_PROXIMITY_UNPLACED'?'建筑邻近提示与可用地块冲突，已保留合法足迹':'空间约束未满足',{entityId:issue.id??null,severity:issue.severity}));
   if(!layout.ok)return {ok:false,status:'failed',scene:null,kept:previous?clone(previous):null,issues:s.issues,guard:{scope:s.scope,mapId:s.map.id,inputSignature}};
   // Saved physical coordinates and schematic positions remain different concepts.
   for(const a of layout.actors??[])if(!ctx.locks?.actors?.[a.id])a.quality='layout';
@@ -176,7 +182,7 @@ function generateFloorOnce(value,context){
         return size&&d.quality!=='confirmed'?{...d,x:d.x*s.spec.width/size.w,y:d.y*s.spec.height/size.h}:d;
       });
     }
-    if(s.spec.singleRoom&&ctx.parentGroups?.length)s.spec.parentGroups=ctx.parentGroups.filter(g=>Math.abs(g.sourceRoomSize.w-s.spec.rooms[0].w)<1e-7&&Math.abs(g.sourceRoomSize.h-s.spec.rooms[0].h)<1e-7).map(g=>({id:g.id,roomId:g.roomId,x:g.x+(s.spec.width-s.spec.rooms[0].w)/2,y:g.y+(s.spec.height-s.spec.rooms[0].h)/2,w:g.w,h:g.h}));
+    if(s.spec.singleRoom&&ctx.parentGroups?.length)s.spec.parentGroups=ctx.parentGroups.filter(g=>Math.abs(g.sourceRoomSize.w-s.spec.rooms[0].w)<1e-7&&Math.abs(g.sourceRoomSize.h-s.spec.rooms[0].h)<1e-7).map(g=>({id:g.id,roomId:g.roomId,x:g.x+(s.spec.width-s.spec.rooms[0].w)/2,y:g.y+(s.spec.height-s.spec.rooms[0].h)/2,w:g.w,h:g.h,...(g.wall?{wall:g.wall}:{}),...(g.nearDoor!==undefined?{nearDoor:g.nearDoor}:{})}));
     const actualRooms=new Set(s.spec.rooms.map(r=>r.id));
     s.spec.roomConnections=(ctx.roomConnections??[]).filter(edge=>actualRooms.has(edge.from)&&actualRooms.has(edge.to));
     s.spec.externalConnections=(ctx.roomConnections??[]).filter(edge=>actualRooms.has(edge.from)!==actualRooms.has(edge.to)).map(edge=>actualRooms.has(edge.from)?edge:{...edge,from:edge.to,to:edge.from});
@@ -221,19 +227,38 @@ function generateFloorOnce(value,context){
         const parsed=parseSpaceLocalId(entry.localId);
         if(!parsed||!parsed.contentId||deletionSet(s,'contents').has(parsed.contentId)||deletionSet(s,'contents').has(entry.localId))continue;
         if(!home)break;
-        if(entry.quality==='confirmed'){const requestedRow=s.input.contents.find(row=>row?.id===parsed.contentId);if(requestedRow){requestedRow.w=entry.widthM;requestedRow.h=entry.heightM;}}
-        if(!requested.has(parsed.contentId))seeded.push({id:parsed.contentId,name:entry.name,type:entry.type,roomId:home,w:entry.widthM,h:entry.heightM});
+        const requestedRow=s.input.contents.find(row=>row?.id===parsed.contentId);
+        if(requestedRow){
+          if(entry.quality==='confirmed'){requestedRow.w=entry.widthM;requestedRow.h=entry.heightM;}
+          if(requestedRow.wall===undefined&&entry.wall)requestedRow.wall=entry.wall;
+          if(requestedRow.nearDoor===undefined&&entry.nearDoor!==undefined)requestedRow.nearDoor=entry.nearDoor;
+        }
+        if(!requested.has(parsed.contentId))seeded.push({id:parsed.contentId,name:entry.name,type:entry.type,roomId:home,w:entry.widthM,h:entry.heightM,
+          ...(entry.wall?{wall:entry.wall}:{}),...(entry.nearDoor!==undefined?{nearDoor:entry.nearDoor}:{})});
         // 账本记录了「哪件真实物品摆在这件陈设上」：请求没提也要沿用，否则换图会把物品掉到地上、
         // 把 itemId 从账本里抹掉（身份与来源必须一致，§19.4）。
-        if(entry.itemId&&!requestedItems.has(entry.itemId))seededItems.push({id:entry.itemId,on:parsed.contentId});
+        if(entry.itemId&&!requestedItems.has(entry.itemId))seededItems.push({id:entry.itemId,on:parsed.contentId,...(entry.asFurniture?{asFurniture:true}:{})});
       }
       if(seeded.length)s.input.contents=[...seeded,...(Array.isArray(s.input.contents)?s.input.contents:[])];
       if(seededItems.length)s.input.items=[...seededItems,...(Array.isArray(s.input.items)?s.input.items:[])];
     }
-    s.spec.contents=collectAndMerge(s,'contents',null,r=>{if(!roomIds.has(r.roomId))throw new Error('ROOM_REF_UNKNOWN');if(!FLOOR_FURNITURE_TYPES.includes(r.type))throw new Error('FURNITURE_TYPE_UNSUPPORTED');const locked=trustedLock(ctx,'contents',r.id);return {...dimensions(r),roomId:r.roomId,type:r.type,...(locked?{locked}:{})};});
+    s.spec.contents=collectAndMerge(s,'contents',null,r=>{
+      if(!roomIds.has(r.roomId))throw new Error('ROOM_REF_UNKNOWN');
+      if(!FLOOR_FURNITURE_TYPES.includes(r.type))throw new Error('FURNITURE_TYPE_UNSUPPORTED');
+      if(r.wall!==undefined&&!['north','east','south','west'].includes(r.wall))throw new Error('FURNITURE_WALL_INVALID');
+      if(r.nearDoor!==undefined&&typeof r.nearDoor!=='boolean')throw new Error('FURNITURE_NEAR_DOOR_INVALID');
+      const locked=trustedLock(ctx,'contents',r.id);
+      return {...dimensions(r),roomId:r.roomId,type:r.type,
+        ...(r.wall?{wall:r.wall}:{}),...(r.nearDoor!==undefined?{nearDoor:r.nearDoor}:{}),
+        ...(locked?{locked}:{})};
+    });
     const groups=new Set(s.spec.contents.map(g=>g.id));
     s.spec.actors=collectAndMerge(s,'actors','characters',r=>{if(!roomIds.has(r.roomId)&&!(r.roomId===s.map.containerLocationId&&!s.spec.singleRoom))throw new Error('ROOM_REF_UNKNOWN');if(r.near&&!groups.has(r.near))throw new Error('NEAR_REF_UNKNOWN');const position=trustedLock(ctx,'actors',r.id);return {roomId:r.roomId,...(r.near?{near:r.near}:{}),...(position?{position}:{})};});
-    s.spec.items=collectAndMerge(s,'items','items',r=>{if(!groups.has(r.on))throw new Error('ITEM_SUPPORT_UNKNOWN');return {on:r.on};});
+    s.spec.items=collectAndMerge(s,'items','items',r=>{
+      if(!groups.has(r.on))throw new Error('ITEM_SUPPORT_UNKNOWN');
+      if(r.asFurniture!==undefined&&typeof r.asFurniture!=='boolean')throw new Error('ITEM_PLACEMENT_INVALID');
+      return {on:r.on,...(r.asFurniture===true?{asFurniture:true}:{})};
+    });
     return finish(s,ctx,E.floor);
   }catch(e){return failure(String(e.message),'$','生成请求不可用；保留已保存布局',{kept:context?.previousScene?clone(context.previousScene):null});}
 }
@@ -241,16 +266,45 @@ export function generateCity(value,context){
   let s=null;
   try{
     s=setup(value,context,'city');const ctx=context;
-    s.constraintKeys=['riverWidth','seed','blocksPerDistrict','districts','buildings','enclosure'];
+    s.constraintKeys=['riverWidth','seed','blocksPerDistrict','districts','buildings','enclosure','streetPattern'];
+    const streetPattern=s.input.streetPattern??(s.input.rebuild===true?undefined:s.previous?.constraints?.streetPattern);
+    if(streetPattern!==undefined&&streetPattern!=='main-street')throw new Error('CITY_STREET_PATTERN_INVALID');
+    if(streetPattern)s.spec.streetPattern=streetPattern;
     if(s.input.riverWidth!==undefined&&(!finite(s.input.riverWidth)||s.input.riverWidth<0))return failure('RIVER_CONSTRAINT_INVALID','$.riverWidth','河宽应为非负数，零表示无水系',{kept:s.previous?clone(s.previous):null});
-    s.spec.riverWidth=s.input.riverWidth??0;
+    s.spec.riverWidth=s.input.riverWidth??(streetPattern&&s.input.rebuild!==true?s.previous?.constraints?.riverWidth:undefined)??0;
     s.spec.seed=label(context.seed)||s.map.id; // The program provides the seed; the AI cannot reshuffle a saved city.
     s.spec.blocksPerDistrict=Number.isInteger(s.input.blocksPerDistrict)?Math.max(0,Math.min(LIMITS.blocksPerDistrict,s.input.blocksPerDistrict)):(s.previous?.constraints?.blocksPerDistrict??0);
     // G07：新城市默认开放边界；旧档（无 enclosure 且有旧场景）保持原有城墙输出，升级不拆旧墙。
     if(s.input.enclosure!==undefined&&!CITY_ENCLOSURES.includes(s.input.enclosure))s.issues.push(diagnostic('ENCLOSURE_INVALID','$.enclosure','城市边界策略只能是 open 或 wall；已按既有/默认策略处理',{severity:'warning'}));
     s.spec.enclosure=CITY_ENCLOSURES.includes(s.input.enclosure)?s.input.enclosure:(s.previous?(s.previous.constraints?.enclosure??'wall'):'open');
-    s.spec.districts=collectAndMerge(s,'districts','locations',r=>{if(!['west','east'].includes(r.bank)||!finite(r.order))throw new Error('DISTRICT_CONSTRAINT_INVALID');return {bank:r.bank,order:r.order,...proxyPlacement(ctx,r.id)};});
+    if(streetPattern&&s.spec.enclosure!=='open')throw new Error('CITY_STREET_PATTERN_REQUIRES_OPEN');
+    s.spec.districts=collectAndMerge(s,'districts','locations',r=>{
+      if(!['west','east'].includes(r.bank)||!finite(r.order))throw new Error('DISTRICT_CONSTRAINT_INVALID');
+      if(r.role!==undefined){
+        const kind=ctx.locationsById?.[r.id]?.kind;
+        if(!streetPattern||!['lake','forest','woods'].includes(r.role)||kind&&kind!=='natural')throw new Error('CITY_TERRAIN_ROLE_INVALID');
+      }
+      return {bank:r.bank,order:r.order,...(r.role?{role:r.role}:{}),...proxyPlacement(ctx,r.id)};
+    });
+    const terrain=s.spec.districts.filter(d=>d.role);
+    if(new Set(terrain.map(d=>d.bank+':'+d.role)).size!==terrain.length)throw new Error('CITY_TERRAIN_ROLE_DUPLICATE');
+    if(streetPattern&&!s.spec.districts.some(d=>d.bank==='west'&&!d.role))throw new Error('CITY_STREET_PATTERN_REQUIRES_WEST_DISTRICT');
     const districtIds=new Set(s.spec.districts.map(d=>d.id));
+    if(streetPattern&&ctx.townParcels?.length){
+      const saved=new Set((s.input.rebuild===true?[]:s.previous?.constraints?.buildings??[]).map(b=>b.id));
+      const requested=new Set((s.input.buildings??[]).map(b=>b?.id));
+      const deleted=deletionSet(s,'buildings');
+      const missing=ctx.townParcels.filter(row=>districtIds.has(row.parent_location_id)&&!saved.has(row.id)&&!requested.has(row.id)&&!deleted.has(row.id));
+      if(missing.length)s.input={...s.input,buildings:[...(s.input.buildings??[]),...missing.map(row=>({
+        id:row.id,name:row.name,districtId:row.parent_location_id,w:12,h:8,
+      }))]};
+    }
+    if(streetPattern&&s.spec.riverWidth>0&&ctx.townBridgeConnections?.length){
+      const order=new Map(s.spec.districts.filter(d=>d.bank==='west'&&!d.role).map(d=>[d.id,d.order]));
+      const connections=ctx.townBridgeConnections.filter(link=>order.has(link.districtId))
+        .sort((a,b)=>order.get(a.districtId)-order.get(b.districtId)||a.id.localeCompare(b.id,'en'));
+      s.spec.bridgeIds=[...new Set(connections.map(link=>link.id))].slice(0,2);
+    }
     s.spec.buildings=collectAndMerge(s,'buildings','locations',r=>{
       let districtId=r.districtId;
       const row=ctx.locationsById?.[r.id],parent=row?.parent_location_id,assigned=ctx.locationsById?.[districtId];
@@ -265,9 +319,17 @@ export function generateCity(value,context){
         s.issues.push(diagnostic('BUILDING_DISTRICT_RECONCILED','$.buildings','建筑分区与已登记归属不符，已保留真实归属，不把示意排位当作包含关系',{severity:'warning',entityId:r.id}));
       }
       if(!districtIds.has(districtId))throw new Error('DISTRICT_REF_UNKNOWN');
-      return {...(ctx.locks?.buildings?.[r.id]?.w>0?dimensions(ctx.locks.buildings[r.id]):dimensions(r)),districtId,...(locked?{locked}:{}),...proxyPlacement(ctx,r.id)};
+      let proximity={};
+      if(r.near!==undefined){
+        if(typeof r.near!=='string'||!s.known.locations.has(r.near)||r.near===r.id)throw new Error('BUILDING_NEAR_REF_INVALID');
+        if(r.sector!==undefined&&!['north','east','south','west'].includes(r.sector))throw new Error('BUILDING_NEAR_SECTOR_INVALID');
+        if(r.gapM!==undefined&&(!finite(r.gapM)||r.gapM<0))throw new Error('BUILDING_GAP_INVALID');
+        proximity={near:r.near,...(r.sector?{sector:r.sector}:{}),...(r.gapM!==undefined?{gapM:r.gapM}:{})};
+      }else if(r.gapM!==undefined)throw new Error('BUILDING_NEAR_REF_REQUIRED');
+      const authority=ctx.childSpaces?.[r.id];
+      return {...(ctx.locks?.buildings?.[r.id]?.w>0?dimensions(ctx.locks.buildings[r.id]):authority?dimensions({w:authority.widthM,h:authority.heightM}):dimensions(r)),districtId,...proximity,...(locked?{locked}:{}),...proxyPlacement(ctx,r.id)};
     });
-    return finish(s,ctx,E.city);
+    return finish(s,ctx,(spec,previous)=>E.city(spec,previous,{relaxProximity:ctx.autoPlan===true}));
   }catch(e){return failure(String(e.message),'$','生成请求不可用；保留已保存布局',{kept:context?.previousScene?clone(context.previousScene):null});}
 }
 

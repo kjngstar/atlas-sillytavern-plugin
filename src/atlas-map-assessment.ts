@@ -144,6 +144,7 @@ function renderedEntityIds(scene: Row | null, known: ReadonlySet<string>): { ent
       add(group?.itemId);
     }
   } else if (kind === 'city') {
+    for (const pin of Array.isArray(layout.pins) ? (layout.pins as Row[]) : []) add(pin?.id);
     for (const district of Array.isArray(layout.districts) ? (layout.districts as Row[]) : []) add(district?.id);
     for (const building of Array.isArray(layout.buildings) ? (layout.buildings as Row[]) : []) add(building?.id);
   }

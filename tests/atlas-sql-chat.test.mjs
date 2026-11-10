@@ -251,7 +251,7 @@ test('刷新后恢复最新部分回合的补交入口，旧失败地点可补�
     await f.ui.retryLastCommit();
     assert.equal(f.ui.getState().retryableCommit,null,f.ui.getState().lastError??'');
     assert.equal(queryBound(session.repo.db,'SELECT COUNT(*) n FROM locations',[])[0].n,1);
-    assert.equal(queryBound(session.repo.db,'SELECT COUNT(*) n FROM maps',[])[0].n,2);
+    assert.equal(queryBound(session.repo.db,'SELECT COUNT(*) n FROM maps',[])[0].n,1,'只有地点外壳且无在场人物或布局依据时保留父图标记');
     assert.equal(queryBound(session.repo.db,'SELECT COUNT(*) n FROM events',[])[0].n,1);
     assert.equal(session.repo.internal.currentHeadTurnId(),head);assert.equal(f.calls(),3);
   }finally{await f.close();}

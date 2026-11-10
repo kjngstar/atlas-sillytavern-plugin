@@ -21,7 +21,7 @@ export const ATLAS_RUNTIME_LIMITS = {
   decisionOutputReserveTokens: 512,
   decisionActorOutputTokens: 256,
   repairResponseTokens: 2048,
-  modelTimeoutMs: 120000,
+  modelTimeoutMs: 300000,
   mentionCandidates: 256,
   locationDepth: 12,
   containerDepth: 4,

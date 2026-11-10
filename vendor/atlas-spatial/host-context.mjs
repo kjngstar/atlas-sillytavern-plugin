@@ -8,7 +8,7 @@ import {collectMapLocations} from './map-membership.mjs';
  * 身份必须是**本图的容器地点**：`locationId !== mapRow.container_location_id` 时一律不采用
  * （宁缺勿乱 —— 短引用、地图标题、别图的空间都不当身份）。结构损坏同样不采用。
  */
-function readSpaceCanonical(raw,locationId){
+export function readSpaceCanonical(raw,locationId){
   if(!locationId||!plain(raw)||raw.version!==1||raw.locationId!==locationId)return null;
   const size=plain(raw.size)&&finite(raw.size.widthM)&&finite(raw.size.heightM)&&raw.size.widthM>0&&raw.size.heightM>0
     ?{widthM:raw.size.widthM,heightM:raw.size.heightM,quality:raw.size.quality==='confirmed'?'confirmed':'estimated',locked:raw.size.locked===true,basis:plain(raw.size.basis)?raw.size.basis:null}
@@ -18,7 +18,9 @@ function readSpaceCanonical(raw,locationId){
   for(const entry of list){
     if(!plain(entry)||typeof entry.localId!=='string'||!entry.localId||typeof entry.type!=='string'||!entry.type)continue;
     if(!finite(entry.widthM)||!finite(entry.heightM)||entry.widthM<=0||entry.heightM<=0)continue;
-    furnishing.push({localId:entry.localId,type:entry.type,name:typeof entry.name==='string'&&entry.name?entry.name:entry.type,itemId:typeof entry.itemId==='string'&&entry.itemId?entry.itemId:null,widthM:entry.widthM,heightM:entry.heightM,quality:entry.quality==='confirmed'?'confirmed':'layout'});
+    furnishing.push({localId:entry.localId,type:entry.type,name:typeof entry.name==='string'&&entry.name?entry.name:entry.type,itemId:typeof entry.itemId==='string'&&entry.itemId?entry.itemId:null,widthM:entry.widthM,heightM:entry.heightM,quality:entry.quality==='confirmed'?'confirmed':'layout',
+      ...(['north','east','south','west'].includes(entry.wall)?{wall:entry.wall}:{}),
+      ...(typeof entry.nearDoor==='boolean'?{nearDoor:entry.nearDoor}:{}),...(entry.asFurniture===true?{asFurniture:true}:{})});
   }
   const revision=Number.isInteger(raw.revision)&&raw.revision>=0?raw.revision:0;
   // 超限不下发裁剪结果：调用方必须看到 deferred 并自己决定（§19.1 不静默裁剪）。
