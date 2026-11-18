@@ -975,6 +975,7 @@ export function buildSqlLayoutTask(
   if (hasSpatialCapability(CAPABILITY_SPACE_CANONICAL)) request.messages[1].content += '\n' + SPACE_CANONICAL_PROMPT;
   if (hasSpatialCapability(CAPABILITY_SPATIAL_PROFILE)) request.messages[1].content += '\n' + SPATIAL_PROFILE_PROMPT;
   if(hasOverview)request.messages[1].content += '\noverview 的水系 feature 必须为 {"id":"本图局部水系ID","type":"watercourse","zoneId":"本图已登记水域引用（可选）","fromSector":"north","toSector":"south","widthClass":"narrow/medium/wide"}。fromSector/toSector 取 north/northeast/east/southeast/south/southwest/west/northwest 且不同；不要仅写 zoneId/density 而省略起终方向。方向是估计布局，不能标成已测量事实。';
+  if(hasOverview)request.messages[1].content += '\noverview 中明确相近的本图地点用 near=本图另一 zone 的引用表达，不依赖地点列表顺序。near 是局部邻近排位，间距由地点占地决定；同时给 sector 时，它只作为相对参照地点的方位偏好。邻近不等于共墙、入口相通或已测量路程，不能据此新增道路或确定距离。';
   if(hasFloor)request.messages[1].content += '\n更新布局时，同一实物必须沿用 savedConstraints 的既有局部 id，不得换 id 重复添加。layoutIssues 是旧图未放下的陈设：按正文校正估计尺寸；若旧约束重复描述同一座椅或柜子，保留一个既有 id，用 spec.deletes={"contents":[重复的局部陈设id]} 显式清理重复约束，并同步 actors.near。不要删除已确认的锁定结构。';
   request.messages[1].content += '\nsavedConstraints 同时包含已保存场景及上次失败/待处理请求的有效约束。constraintStatus=failed/pending 时，继续修正这些约束并沿用其中 ID，不能当作从未规划过而再建一套陈设；原约束不会因失败自动清空。layoutIssues 给出上次失败原因。';
   request.messages[1].content += '\n禁止把载具画成固定地块、城市分区或地理轮廓；载具的行程与停靠由引擎单独投影。只绘制本世界资料支持的水系、山脉、城墙；示例地图和通用模板中的地名与地形不能直接搬入另一个世界。未知地理关系保持估计或未知，不编造原文没有的确定地理事实。';
