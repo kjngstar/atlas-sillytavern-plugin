@@ -183,7 +183,43 @@ test('原版宿主：停用聊天可通过新入口重新启用，不写世界�
 test('原版宿主：推演失败原因持续显示，切聊天不带入旧错误',async()=>{const m=mount({advanceError:'API_NOT_CONFIGURED：未配置连接'});await m.bridge.boot();await assert.rejects(m.bridge.advance(),/未配置连接/);let b=await m.bridge.boot();assert.match(b.data.meta.engine.error,/未配置连接/);assert.equal(b.data.meta.engine.busy,false);m.switch('B');b=await m.bridge.boot();assert.equal(b.data.meta.engine.error,null);await m.render.dispose();});
 test('原版宿主：初始化未完成不能报告推演成功，未绑定也有诊断',async()=>{const m=mount({unbound:true});await m.bridge.boot();await assert.rejects(m.bridge.advance(),/初始化未完成/);const b=await m.bridge.boot();assert.match(b.data.DIAGNOSTICS[0].message,/初始化未完成/);await m.render.dispose();});
 test('原版宿主：布局失败进入推演回执，保留路径与尝试而不冒充成功',async()=>{const issue={code:'JSON_SYNTAX',path:'$',line:3,message:'坏格式',severity:'error',retryable:true};const receipt={turnId:'layout-failed',status:'failed',anchor:{branchId:'main'},groups:[{groupId:'noop',status:'applied'}],issues:[issue],worldChanged:false,timeChanged:false,clockBeforeS:0,clockAfterS:0};const attempts=[{kind:'layout',http_status:200}];const m=mount({layoutFailure:{receipt,attempts}});await m.bridge.boot();await assert.rejects(m.bridge.layout('world'),/布局格式错误/);const saved=m.core.getState().receipts.at(-1);assert.equal(saved.status,'failed');assert.equal(saved.detail.coreSaved,false);assert.deepEqual(saved.detail.receipt.issues,[issue]);assert.deepEqual(saved.detail.attempts,attempts);const b=await m.bridge.boot();assert.equal(b.data.RECEIPTS.at(-1).ok,false);await m.render.dispose();});
-test('原版菜单：鼠标与键盘打开后让宿主关闭菜单，重复打开不留下遮挡',()=>{const dom=new JSDOM('<div id="extensionsMenu" style="display:block"></div>',{url:'http://localhost/'}),{document,KeyboardEvent}=dom.window;let open=false,closed=0,visible=true;document.documentElement.addEventListener('click',()=>{if(visible){visible=false;closed++;document.getElementById('extensionsMenu').style.display='none';}});const source=readFileSync(new URL('../index.js',import.meta.url),'utf8'),start=source.indexOf('function ensureAtlasMenuItem(core)'),end=source.indexOf('\nfunction removeMenuButton()',start);const ctx=vm.createContext({document,el:(tag,className,label)=>{const e=document.createElement(tag);if(className)e.className=className;if(label)e.textContent=label;return e;}});vm.runInContext(source.slice(start,end),ctx);const core={setPanelOpen:v=>{open=v;}};ctx.ensureAtlasMenuItem(core);const item=document.getElementById('atlas-menu-open');item.click();assert.equal(open,true);assert.equal(closed,1);assert.equal(visible,false);visible=true;open=false;item.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true}));assert.equal(open,true);assert.equal(closed,2);ctx.ensureAtlasMenuItem(core);assert.equal(document.querySelectorAll('#atlas-menu-open').length,1);dom.window.close();});
+test('原版菜单：鼠标与键盘打开后让宿主关闭菜单，重复打开不留下遮挡', async () => {
+  const dom = new JSDOM('<div id="extensionsMenu" style="display:block"></div>', {url:'http://localhost/'});
+  const {document,KeyboardEvent} = dom.window;
+  let open=false,closed=0,visible=true;
+  document.documentElement.addEventListener('click',()=>{
+    if(!visible)return;
+    visible=false;
+    closed++;
+    document.getElementById('extensionsMenu').style.display='none';
+  });
+  const source=readFileSync(new URL('../index.js',import.meta.url),'utf8');
+  const start=source.indexOf('function ensureAtlasMenuItem()'),end=source.indexOf('\nfunction removeMenuButton()',start);
+  const core={setPanelOpen:value=>{open=value;}};
+  const ctx=vm.createContext({document,connectAtlas:()=>Promise.resolve({core}),el:(tag,className,label)=>{
+    const element=document.createElement(tag);
+    if(className)element.className=className;
+    if(label)element.textContent=label;
+    return element;
+  }});
+  vm.runInContext(source.slice(start,end),ctx);
+  ctx.ensureAtlasMenuItem();
+  const item=document.getElementById('atlas-menu-open');
+  item.click();
+  await Promise.resolve();
+  assert.equal(open,true);
+  assert.equal(closed,1);
+  assert.equal(visible,false);
+  visible=true;
+  open=false;
+  item.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true}));
+  await Promise.resolve();
+  assert.equal(open,true);
+  assert.equal(closed,2);
+  ctx.ensureAtlasMenuItem();
+  assert.equal(document.querySelectorAll('#atlas-menu-open').length,1);
+  dom.window.close();
+});
 test('原版宿主：关闭 SQL 时不加载运行时，不恢复旧世界',async()=>{const m=mount({enabled:false});const initial=await m.bridge.boot();assert.equal(m.loads,0);assert.equal(initial.data.CAST.length,0);assert.match(initial.data.meta.worldName,/暂停/);await m.render.dispose();});
 test('原版宿主：读取引擎正式视图与同一修订，关闭 UI 不关闭引擎会话',async()=>{const m=mount();const result=await m.bridge.boot();assert.equal(result.data.CAST[0].name,'A');assert.ok(m.calls.some(q=>q.kind==='entity'));assert.ok(m.calls.filter(q=>q.kind!=='map').every(q=>q.revision===3));assert.ok(m.calls.some(q=>q.kind==='diagnostics'));assert.ok(!m.calls.some(q=>q.kind==='logs'));await m.render.dispose();assert.equal(m.root.children.length,0);});
 test('原版宿主：首次推演尚无快照时读取内存库，不报读取失败也不要求保存',async()=>{const m=mount();m.noSnapshot();const b=await m.bridge.boot();assert.equal(b.data.CAST[0].name,'A');assert.equal(b.data.meta.snapshotSaved,false);assert.ok(!b.data.DIAGNOSTICS.some(x=>x.code==='REFERENCE_UI_READ_FAILED'));await m.render.dispose();});
