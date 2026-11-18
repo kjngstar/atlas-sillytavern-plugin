@@ -976,6 +976,7 @@ export function createApi(context) {
 }
 
 function createHost(context, signal, automationSignal) {
+  let panelOpen = false;
   return {
     getChatId() {
       // shujuku getActiveChatId_ACU 口径（0.9.17 数据隔离）：优先 getCurrentChatId()，
@@ -1052,13 +1053,10 @@ function createHost(context, signal, automationSignal) {
       await context().saveMetadata();
     },
     readPanelOpen() {
-      const settings = context().extensionSettings;
-      return Boolean(settings?.[ATLAS_SETTINGS_KEY]?.panelOpen);
+      return panelOpen;
     },
     writePanelOpen(open) {
-      const ctx = context();
-      ctx.extensionSettings[ATLAS_SETTINGS_KEY] = { ...(ctx.extensionSettings[ATLAS_SETTINGS_KEY] ?? {}), panelOpen: open };
-      ctx.saveSettingsDebounced();
+      panelOpen = open;
     },
     /** 建议行动填入酒馆输入框；绝不自动发送。 */
     fillInput(text) {

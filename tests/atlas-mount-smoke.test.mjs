@@ -35,7 +35,7 @@ globalThis.getComputedStyle = dom.window.getComputedStyle.bind(dom.window);
 
 const hostListeners=new Map();
 const hostContext = {
-  extensionSettings: {},
+  extensionSettings: { atlas_world_sim: { panelOpen: true } },
   chatMetadata: {},
   saveMetadata: async () => {},
   saveSettingsDebounced: () => {},
@@ -109,6 +109,7 @@ assert.ok(conn, "connectAtlas 必须成功（挂载路径任何 ReferenceError �
 
 const root = globalThis.document.getElementById("atlas-extension-panel-root");
 assert.ok(root, "面板根节点已挂到 body");
+assert.equal(root.style.display, "none", "启动时忽略旧的面板展开设置");
 
 // jsdom does not execute iframe scripts. Real original pages and canvas are tested in Chrome.
 assert.equal(root.className,'atlas-native-ui-host');
@@ -142,6 +143,7 @@ hostContext.chatId = "empty-while-paused";
 hostContext.chatMetadata = {};
 await conn.core.handleEvent("CHAT_CHANGED");
 assert.equal(conn.core.getState().binding, null);
+assert.equal(conn.core.getState().panelOpen, true, "切换聊天时保留当前页面的面板状态");
 assert.deepEqual(hostContext.chatMetadata, {}, "paused browsing of a fresh chat creates no Atlas data");
 hostContext.chatId = "chat-smoke-1";
 hostContext.chatMetadata = existingMetadata;
@@ -158,6 +160,7 @@ assert.ok(document.getElementById("atlas-menu-open"), "the workbench entry remai
 const [reconnected, concurrent] = await Promise.all([mod.connectAtlas(), mod.connectAtlas()]);
 assert.ok(reconnected);
 assert.equal(concurrent, reconnected, "concurrent activation shares one runtime");
+assert.equal(document.getElementById("atlas-extension-panel-root").style.display, "none", "重新加载运行时后默认收起");
 assert.equal([...hostListeners.values()].reduce((n,set)=>n+set.size,0),activeListeners,"reconnect does not duplicate subscriptions");
 await mod.disable();
 assert.equal([...hostListeners.values()].reduce((n,set)=>n+set.size,0),0);
