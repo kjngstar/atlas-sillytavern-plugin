@@ -116,3 +116,17 @@ test("生命周期：disable 后旧闭包不可达（0.9.1 残留闭包缺陷回
   assert.equal(hostFindInterceptor(), null, "卸载后宿主查不到旧闭包");
   assert.equal(setPrompt.calls.filter((c) => c.value.includes("永远不该被发送")).length, 0, "残留注入文本从未进入注入通道");
 });
+
+test("停用期间等待推演的拦截器立即放行，并且不再注入", async () => {
+  const controller = new AbortController();
+  const setPrompt = makePromptRecorder();
+  const core = {
+    waitPendingTurn: () => new Promise(() => {}),
+    getState: () => { assert.fail("停用后不得读取待注入内容"); },
+  };
+  const interceptor = createGenerateInterceptor(core, { setExtensionPrompt: setPrompt, signal: controller.signal });
+  const pending = interceptor([], 1024, () => assert.fail("不得取消酒馆生成"), "normal");
+  controller.abort();
+  await pending;
+  assert.deepEqual(setPrompt.calls, []);
+});

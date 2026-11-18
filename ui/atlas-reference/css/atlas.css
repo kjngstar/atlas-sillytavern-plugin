@@ -213,6 +213,20 @@
 #atlasDemo .ic-btn svg{width:15px;height:15px;}
 #atlasDemo .ic-btn:hover{color:var(--cyan);background:rgba(67,224,255,.1);border-color:var(--line-2);box-shadow:var(--glow-c);}
 
+#atlasDemo .atlas-runtime-toggle{
+  display:inline-flex;align-items:center;gap:6px;white-space:nowrap;
+  color:var(--txt);font-size:12px;cursor:pointer;
+}
+#atlasDemo .atlas-runtime-toggle input{
+  appearance:auto;inline-size:15px;block-size:15px;margin:0;
+  accent-color:var(--cyan);cursor:pointer;
+}
+#atlasDemo .atlas-runtime-toggle input:focus-visible{outline:2px solid var(--cyan);outline-offset:3px;}
+@container atlas-preview (max-width:440px){
+  #atlasDemo .atlas-runtime-toggle{font-size:10px;gap:4px;}
+  #atlasDemo .atlas-runtime-toggle input{inline-size:13px;block-size:13px;}
+}
+
 #atlasDemo .win-ctl{display:flex;gap:3px;margin-left:2px;}
 #atlasDemo .wc{width:30px;height:30px;border-radius:8px;display:grid;place-items:center;color:var(--txt-3);transition:.18s;}
 #atlasDemo .wc svg{width:13px;height:13px;}

@@ -346,7 +346,7 @@ export function migrateChatSession(context, deps = {}) {
       const api = deps.api ?? atlasRuntime.api ?? null;
       const session = createEmptyAtlasSession();
       session.binding = legacyBinding;
-      const stillCurrent = () => atlasSameChatIdentity(capture, atlasChatIdentitySnapshot(context));
+      const stillCurrent = () => !deps.signal?.aborted && atlasSameChatIdentity(capture, atlasChatIdentitySnapshot(context));
 
       if (store && worldId) {
         for (const [field, docKey] of [["world", `world:${worldId}`], ["maps", `maps:${worldId}`], ["scene", `scene:${worldId}`]]) {
@@ -758,8 +758,44 @@ export function createAtlasExtension() {
 // ---------------------------------------------------------------------------
 
 let connected = null;
-/** 在途连接 Promise：模块自初始化与 hooks.activate 并发触发时共享同一次挂载。 */
-let connecting = null;
+let runtimeController = null;
+let runtimeQueue = Promise.resolve();
+let hostActive = true;
+const runtimeApiKeys = new Map();
+
+const ATLAS_ENABLED_SETTING = "enabled";
+
+function atlasEnabled() {
+  return SillyTavern.getContext()?.extensionSettings?.[ATLAS_SETTINGS_KEY]?.[ATLAS_ENABLED_SETTING] !== false;
+}
+
+function queueRuntimeChange(change) {
+  const result = runtimeQueue.then(change);
+  runtimeQueue = result.catch(() => {});
+  return result;
+}
+
+function saveAtlasPreferences(patch) {
+  const ctx = SillyTavern.getContext();
+  ctx.extensionSettings[ATLAS_SETTINGS_KEY] = { ...ctx.extensionSettings[ATLAS_SETTINGS_KEY], ...patch };
+  ctx.saveSettingsDebounced?.();
+}
+
+const ATLAS_PAUSED_RESPONSE = { status: 409, body: { ok: false, error: {
+  code: "ATLAS_PAUSED", message: "阿特拉斯已暂停，请在工作台顶栏重新启用。",
+} } };
+
+const ATLAS_BROWSE_ROUTES = new Set([
+  "/state", "/characters/timeline", "/map/image", "/map/travel-preview",
+  "/sql/view", "/sql/upgrade-backup",
+  "/sql/chat/binding", "/sql/chat/state", "/sql/chat/ui-read",
+  "/sql/chat/timeline", "/sql/chat/map/image", "/sql/chat/travel-preview", "/sql/chat/inspect",
+]);
+
+function atlasCanBrowse(method, route) {
+  return method === "GET" || method === "PUT" && route === "/settings"
+    || method === "POST" && ATLAS_BROWSE_ROUTES.has(route);
+}
 
 // ---------------------------------------------------------------------------
 // 安全诊断：仅白名单元信息进入本页、复制和导出。
@@ -939,7 +975,7 @@ export function createApi(context) {
   };
 }
 
-function createHost(context) {
+function createHost(context, signal, automationSignal) {
   return {
     getChatId() {
       // shujuku getActiveChatId_ACU 口径（0.9.17 数据隔离）：优先 getCurrentChatId()，
@@ -963,7 +999,8 @@ function createHost(context) {
       if (context().extensionSettings?.[ATLAS_SETTINGS_KEY]?.[ATLAS_SQL_MODE_SETTING] === true) {
         return metadata.atlas?.binding ?? null;
       }
-      await migrateChatSession(context);
+      const work = automationSignal();
+      if (!work.aborted) await migrateChatSession(context, { signal: work });
       const session = readAtlasSession(context);
       if (session) return session.binding ?? null;
       // 兜底：迁移被跳过（如引擎未就绪）时仍能读到旧键
@@ -971,6 +1008,8 @@ function createHost(context) {
     },
     /** 0.9.42：绑定写进会话文档（chatMetadata.atlas.binding）。 */
     async writeBinding(binding) {
+      signal.throwIfAborted();
+      automationSignal().throwIfAborted();
       const metadata = context().chatMetadata;
       if (!metadata || typeof metadata !== "object") return;
       if (context().extensionSettings?.[ATLAS_SETTINGS_KEY]?.[ATLAS_SQL_MODE_SETTING] === true) {
@@ -996,6 +1035,8 @@ function createHost(context) {
     },
     /** 0.9.42：解绑只清会话里的绑定（世界数据保留，方便重新绑定）。 */
     async clearBinding() {
+      signal.throwIfAborted();
+      automationSignal().throwIfAborted();
       const metadata = context().chatMetadata;
       if (!metadata || typeof metadata !== "object") return;
       if (context().extensionSettings?.[ATLAS_SETTINGS_KEY]?.[ATLAS_SQL_MODE_SETTING] === true) {
@@ -1045,7 +1086,7 @@ function createHost(context) {
   };
 }
 
-function createEmitter(context) {
+function createEmitter(context, automationEnabled = () => true) {
   const { eventSource, event_types } = context();
   /** Register all available completion aliases; core debounces duplicate notifications. */
   const EVENT_MAP = {
@@ -1093,9 +1134,11 @@ function createEmitter(context) {
        */
       for (const name of mapped) {
         const wrapped = (...args) => {
+          const enabled = automationEnabled();
+          if (!enabled && event !== "CHAT_CHANGED" && event !== "APP_READY") return;
           const payload = args[0];
           if (event === "CHAT_CHANGED") clearInjection();
-          atlasSqlNoteHostEvent(event, payload, context);
+          if (enabled) atlasSqlNoteHostEvent(event, payload, context);
           const value = args.length > 1 ? args : payload;
           return handler(event === "GENERATION_ENDED"
             ? { atlasCompletionSignal: name === event_types.GENERATION_ENDED ? "ended" : "after-commands", payload: value }
@@ -1283,7 +1326,7 @@ function defaultSetExtensionPrompt(key, value) {
  * 返回值被官方丢弃，注入通过 setExtensionPrompt 临时上下文完成，绝不改 chat 数组。
  * 注入前先等同一条 prepare 落定（core.waitPendingTurn，P0-04）；无 pending 清空不残留。
  * @param {object} core AtlasUiCore
- * @param {{ setExtensionPrompt?: Function, waitMs?: number }} [io] 测试注入
+ * @param {{ setExtensionPrompt?: Function, waitMs?: number, signal?: AbortSignal, getSignal?: () => AbortSignal }} [io]
  */
 export function createGenerateInterceptor(core, io = {}) {
   const setPrompt = (key, value) => {
@@ -1298,6 +1341,8 @@ export function createGenerateInterceptor(core, io = {}) {
     void chat;
     void contextSize;
     void abort;
+    const signal = io.getSignal?.() ?? io.signal;
+    if (signal?.aborted) return;
     for (const key of atlasSceneInjectionKeys) setPrompt(key, "");
     atlasSceneInjectionKeys.clear();
     if (type === "quiet") {
@@ -1305,7 +1350,20 @@ export function createGenerateInterceptor(core, io = {}) {
       return;
     }
     try {
-      await core.waitPendingTurn(waitMs);
+      const pendingWork = core.waitPendingTurn(waitMs);
+      if (signal?.aborted) return;
+      if (signal) {
+        let onAbort;
+        const stopped = new Promise(resolve => {
+          onAbort = resolve;
+          signal.addEventListener("abort", onAbort, { once: true });
+        });
+        try { await Promise.race([pendingWork, stopped]); }
+        finally { signal.removeEventListener("abort", onAbort); }
+      } else {
+        await pendingWork;
+      }
+      if (signal?.aborted) return;
       const pending = core.getState().pendingTurn;
       if (!pending) {
         emitAtlasDiagnostic({ level: "info", source: "host", code: "PROMPT_INJECTION_SKIPPED",
@@ -1318,6 +1376,7 @@ export function createGenerateInterceptor(core, io = {}) {
       emitAtlasDiagnostic({ level: "info", source: "host", code: "PROMPT_INJECTION_COMPLETE",
         operation: "injection", phase: "applied", outcome: "success" });
     } catch (error) {
+      if (signal?.aborted) return;
       emitAtlasDiagnostic({ level: "error", source: "host", code: "INJECTION_FAILED",
         operation: "injection", phase: "applied", outcome: "failed", retryable: true });
       setPrompt(ATLAS_INJECTION_KEY, "");
@@ -1540,8 +1599,8 @@ function el(tag, className, text) {
 }
 
 
-function renderPanel(core, root, api, store, mod, skinPort = null) {
-  return mountReferenceUi({root,core,api,getContext:()=>globalThis.SillyTavern?.getContext?.(),settingsPort:skinPort,lorePort:createReferenceLorePort(()=>globalThis.SillyTavern?.getContext?.(),loadStWorldInfo,async()=>{try{return await globalThis.TavernHelper?.getCharWorldbookNames?.('current')??[];}catch{return [];}}),
+function renderPanel(core, root, api, store, mod, skinPort = null, automation) {
+  return mountReferenceUi({root,core,api,automation,getContext:()=>globalThis.SillyTavern?.getContext?.(),settingsPort:skinPort,lorePort:createReferenceLorePort(()=>globalThis.SillyTavern?.getContext?.(),loadStWorldInfo,async()=>{try{return await globalThis.TavernHelper?.getCharWorldbookNames?.('current')??[];}catch{return [];}}),
     diagnostics:()=>atlasDiagnostics?.getSnapshot?.()??pendingDiagnostics,exportDiagnostics:()=>atlasDiagnostics?.getExportSnapshot?.()??{events:pendingDiagnostics,coverage:{}},emit:emitAtlasDiagnostic,defaultPrompt:mod.DEFAULT_WORLD_TURN_SYSTEM_PROMPT??'',pluginVersion:ATLAS_EXTENSION_VERSION,diagnosticTools:mod});
 }
 
@@ -1715,7 +1774,7 @@ async function loadStWorldInfo() {
 }
 
 /** 把酒馆 world-info 公开 API 适配成 AtlasLorebookPort（导出供测试与预览复用）。 */
-export function createLorebookPort(context, worldInfo, readScopeBinding = null) {
+export function createLorebookPort(context, worldInfo, readScopeBinding = null, signal = null, automationSignal = null) {
   return {
     async loadBook(name) {
       try {
@@ -1726,9 +1785,13 @@ export function createLorebookPort(context, worldInfo, readScopeBinding = null) 
       }
     },
     async createBook(name) {
+      signal?.throwIfAborted();
+      automationSignal?.().throwIfAborted();
       await worldInfo.createNewWorldInfo(name);
     },
     async saveBook(name, data) {
+      signal?.throwIfAborted();
+      automationSignal?.().throwIfAborted();
       await worldInfo.saveWorldInfo(name, data, true);
     },
     /**
@@ -1780,6 +1843,8 @@ export function createLorebookPort(context, worldInfo, readScopeBinding = null) 
      * - 清空传空串（酒馆语义即清除该 key 的注入）。
      */
     async injectTurn(key, value) {
+      signal?.throwIfAborted();
+      automationSignal?.().throwIfAborted();
       const ctx = context();
       if (typeof ctx?.setExtensionPrompt !== "function") {
         throw new Error("setExtensionPrompt unavailable");
@@ -1827,6 +1892,8 @@ export function createLorebookPort(context, worldInfo, readScopeBinding = null) 
       return typeof name === "string" && name.trim().length > 0 ? name : null;
     },
     async bindChatBook(name) {
+      signal?.throwIfAborted();
+      automationSignal?.().throwIfAborted();
       const ctx = context();
       if (!ctx.chatMetadata) return;
       ctx.chatMetadata.world_info = name;
@@ -1835,24 +1902,17 @@ export function createLorebookPort(context, worldInfo, readScopeBinding = null) 
   };
 }
 
-/**
- * 连接真实 SillyTavern（由 activate 钩子调用）。
- *
- * 幂等且并发安全：模块自初始化（`void connectAtlas()`）与 manifest 的 hooks.activate
- * 会在同一时刻各触发一次，若不共享在途 Promise，两次调用都会看到 connected 为空，
- * 于是重复挂载面板、重复注册监听。用 connecting 记住在途 Promise，两边拿到同一实例。
- * @returns {Promise<{ core: object, rerender: () => void } | null>}
- */
+/** 模块自初始化、酒馆钩子与全局开关共用同一运行实例。 */
 export async function connectAtlas() {
-  if (connected) return connected;
-  if (connecting) return connecting;
   if (typeof SillyTavern === "undefined" || typeof document === "undefined") return null;
-  connecting = connectOnce();
-  try {
-    return await connecting;
-  } finally {
-    connecting = null;
-  }
+  return queueRuntimeChange(async () => {
+    if (!hostActive) return null;
+    if (connected) return connected;
+    runtimeController = new AbortController();
+    const instance = await connectOnce(runtimeController.signal);
+    if (!instance) runtimeController = null;
+    return instance;
+  });
 }
 
 /**
@@ -2332,10 +2392,11 @@ function extractSceneKeywords(selectionContext, entries) {
 }
 
 
-async function connectOnce() {
+async function connectOnce(signal) {
   const hostCleanups=[];
   try {
     const mod = await loadUiCore();
+    signal.throwIfAborted();
     let diagnosticStorage = null;
     let diagnosticArchive = null;
     let archiveEnabled = false;
@@ -2358,6 +2419,11 @@ async function connectOnce() {
       operation: 'runtime', phase: 'load', outcome: 'success' });
 
     const context = () => SillyTavern.getContext();
+    let automationController = new AbortController();
+    if (!atlasEnabled()) automationController.abort();
+    const automationSignal = () => automationController.signal;
+    const automationEnabled = () => !automationSignal().aborted;
+    signal.addEventListener("abort", () => automationController.abort(), { once: true });
     const initialSettings = context()?.extensionSettings;
     if (initialSettings) {
       initialSettings[ATLAS_SETTINGS_KEY] ??= {};
@@ -2370,7 +2436,7 @@ async function connectOnce() {
     };
     if (loreHost?.eventSource && loreHost?.event_types?.WORLD_INFO_ACTIVATED) {
       hostLoreActivationApiAvailable = true;
-      onHost(loreHost.event_types.WORLD_INFO_ACTIVATED,(entries)=>recordAtlasHostLoreActivation(entries,context()));
+      onHost(loreHost.event_types.WORLD_INFO_ACTIVATED, entries => { if (automationEnabled()) recordAtlasHostLoreActivation(entries, context()); });
       for(const name of ["GENERATION_STARTED","CHAT_CHANGED","MESSAGE_EDITED","MESSAGE_DELETED"]){
         const type=loreHost.event_types[name];if(type)onHost(type,()=>{hostLoreActivation=null;});
       }
@@ -2395,8 +2461,10 @@ async function connectOnce() {
     // 路由到 酒馆主 API（TavernHelper.generateRaw）/ 酒馆连接预设（ConnectionManager），
     // 其余走酒馆后端代理（custom 源 / claude / makersuite 协议映射）。
     const getTavernHelper = () => globalThis.TavernHelper ?? globalThis.getTavernHelper?.() ?? null;
-    const hostDispatchFetch = async (input, init) => {
+    const hostDispatchFetch = async (input, init, work = automationSignal()) => {
+      work.throwIfAborted();
       const modelDiagnosticScope = mod.diagnosticSignalContext(init?.signal);
+      init = { ...init, signal: init?.signal ? AbortSignal.any([init.signal, work]) : work };
       let mode = null;
       try {
         const parsed = typeof init?.body === "string" ? JSON.parse(init.body) : null;
@@ -2438,7 +2506,22 @@ async function connectOnce() {
         throw error;
       }
     };
-    const runtimeApiKeys = new Map();
+    let browseMetadata = new WeakMap();
+    const modelPorts = new WeakMap();
+    function modelPortFor(work) {
+      if (!modelPorts.has(work)) {
+        modelPorts.set(work, mod.createSqlModelPort({
+          readSettings: async () => {
+            const saved = await engineStore.read("settings");
+            if (!saved?.apiPresets) return saved;
+            return { ...saved, apiPresets: saved.apiPresets.map(p => runtimeApiKeys.has(p.id) ? { ...p, apiKey: runtimeApiKeys.get(p.id) } : p) };
+          },
+          fetchFn: (input, init) => hostDispatchFetch(input, init, work),
+          onDiagnostic: emitAtlasDiagnostic,
+        }));
+      }
+      return modelPorts.get(work);
+    }
     const sqlSessionProvider = mod.createBrowserSqlHost({
       onSaved: () => { void atlasRuntime.core?.refresh().catch(()=>emitAtlasDiagnostic({level:'warn',source:'ui',code:'WORLD_BUILD_VIEW_REFRESH_FAILED',operation:'state',phase:'response',outcome:'failed'})); },
       readWorldBuildSources: async () => {
@@ -2450,21 +2533,33 @@ async function connectOnce() {
         return [...(card?[{key:'card',kind:'lorebook',text:card,hash:mod.stableHexHash(card)}]:[]),
           ...entries.map(entry=>({key:`lore:${entry.id}`,kind:'lorebook',text:entry.content,hash:mod.stableHexHash(entry.content)}))];
       },
-      modelPort: mod.createSqlModelPort({ readSettings: async () => {
-        const saved = await engineStore.read("settings");
-        if (!saved?.apiPresets) return saved;
-        return { ...saved, apiPresets: saved.apiPresets.map(p => runtimeApiKeys.has(p.id) ? { ...p, apiKey: runtimeApiKeys.get(p.id) } : p) };
-      }, fetchFn: hostDispatchFetch, onDiagnostic: emitAtlasDiagnostic }),
-      enabled: () => context()?.extensionSettings?.[ATLAS_SETTINGS_KEY]?.[ATLAS_SQL_MODE_SETTING] === true,
+      enabled: () => !signal.aborted && context()?.extensionSettings?.[ATLAS_SETTINGS_KEY]?.[ATLAS_SQL_MODE_SETTING] === true,
       context: () => {
         const record = atlasContextRecord(context);
         const live = context();
         if (!record?.chatId || !record.chatMetadata || typeof live?.saveMetadata !== "function") return null;
+        const work = automationSignal();
+        const sourceMetadata = record.chatMetadata;
+        let chatMetadata = sourceMetadata;
+        if (work.aborted) {
+          if (!sourceMetadata.atlas?.database) return null;
+          // Older SQL snapshots may be upgraded in memory for viewing.
+          const atlas = sourceMetadata.atlas;
+          const cached = browseMetadata.get(sourceMetadata);
+          chatMetadata = cached?.database === atlas.database
+            ? cached.metadata
+            : { ...sourceMetadata, atlas: { ...atlas } };
+          if (chatMetadata !== cached?.metadata) {
+            browseMetadata.set(sourceMetadata, { database: atlas.database, metadata: chatMetadata });
+          }
+        }
         return {
           chatUid: String(record.chatId),
           branchId: readAtlasSession(context)?.binding?.branchId ?? null,
-          chatMetadata: record.chatMetadata,
-          saveMetadata: () => live.saveMetadata(),
+          chatMetadata,
+          modelPort: work.aborted ? null : modelPortFor(work),
+          canWrite: () => !work.aborted,
+          saveMetadata: () => { work.throwIfAborted(); return live.saveMetadata(); },
         };
       },
       loadRuntime: async () => {
@@ -2479,7 +2574,7 @@ async function connectOnce() {
       store: engineStore,
       fetchFn: hostDispatchFetch,
       onDiagnostic: emitAtlasDiagnostic,
-      onGenerationComplete: clearInjection,
+      onGenerationComplete: () => { if (automationEnabled()) clearInjection(); },
       sqlSessionProvider,
     });
     // R15 集成：启动时清扫 orphan pending（R12 收口的最后一块——reconcilePending
@@ -2489,7 +2584,7 @@ async function connectOnce() {
     // catch 吞掉成静默失效（0.9.2 教训）。其他聊天的孤儿留待各自聊天启动时清。
     try {
       const startupSession = readAtlasSession(context);
-      void engine
+      if (automationEnabled()) void engine
         .reconcilePending(startupSession)
         .then((report) => {
           if (report.cleaned > 0 || report.malformed > 0 || report.errors.length > 0) {
@@ -2528,9 +2623,22 @@ async function connectOnce() {
       emit: emitAtlasDiagnostic,
       notify: showAtlasNotice,
       logCall: logApiCall,
+      signal,
+      automationSignal,
+      canBrowse: atlasCanBrowse,
+      pausedResponse: ATLAS_PAUSED_RESPONSE,
     });
-    const api = sessionApi;
+    const api = {
+      request(method, route, body) {
+        if (!automationEnabled() && method === "POST" && route === "/sql/chat/binding"
+          && !context().chatMetadata?.atlas?.database) {
+          return Promise.resolve({ status: 200, body: { ok: true, data: { binding: null } } });
+        }
+        return sessionApi.request(method, route, body);
+      },
+    };
     api.setRuntimeApiKeys = connections => {
+      if (signal.aborted) return;
       runtimeApiKeys.clear();
       for (const c of connections) if (!c.rememberKey && c.apiKey) runtimeApiKeys.set(c.id, c.apiKey);
     };
@@ -2550,6 +2658,8 @@ async function connectOnce() {
         context,
         worldInfo,
         async () => hostRef?.readBinding?.() ?? null,
+        signal,
+        automationSignal,
       ));
     } catch (error) {
       emitAtlasDiagnostic({ level: "warn", source: "lorebook",
@@ -2558,6 +2668,7 @@ async function connectOnce() {
       console.warn("[atlas] 世界书模块不可用，推演结果不写世界书：", error instanceof Error ? error.message : String(error));
     }
 
+    signal.throwIfAborted();
     let rerender = () => {};
     const adaptEvent = createEventAdapter(context);
     /** 0.8.2 首条消息自动建世；core 由下方 const 赋值后回填（调用只发生在初始化完成之后）。 */
@@ -2619,29 +2730,32 @@ async function connectOnce() {
         return null;
       },
       onDiagnostic: emitAtlasDiagnostic,
-      host: (hostRef ??= createHost(context)),
-      emitter: createEmitter(context),
+      host: (hostRef ??= createHost(context, signal, automationSignal)),
+      emitter: createEmitter(context, automationEnabled),
+      automationEnabled,
       adaptEvent,
       resolveAssistantFloor: createAssistantFloorResolver(context),
       getNarrativeContext: async () => {
+        const work = automationSignal();
+        if (work.aborted) return "";
         const captured = context();
         if (captured?.extensionSettings?.[ATLAS_SETTINGS_KEY]?.[ATLAS_SQL_MODE_SETTING] !== true) return null;
         // Read an existing snapshot only. This projection never creates/migrates/saves a world.
         if (!captured?.chatMetadata?.atlas?.database) return "";
         const branchId = captured.chatMetadata.atlas.database.active_branch_id ?? "main";
         const sql = await loadSqlCore();
-        if (!sql?.renderSqlSceneContext) return "";
+        if (work.aborted || !sql?.renderSqlSceneContext) return "";
         let session = null;
         try {
           session = await sql.openSqlSession({ chatUid: String(captured.chatId), chatMetadata: captured.chatMetadata,
             branchId, persist: false, saveSession: async () => { throw new Error("Narrative projection is read-only"); } });
           const live = context();
-          if (String(live?.chatId) !== String(captured.chatId) || live?.chatMetadata !== captured.chatMetadata) return "";
+          if (work.aborted || String(live?.chatId) !== String(captured.chatId) || live?.chatMetadata !== captured.chatMetadata) return "";
           if ((live.chatMetadata.atlas.database?.active_branch_id ?? "main") !== branchId) return "";
           return sql.renderSqlSceneContext({ db: session.repo.db, branchId: session.branchId });
         } finally { if (session) await sql.closeSqlSession(session); }
       },
-      ensureWorld: () => ensureStarterWorld(),
+      ensureWorld: () => automationEnabled() && ensureStarterWorld(),
       syncProtagonistIdentity: async (chatId, worldId) => {
         const ctx = context();
         if (String(ctx?.chatId ?? "") !== chatId || !worldId.startsWith("world-auto-")) return false;
@@ -2761,11 +2875,13 @@ async function connectOnce() {
       ...(lorebookWriter
         ? {
             onLorebookSync: async (plans) => {
+              const work = automationSignal();
+              if (work.aborted) return { contentTarget: "none" };
               const captured = context();
               const worldId = coreRef?.getState()?.binding?.worldId;
               if (!worldId) return { contentTarget: "none" };
               const result = await lorebookWriter.syncTurn(plans, { chatId: captured.chatId, worldId });
-              if (context()?.chatMetadata !== captured.chatMetadata || context()?.chatId !== captured.chatId) return result;
+              if (work.aborted || context()?.chatMetadata !== captured.chatMetadata || context()?.chatId !== captured.chatId) return result;
               await engineStore.write("lorebook", lorebookWriter.snapshot(plans, result));
               rerender();
               return result;
@@ -2792,7 +2908,7 @@ async function connectOnce() {
     });
     coreRef = core;
     atlasRuntime.core = core;
-    installGenerateInterceptor(core);
+    installGenerateInterceptor(core, { getSignal: automationSignal });
 
     // 根节点：挂在 body 下；样式只遵循公开扩展机制
     let root = document.getElementById("atlas-extension-panel-root");
@@ -2804,6 +2920,23 @@ async function connectOnce() {
     rerender = renderPanel(core, root, api, engineStore, mod, {
       read: (key) => hostRef.readData(key),
       write: (key, value) => hostRef.writeData(key, value),
+    }, {
+      enabled: automationEnabled,
+      async setEnabled(enabled) {
+        signal.throwIfAborted();
+        if (enabled === automationEnabled()) return;
+        saveAtlasPreferences({ [ATLAS_ENABLED_SETTING]: enabled });
+        if (enabled) {
+          automationController = new AbortController();
+        } else {
+          automationController.abort();
+          browseMetadata = new WeakMap();
+          hostLoreActivation = null;
+          clearInjection();
+          core.pauseAutomation();
+        }
+        await core.refresh();
+      },
     });
     let diagnosticRenderTimer = null;
     const unsubscribeDiagnostics = atlasDiagnostics.subscribe(() => {
@@ -2813,13 +2946,14 @@ async function connectOnce() {
         if (core.getState().panelOpen !== false) rerender();
       }, 150);
     });
-    installMenuButton(core);
     core.init();
-    // H05/§17H：把 settings.html 的「SQL 世界数据」开关接上（新安装默认启用；抽屉不在则跳过）
-    const sqlToggle=bindSqlModeToggle(context, () => rerender());
-    const toggleHandler=sqlToggle?.__atlasChangeHandler;
-    hostCleanups.push(()=>{
-      if(sqlToggle && toggleHandler && sqlToggle.__atlasChangeHandler===toggleHandler){sqlToggle.removeEventListener("change",toggleHandler);delete sqlToggle.__atlasChangeHandler;delete sqlToggle.dataset.atlasBound;}
+    bindSqlModeToggle(context, () => rerender());
+    hostCleanups.push(() => {
+      const toggle = document.getElementById(ATLAS_SQL_MODE_TOGGLE_ID);
+      if (!toggle?.__atlasChangeHandler) return;
+      toggle.removeEventListener("change", toggle.__atlasChangeHandler);
+      delete toggle.__atlasChangeHandler;
+      delete toggle.dataset.atlasBound;
     });
     connected = { core, rerender, api, dispose: async () => {
       for(const cleanup of hostCleanups.splice(0).reverse())cleanup();
@@ -2831,6 +2965,7 @@ async function connectOnce() {
     return connected;
   } catch (error) {
     for(const cleanup of hostCleanups.splice(0).reverse())cleanup();
+    if (signal.aborted) return null;
     emitAtlasDiagnostic({ level: "error", source: "ui", code: "UI_CORE_LOAD_FAILED",
       operation: "initialize", phase: "startup", outcome: "failed" });
     console.warn("[atlas] UI 扩展初始化失败（酒馆聊天不受影响）：", error instanceof Error ? error.message : String(error));
@@ -2842,13 +2977,12 @@ async function connectOnce() {
 // 做法 = shujuku 同款：往 #extensionsMenu 追加条目，容器未就绪则 2s 间隔重试。
 let menuButtonTimer = null;
 
-function installMenuButton(core) {
-  if (typeof document === "undefined") return;
-  ensureAtlasMenuItem(core);
+function installMenuButton() {
+  if (typeof document === "undefined" || menuButtonTimer || ensureAtlasMenuItem()) return;
   let tries = 1;
   menuButtonTimer = setInterval(() => {
     tries += 1;
-    const done = ensureAtlasMenuItem(core);
+    const done = ensureAtlasMenuItem();
     if (done || tries >= 10) {
       if (menuButtonTimer) clearInterval(menuButtonTimer);
       menuButtonTimer = null;
@@ -2856,7 +2990,7 @@ function installMenuButton(core) {
   }, 2000);
 }
 
-function ensureAtlasMenuItem(core) {
+function ensureAtlasMenuItem() {
   const menu = document.getElementById("extensionsMenu");
   if (!menu) return false;
   let item = document.getElementById("atlas-menu-open");
@@ -2872,7 +3006,10 @@ function ensureAtlasMenuItem(core) {
     item.addEventListener("click", () => {
       // SillyTavern closes its wand menu in the bubbling html click handler.
       // Keep this event bubbling so its visibility flag and Popper stay in sync.
-      core.setPanelOpen(true);
+      void connectAtlas().then(instance => {
+        if (instance) instance.core.setPanelOpen(true);
+        else showAtlasNotice("阿特拉斯启动失败，请重试。");
+      });
     });
     item.addEventListener("keydown", (event) => {
       if (event.key !== "Enter" && event.key !== " ") return;
@@ -2894,32 +3031,40 @@ function removeMenuButton() {
 }
 
 export async function disconnectAtlas() {
-  if (!connected) return;
-  connected.core.dispose();
-  await connected.dispose?.();
-  removeMenuButton();
-  const root = document.getElementById("atlas-extension-panel-root");
-  if (root) root.remove();
-  // ATLAS-FIX-02：全局痕迹一并清除（interceptor + 拖拽中监听），否则宿主仍会调用已死闭包
-  atlasUninstallGlobals();
-  atlasRuntime.mod = null;
-  atlasRuntime.api = null;
-  atlasRuntime.core = null;
-  atlasRuntime.engineStore = null;
-  connected = null;
+  runtimeController?.abort();
+  if (connected) {
+    connected.core.dispose();
+    if (typeof SillyTavern.getContext()?.setExtensionPrompt === "function") clearInjection();
+    document.getElementById("atlas-extension-panel-root")?.remove();
+    atlasUninstallGlobals();
+  }
+
+  await queueRuntimeChange(async () => {
+    const instance = connected;
+    connected = null;
+    runtimeController = null;
+    atlasRuntime.mod = null;
+    atlasRuntime.api = null;
+    atlasRuntime.core = null;
+    atlasRuntime.engineStore = null;
+    await instance?.dispose?.();
+  });
 }
 
-// SillyTavern 生命周期钩子（manifest.json hooks.activate / hooks.disable）
 export async function activate() {
+  hostActive = true;
+  installMenuButton();
   await connectAtlas();
 }
 
 export async function disable() {
+  hostActive = false;
   await disconnectAtlas();
+  runtimeApiKeys.clear();
+  removeMenuButton();
 }
 
-// 旧版酒馆没有 manifest hooks 支持：模块加载即幂等自初始化；
-// 新版走 hooks.activate 时 connectAtlas 返回已有实例，不产生重复监听。
+// 旧版酒馆不调用 manifest hooks，模块加载时也执行一次幂等初始化。
 if (typeof SillyTavern !== "undefined" && typeof document !== "undefined") {
-  void connectAtlas();
+  void activate();
 }

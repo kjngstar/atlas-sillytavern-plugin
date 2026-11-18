@@ -345,8 +345,11 @@ function renderDock(){
  $('#queueLabel').textContent=`${D.TASKS.filter(t=>known(t)&&t.st!=='done').length} 项后台动向`;
  $('#dockTabs [data-tab="tasks"] em').textContent=D.TASKS.filter(known).length;
  $('#syncText').textContent=`${D.meta.engine?.busy?enginePhaseText()+' · ':D.meta.engine?.error?'推演失败 · ':D.meta.snapshotSaved===false?'等待首次保存 · ':''}修订 ${D.meta.revision} · ${clock()}`;
- $('#undoDemo').disabled=!D.meta.canUndo;
- const engine=D.meta.engine??{};$('#nextDemo').disabled=!!engine.busy||!engine.hasChat||!engine.sqlEnabled||engine.bound&&!engine.enabled;$('#nextDemo').textContent=engine.busy?enginePhaseText(engine):engine.bound?'立即推演':'建立当前世界';
+ const engine=D.meta.engine??{};
+ const paused=engine.automationEnabled===false;
+ $('#atlasRuntimeEnabled').checked=!paused;
+ $('#undoDemo').disabled=paused||!D.meta.canUndo;
+ $('#nextDemo').disabled=paused||!!engine.busy||!engine.hasChat||!engine.sqlEnabled||engine.bound&&!engine.enabled;$('#nextDemo').textContent=paused?'阿特拉斯已暂停':engine.busy?enginePhaseText(engine):engine.bound?'立即推演':'建立当前世界';
 }
 function pageHeader(title,sub,extra=''){return `<div class="workspace-header"><div><span class="workspace-eyebrow">ATLAS · ${esc(D.meta.worldName)}</span><h2>${esc(title)}</h2><p>${esc(sub)}</p></div>${extra}</div>`;}
 function renderPage(){presetUI.captureState();const el=$('#workspacePage');el.hidden=effectivePage()==='map';$('#viewport').classList.toggle('page-open',effectivePage()!=='map');
@@ -372,7 +375,7 @@ function renderCatalog(){const q=state.query.trim().toLowerCase(),f=state.filter
  $('#catalogResults').innerHTML=list.length?list.map(o=>p==='cast'?castCard(o,true):p==='items'?itemCard(o):messageCard(o)).join(''):empty('没有符合条件的记录');
 }
 function timelineHTML(){const turns=[...new Set(D.EVENTS.filter(known).map(e=>e.turn))];return `<div class="timeline">${turns.map(t=>`<section><div class="timeline-turn"><i></i><span>第 ${t} 轮</span><em>${esc(D.EVENTS.find(e=>e.turn===t).t)}</em></div><div class="timeline-events">${D.EVENTS.filter(e=>e.turn===t&&known(e)).map(eventRow).join('')}</div></section>`).join('')}</div>`;}
-function simulationControlsHTML(){const e=D.meta.engine??{},status=!e.hasChat?'请先打开一个聊天':!e.sqlEnabled?'SQL 世界数据已关闭':!e.bound?'尚未建立世界':e.enabled?'本聊天推演已启用':'本聊天推演已停用';return `<div class="simulation-banner"><span class="pd"></span><div><b>${esc(status)}</b><span>世界时间 ${clock()} · 浏览与动画不会推进世界时间</span></div><button class="action-btn primary" data-demo-next ${e.busy||!e.hasChat||!e.sqlEnabled||e.bound&&!e.enabled?'disabled':''}>${e.busy?'正在处理…':e.bound?'立即推演':'建立当前世界'}</button></div><div class="detail-actions">${e.bound?`<button class="action-btn" data-engine-enable="${e.enabled?'false':'true'}" ${e.busy||!e.sqlEnabled?'disabled':''}>${e.enabled?'暂停本聊天推演':'启用本聊天推演'}</button>`:''}<button class="action-btn" data-open-backend="connection">API 连接</button><button class="action-btn" data-open-backend="prompts">提示词</button><button class="action-btn" data-open-backend="assignments">任务与分批</button><button class="action-btn" data-page="diag">查看诊断</button></div>${e.error?`<div class="receipt-row"><i class="rc-ok rc-fail"></i><div><b>最近一次操作失败</b><p role="alert" data-engine-error>${esc(e.error)}</p></div><button class="action-btn" data-page="diag">查看详细日志</button></div>`:''}<div class="section-label">推演回执</div>${D.RECEIPTS.map(receiptCard).join('')||empty(e.busy?'正在推演，等待回执…':'尚无推演回执')}<p class="scope-note">连接与提示词在此工作台内设置；世界引擎运行在浏览器中，世界数据随当前酒馆聊天保存。</p>`;}
+function simulationControlsHTML(){const e=D.meta.engine??{},paused=e.automationEnabled===false,status=paused?'阿特拉斯已暂停':!e.hasChat?'请先打开一个聊天':!e.sqlEnabled?'SQL 世界数据已关闭':!e.bound?'尚未建立世界':e.enabled?'本聊天推演已启用':'本聊天推演已停用';return `<div class="simulation-banner"><span class="pd"></span><div><b>${esc(status)}</b><span>世界时间 ${clock()} · 浏览与动画不会推进世界时间</span></div><button class="action-btn primary" data-demo-next ${paused||e.busy||!e.hasChat||!e.sqlEnabled||e.bound&&!e.enabled?'disabled':''}>${e.busy?'正在处理…':e.bound?'立即推演':'建立当前世界'}</button></div><div class="detail-actions">${e.bound?`<button class="action-btn" data-engine-enable="${e.enabled?'false':'true'}" ${paused||e.busy||!e.sqlEnabled?'disabled':''}>${e.enabled?'暂停本聊天推演':'启用本聊天推演'}</button>`:''}<button class="action-btn" data-open-backend="connection">API 连接</button><button class="action-btn" data-open-backend="prompts">提示词</button><button class="action-btn" data-open-backend="assignments">任务与分批</button><button class="action-btn" data-page="diag">查看诊断</button></div>${e.error?`<div class="receipt-row"><i class="rc-ok rc-fail"></i><div><b>最近一次操作失败</b><p role="alert" data-engine-error>${esc(e.error)}</p></div><button class="action-btn" data-page="diag">查看详细日志</button></div>`:''}<div class="section-label">推演回执</div>${D.RECEIPTS.map(receiptCard).join('')||empty(e.busy?'正在推演，等待回执…':'尚无推演回执')}<p class="scope-note">连接与提示词在此工作台内设置；世界引擎运行在浏览器中，世界数据随当前酒馆聊天保存。</p>`;}
 /**
  * M6-16：统一诊断页。
  *
@@ -661,6 +664,18 @@ function bind(){
  $('#mapWidgetsToggle').onclick=()=>setPreference('mapWidgetsCollapsed',!state.mapWidgetsCollapsed);
  $('#nextDemo').onclick=advanceDemo;$('#undoDemo').onclick=undoDemo;$('#resetDemo').onclick=resetDemo;
  $('#btnPalette').onclick=openPalette;$('#btnSettings').onclick=()=>setPage('prefs');
+ const runtimeToggle=$('#atlasRuntimeEnabled');
+ const setAutomationEnabled=window.AtlasHost.setAutomationEnabled;
+ if(typeof setAutomationEnabled==='function'){
+  $('#atlasRuntimeToggle').hidden=false;
+  runtimeToggle.checked=D.meta.engine?.automationEnabled!==false;
+  runtimeToggle.onchange=async()=>{
+   runtimeToggle.disabled=true;
+   try{await setAutomationEnabled(runtimeToggle.checked);}
+   catch(error){runtimeToggle.checked=D.meta.engine?.automationEnabled!==false;toast(error.message,'warn');}
+   finally{runtimeToggle.disabled=false;}
+  };
+ }
  $('.palette-backdrop').onclick=closePalette;
  $('#modalClose').onclick=()=>$('#demoModal').hidden=true;
  $('#demoModal').onclick=e=>{if(e.target===$('#demoModal'))$('#demoModal').hidden=true;};

@@ -7,6 +7,8 @@ export type BrowserSqlHostRecord = {
   branchId?: string | null;
   chatMetadata: Record<string, unknown>;
   saveMetadata: () => Promise<unknown>;
+  modelPort?: AtlasModelPort | null;
+  canWrite?: () => boolean;
 };
 
 export type BrowserSqlHostOptions = {
@@ -95,17 +97,18 @@ export function createBrowserSqlHost(options: BrowserSqlHostOptions): AtlasSqlSe
         if (current) { await runtime.closeSqlSession(current.session); current = null; }
         const atlas = record.chatMetadata.atlas as Record<string, unknown> | undefined;
         const openOptions={
-          chatUid, branchId, chatMetadata: record.chatMetadata, modelPort: options.modelPort ?? null,
+          chatUid, branchId, chatMetadata: record.chatMetadata, modelPort: record.modelPort === undefined ? options.modelPort ?? null : record.modelPort,
           readWorldBuildSources: options.readWorldBuildSources,
           ...(!envelopeOf(record.chatMetadata)&&atlas?.world&&typeof atlas.world==='object'?{
             worldUid:typeof (atlas.world as Record<string,unknown>).id==='string'?(atlas.world as {id:string}).id:undefined,
             branchName:typeof (atlas.world as Record<string,unknown>).name==='string'?(atlas.world as {name:string}).name:undefined,
           }:{}),
           confirmSave: true,
-          isCurrentHost: () => isCurrent(record, branchId)
+          isCurrentHost: () => record.canWrite?.() !== false && isCurrent(record, branchId)
             && sameSnapshot(current?.session.chatMetadata === record.chatMetadata ? current.savingSnapshot ?? current.storedSnapshot : openingSnapshot,
               snapshot(record.chatMetadata)),
           saveSession: async () => {
+            if (record.canWrite?.() === false) throw error('ATLAS_PAUSED', '阿特拉斯已暂停，世界数据未写入');
             if (!isCurrent(record, branchId)) throw error('CHAT_CHANGED', '保存前聊天或分支已变化');
             if(migrating && legacySignature()!==originalLegacy) throw error('SESSION_STALE','保存前旧档已变化，拒绝发布迁移候选');
             // The host publishes candidate metadata before its async save finishes.

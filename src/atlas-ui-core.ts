@@ -369,6 +369,7 @@ export interface AtlasUiCore {
   refresh(): Promise<void>;
   getState(): AtlasUiState;
   setPanelOpen(open: boolean): void;
+  pauseAutomation(): void;
   setPage(page: AtlasUiPage): void;
   /**
    * D08：作者的「查看全部幕后推演」开关。
@@ -443,6 +444,7 @@ export function createAtlasUiCore(deps: {
   onDiagnostic?: (event: AtlasDiagnosticInput) => void;
   /** Clear foreground prompt injection only after its own completion or stop. */
   onGenerationComplete?: () => void;
+  automationEnabled?: () => boolean;
   now?: () => number;
   /** 任意状态变化后的回调（UI 层重绘用；同步调用，不等待异步刷新完成） */
   onStateChange?: () => void;
@@ -814,7 +816,7 @@ export function createAtlasUiCore(deps: {
         const result = await api.request('POST', '/sql/chat/binding', { chatUid: chatId });
         const body = result.body as { ok?: boolean; data?: { binding?: unknown }; error?: { message?: string } };
         if (state.chatId !== chatId || !sqlEnabled()) return;
-        if (result.status !== 200 || !body.ok || !body.data?.binding) {
+        if (result.status !== 200 || !body.ok || !body.data || !("binding" in body.data)) {
           setState({ binding: null, stateData: null, mode: 'unbound', lastError: body.error?.message ?? 'SQL 聊天初始化未完成。' });
           return;
         }
@@ -941,7 +943,7 @@ export function createAtlasUiCore(deps: {
     await syncFromHost();
     if (state.binding && state.serviceStatus === "online") {
       const key = `${state.binding.chatId}|${state.binding.worldId}`;
-      if (!sqlEnabled() && deps.syncProtagonistIdentity && !syncedProtagonistChats.has(key)) {
+      if (deps.automationEnabled?.() !== false && !sqlEnabled() && deps.syncProtagonistIdentity && !syncedProtagonistChats.has(key)) {
         try {
           if (await deps.syncProtagonistIdentity(state.binding.chatId, state.binding.worldId)) {
             syncedProtagonistChats.add(key);
@@ -1013,7 +1015,7 @@ export function createAtlasUiCore(deps: {
       // 切到新聊天（未绑定世界）→ 清掉书里上一聊天留下的 Atlas 条目；
       // 切回已绑定的聊天 → 由壳层按会话世界状态重建「Atlas 动向」。
       // 世界数据在 chatMetadata.atlas 会话里零丢失，书里只留当前聊天的动向。
-      if (!sqlEnabled() && deps.onLorebookChatSwitch) {
+      if (deps.automationEnabled?.() !== false && !sqlEnabled() && deps.onLorebookChatSwitch) {
         const chatId = host.getChatId();
         void track(
           Promise.resolve()
@@ -1025,6 +1027,7 @@ export function createAtlasUiCore(deps: {
       void track(refresh());
       return;
     }
+    if (deps.automationEnabled?.() === false) return;
     // 回合事件：经适配器转成结构化动作；无法适配（形状未知）则忽略，绝不猜测
     const adapted = deps.adaptEvent?.(event, payload) ?? null;
     if (!adapted) return;
@@ -1994,6 +1997,20 @@ export function createAtlasUiCore(deps: {
 
     getState(): AtlasUiState {
       return { ...state, binding: state.binding ? { ...state.binding } : null };
+    },
+
+    pauseAutomation() {
+      generationRevision += 1;
+      generationLifecycle.reset();
+      stoppedGeneration = true;
+      lastPrepareTask = null;
+      lastMutationTask = null;
+      sqlRetryRequest = null;
+      retryRollbackFloor = null;
+      swipeIdForNextCommit = null;
+      if (commitFlight) releaseCommit(commitFlight);
+      clearTimers();
+      setState({ pendingTurn: null, rearmTurn: null, retryableCommit: null, turnPhase: "idle" });
     },
 
     setPanelOpen(open: boolean) {

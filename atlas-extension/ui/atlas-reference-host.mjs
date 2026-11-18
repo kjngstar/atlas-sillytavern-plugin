@@ -13,7 +13,7 @@ import { buildTurnAnalysisExport } from './atlas-turn-analysis-export.mjs';
 const ATLAS_FEED_PAGE_MAX=100;
 const ATLAS_FEED_MAX_PAGES=20;
 
-export function mountReferenceUi({root,core,api,getContext,settingsPort,lorePort,diagnostics=()=>[],exportDiagnostics=()=>({events:diagnostics(),coverage:{}}),emit=()=>{},defaultPrompt='',pluginVersion=null,diagnosticTools={},fetchFn=globalThis.fetch,loadSqlRuntime=()=>import(new URL('../dist/atlas-sql.mjs',import.meta.url).href)}) {
+export function mountReferenceUi({root,core,api,automation,getContext,settingsPort,lorePort,diagnostics=()=>[],exportDiagnostics=()=>({events:diagnostics(),coverage:{}}),emit=()=>{},defaultPrompt='',pluginVersion=null,diagnosticTools={},fetchFn=globalThis.fetch,loadSqlRuntime=()=>import(new URL('../dist/atlas-sql.mjs',import.meta.url).href)}) {
   root.replaceChildren();root.className='atlas-native-ui-host';root.id='atlas-extension-panel-root';
   root.setAttribute('role','application');root.setAttribute('aria-label','阿特拉斯世界工作台');
   // Tavern themes may transform a zero-height html element, making fixed inset
@@ -32,12 +32,16 @@ export function mountReferenceUi({root,core,api,getContext,settingsPort,lorePort
   let mapExportViews=null;
   let runtimeDiagnosticIds=new Set();
   const context=()=>{const c=getContext?.();return c?.chatMetadata?c:null;};
-  function scope(){const s=core.getState(),c=context(),env=c?.chatMetadata?.atlas?.database,enabled=c?.extensionSettings?.atlas_world_sim?.sqlMode??s.stateData?.sqlModeEnabled??s.stateData?.sqlMode??true;return {state:s,context:c,metadata:c?.chatMetadata,enabled,key:JSON.stringify([s.chatId,c?.chatId??c?.chat_id,s.binding?.branchId??'main',env?.sha256,env?.storage_revision,s.stateData?.revision,viewMode,enabled]),data:env?.data};}
+  const automationEnabled=()=>automation?.enabled?.()!==false;
+  function requireAutomation(){
+    if(!automationEnabled())throw Error('阿特拉斯已暂停，请在工作台顶栏重新启用。');
+  }
+  function scope(){const s=core.getState(),c=context(),env=c?.chatMetadata?.atlas?.database,enabled=c?.extensionSettings?.atlas_world_sim?.sqlMode??s.stateData?.sqlModeEnabled??s.stateData?.sqlMode??true;return {state:s,context:c,metadata:c?.chatMetadata,enabled,key:JSON.stringify([s.chatId,c?.chatId??c?.chat_id,s.binding?.branchId??'main',env?.sha256,env?.storage_revision,s.stateData?.revision,viewMode,enabled,automationEnabled()]),data:env?.data};}
   function live(ticket){const now=scope();return !disposed&&ticket.epoch===epoch&&ticket.key===now.key&&ticket.data===now.data&&ticket.metadata===now.metadata;}
   // 写入完成后本聊天的 revision/hash 必然变化；此时只核对聊天和分支身份。
   // 读取仍使用 live() 的完整快照守卫，不能将旧读取应用到新的修订。
   function sameWorld(ticket){const now=scope();return !disposed&&ticket.state.chatId===now.state.chatId&&ticket.state.binding?.branchId===now.state.binding?.branchId&&ticket.metadata===now.metadata&&now.enabled;}
-  function deliver(data,resetScope=false,logsOnly=false){const s=core.getState();data.meta.engine={hasChat:!!s.chatId,bound:!!s.binding,enabled:s.binding?.enabled===true,sqlEnabled:scope().enabled,serviceStatus:s.serviceStatus??'checking',phase:s.turnPhase??'idle',busy:actionBusy||!!s.pendingTurn||['queued','reading-context','committing'].includes(s.turnPhase),error:actionScope===data.meta.scopeKey&&actionError? actionError:typeof s.lastError==='string'?s.lastError:s.lastError?.message??null};
+  function deliver(data,resetScope=false,logsOnly=false){const s=core.getState();data.meta.engine={hasChat:!!s.chatId,bound:!!s.binding,enabled:s.binding?.enabled===true,automationEnabled:automationEnabled(),sqlEnabled:scope().enabled,serviceStatus:s.serviceStatus??'checking',phase:s.turnPhase??'idle',busy:actionBusy||!!s.pendingTurn||['queued','reading-context','committing'].includes(s.turnPhase),error:actionScope===data.meta.scopeKey&&actionError? actionError:typeof s.lastError==='string'?s.lastError:s.lastError?.message??null};
     const incoming=referenceDiagnostics(diagnostics()),byId=new Map(data.DIAGNOSTICS.filter(d=>!runtimeDiagnosticIds.has(d.id)).map(d=>[d.id,d]));
     for(const entry of incoming)byId.set(entry.id,entry);
     runtimeDiagnosticIds=new Set(incoming.map(d=>d.id));data.DIAGNOSTICS=[...byId.values()];
@@ -241,6 +245,7 @@ export function mountReferenceUi({root,core,api,getContext,settingsPort,lorePort
     const pending=presetQueue.then(task);presetQueue=pending.catch(()=>{});return pending;
   }
   async function withTask(task,run,checkCoreError=true){
+    requireAutomation();
     if(actionBusy||core.getState().pendingTurn||['queued','reading-context','committing'].includes(core.getState().turnPhase))throw Error('有回合正在处理，请稍后再试');
     if(!scope().enabled)throw Error('SQL 世界数据已关闭，请在酒馆扩展设置中开启');
     if(!core.getState().chatId)throw Error('请先打开一个酒馆聊天');
@@ -338,6 +343,7 @@ export function mountReferenceUi({root,core,api,getContext,settingsPort,lorePort
     },
     async setLoreRead(id,enabled){if(viewMode!=='author')throw Error('请切换世界后台后修改 ATLAS 读取设置');if(!lorePort?.setAtlasRead)throw Error('ATLAS 读取设置不可用');if(!enabled)await haltBuild();await lorePort.setAtlasRead(id,enabled);await readLore();},
     close(){core.setPanelOpen(false);},
+    setAutomationEnabled:automation?.setEnabled,
     async buildControl(action){
       if(action!=='stop'&&action!=='retry-failed')throw Error('未知建设控制操作');
       const captured=scope(),job=latest?.buildStatus?.job;
@@ -347,7 +353,7 @@ export function mountReferenceUi({root,core,api,getContext,settingsPort,lorePort
       if(result.coreSaved!==true)throw Error('宿主尚未确认建设控制请求');
       if(sameWorld(captured)){await core.refresh();await refresh(true);}
     },
-    async setEnabled(enabled){if(actionBusy||core.getState().pendingTurn)throw Error('有回合正在处理，请稍后再试');if(!core.getState().binding)throw Error('请先建立当前聊天的世界');if(!enabled)await haltBuild();await core.setEnabled(enabled);await refresh(true);const s=core.getState();if(s.binding?.enabled!==enabled)throw Error(s.lastError??'推演开关未保存');},
+    async setEnabled(enabled){requireAutomation();if(actionBusy||core.getState().pendingTurn)throw Error('有回合正在处理，请稍后再试');if(!core.getState().binding)throw Error('请先建立当前聊天的世界');if(!enabled)await haltBuild();await core.setEnabled(enabled);await refresh(true);const s=core.getState();if(s.binding?.enabled!==enabled)throw Error(s.lastError??'推演开关未保存');},
     async advance(){return withTask(core.getState().binding?'advance':'initialize',async()=>{if(core.getState().binding)return core.manualAdvance();const result=await core.initializeWorld();if(result!==true)throw Error(core.getState().lastError??'当前聊天的世界初始化未完成');return result;});},
     async retry(){return withTask('repair',()=>core.retryLastCommit());},
     async layout(mapId){return withTask('initialize',async()=>{
@@ -457,7 +463,7 @@ export function mountReferenceUi({root,core,api,getContext,settingsPort,lorePort
           capabilities:Array.isArray(settings?.spatialCapabilities)?[...settings.spatialCapabilities]:[]};
       },false);
     },
-    async undo(){const messageId=latest.meta.rollbackMessageId;if(messageId===null||messageId===undefined)throw Error('没有可回退的已提交回合');
+    async undo(){requireAutomation();const messageId=latest.meta.rollbackMessageId;if(messageId===null||messageId===undefined)throw Error('没有可回退的已提交回合');
       const captured=scope();const result=await request('POST','/sql/chat/rollback',{chatUid:captured.state.chatId,chatId:captured.state.chatId,assistantMessageId:String(messageId)});
       if(result.coreSaved!==true)throw Error(result.issues?.map(x=>x.message).join('；')||'回退未保存');await core.refresh();await refresh(true);},
     async refresh(){await core.refresh();await refresh(true);},

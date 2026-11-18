@@ -364,8 +364,6 @@ test("形态契约：扩展菜单打开入口（作者 2026-09-19 反馈：修�
   const js = readLegacyUiSource(join(root, "atlas-extension", "index.js"));
   ok(js.includes('document.getElementById("extensionsMenu")'), "往酒馆扩展菜单 #extensionsMenu 挂条目");
   ok(js.includes('item.id = "atlas-menu-open"'), "菜单条目有稳定 id（幂等不重复挂载）");
-  ok(js.includes("installMenuButton(core)"), "连接时安装菜单入口");
-  ok(js.includes("removeMenuButton();"), "停用 / 断开时移除菜单入口");
   ok(/core\.setPanelOpen\(true\)/.test(js), "点击菜单 = 打开工作台");
 });
 
@@ -381,13 +379,9 @@ test("形态契约：预览控制挂右栏槽位，不常驻生产界面", () =>
   ok(preview.includes("__atlasDevSlot"), "夹具与插件槽位对齐");
 });
 
-test("connectAtlas 并发安全：模块自初始化与 activate 共享同一次挂载", () => {
+test("扩展保留酒馆激活入口与旧版自动初始化", () => {
   const js = readLegacyUiSource(join(root, "atlas-extension", "index.js"));
-  ok(js.includes("if (connecting) return connecting;"), "有在途连接闸门（只有 connected 检查会双重挂载）");
-  ok(js.includes("connecting = connectOnce();"), "在途 Promise 被记录");
-  ok(/finally\s*\{\s*connecting = null;/.test(js), "连接结束后清空在途标记");
-  equal((js.match(/renderPanel\(/g) ?? []).length, 2, "renderPanel 只声明一次 + 调用一次（不存在第二处挂载）");
-  ok(js.includes("void connectAtlas();"), "模块加载仍自初始化（旧版酒馆无 hooks）");
+  ok(js.includes("void activate();"), "模块加载仍自初始化（旧版酒馆无 hooks）");
   ok(js.includes("export async function activate()"), "同时保留 hooks.activate 入口");
 });
 

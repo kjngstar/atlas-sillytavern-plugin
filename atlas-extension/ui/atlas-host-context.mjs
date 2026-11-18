@@ -372,6 +372,10 @@ export function pathWantsSession(path) {
 export function createAtlasSessionApi(deps) {
   const context = deps.context;
   const innerApi = deps.innerApi;
+  const signal = deps.signal;
+  const disabled = { status: 409, body: { ok: false, error: {
+    code: "ATLAS_DISABLED", message: "阿特拉斯已停用。",
+  } } };
   const emit = typeof deps.emit === "function" ? deps.emit : () => {};
   const notify = typeof deps.notify === "function" ? deps.notify : () => {};
   const logCall = typeof deps.logCall === "function" ? deps.logCall : (method, path, run) => run();
@@ -381,6 +385,10 @@ export function createAtlasSessionApi(deps) {
   const latestByMetadata = new WeakMap();
   return {
     async request(method, path, body) {
+      if (signal?.aborted) return disabled;
+      const work = deps.automationSignal?.();
+      const canBrowse = deps.canBrowse?.(method, path) === true;
+      if (work?.aborted && !canBrowse) return deps.pausedResponse;
       const requestContext = context();
       const requestChatId = requestContext.chatId ?? null;
       const requestMetadata = requestContext.chatMetadata ?? null;
@@ -392,13 +400,17 @@ export function createAtlasSessionApi(deps) {
       if (method === "POST" && pathWantsSession(path)) {
         requestSession = readAtlasSession(context);
         const latest = requestMetadata && latestByMetadata.get(requestMetadata);
-        if (latest && latest.chatId === requestChatId && latest.session.rev > (requestSession?.rev ?? -1)) {
+        if (!work?.aborted && latest && latest.chatId === requestChatId && latest.session.rev > (requestSession?.rev ?? -1)) {
           await writeAtlasSession(context, latest.session, requestChatId, requestMetadata);
+          if (signal?.aborted) return disabled;
+          if (work?.aborted && !canBrowse) return deps.pausedResponse;
           requestSession = latest.session;
         }
         if (requestSession) payload = { ...(body ?? {}), session: requestSession };
       }
       const result = await logCall(method, path, () => innerApi.request(method, path, payload), payload);
+      if (signal?.aborted) return disabled;
+      if (work?.aborted) return canBrowse ? result : deps.pausedResponse;
       const firstWorld = method === "POST" && path === "/worlds/ensure-starter" &&
         !result?.body?.session?.binding;
       try {
