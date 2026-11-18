@@ -40,7 +40,7 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 var define_ATLAS_BUILD_INFO_default;
 var init_define_ATLAS_BUILD_INFO = __esm({
   "<define:__ATLAS_BUILD_INFO__>"() {
-    define_ATLAS_BUILD_INFO_default = { pluginVersion: "0.9.101", buildId: "build-c744882e25450a97", buildCommit: "e8111f05ca2fd8ca7e7ed9690a6ee01f070f30d7", buildDirty: false };
+    define_ATLAS_BUILD_INFO_default = { pluginVersion: "0.9.101", buildId: "build-101f06e51b5dc16a", buildCommit: "ea582533b18691f85c9e63d283f26e5794278e20", buildDirty: false };
   }
 });
 
@@ -6303,18 +6303,19 @@ function createBrowserSqlHost(options) {
           chatUid,
           branchId,
           chatMetadata: record.chatMetadata,
-          modelPort: options.modelPort ?? null,
+          modelPort: record.modelPort === void 0 ? options.modelPort ?? null : record.modelPort,
           readWorldBuildSources: options.readWorldBuildSources,
           ...!envelopeOf(record.chatMetadata) && atlas?.world && typeof atlas.world === "object" ? {
             worldUid: typeof atlas.world.id === "string" ? atlas.world.id : void 0,
             branchName: typeof atlas.world.name === "string" ? atlas.world.name : void 0
           } : {},
           confirmSave: true,
-          isCurrentHost: () => isCurrent(record, branchId) && sameSnapshot(
+          isCurrentHost: () => record.canWrite?.() !== false && isCurrent(record, branchId) && sameSnapshot(
             current?.session.chatMetadata === record.chatMetadata ? current.savingSnapshot ?? current.storedSnapshot : openingSnapshot,
             snapshot(record.chatMetadata)
           ),
           saveSession: async () => {
+            if (record.canWrite?.() === false) throw error("ATLAS_PAUSED", "阿特拉斯已暂停，世界数据未写入");
             if (!isCurrent(record, branchId)) throw error("CHAT_CHANGED", "保存前聊天或分支已变化");
             if (migrating && legacySignature() !== originalLegacy) throw error("SESSION_STALE", "保存前旧档已变化，拒绝发布迁移候选");
             const saving = current?.session.chatMetadata === record.chatMetadata ? current : null;
@@ -9985,7 +9986,7 @@ function createAtlasUiCore(deps) {
         const result = await api.request("POST", "/sql/chat/binding", { chatUid: chatId });
         const body = result.body;
         if (state.chatId !== chatId || !sqlEnabled()) return;
-        if (result.status !== 200 || !body.ok || !body.data?.binding) {
+        if (result.status !== 200 || !body.ok || !body.data || !("binding" in body.data)) {
           setState({ binding: null, stateData: null, mode: "unbound", lastError: body.error?.message ?? "SQL 聊天初始化未完成。" });
           return;
         }
@@ -10145,7 +10146,7 @@ function createAtlasUiCore(deps) {
     await syncFromHost();
     if (state.binding && state.serviceStatus === "online") {
       const key = `${state.binding.chatId}|${state.binding.worldId}`;
-      if (!sqlEnabled() && deps.syncProtagonistIdentity && !syncedProtagonistChats.has(key)) {
+      if (deps.automationEnabled?.() !== false && !sqlEnabled() && deps.syncProtagonistIdentity && !syncedProtagonistChats.has(key)) {
         try {
           if (await deps.syncProtagonistIdentity(state.binding.chatId, state.binding.worldId)) {
             syncedProtagonistChats.add(key);
@@ -10210,7 +10211,7 @@ function createAtlasUiCore(deps) {
         lastError: null
       });
       restoreReceiptsForChat(host.getChatId());
-      if (!sqlEnabled() && deps.onLorebookChatSwitch) {
+      if (deps.automationEnabled?.() !== false && !sqlEnabled() && deps.onLorebookChatSwitch) {
         const chatId = host.getChatId();
         void track(
           Promise.resolve().then(() => host.readBinding()).then((raw) => deps.onLorebookChatSwitch({ chatId, bound: parseAtlasChatBinding(raw).ok })).catch(() => {
@@ -10220,6 +10221,7 @@ function createAtlasUiCore(deps) {
       void track(refresh());
       return;
     }
+    if (deps.automationEnabled?.() === false) return;
     const adapted = deps.adaptEvent?.(event, payload) ?? null;
     if (!adapted) return;
     if (adapted.kind === "message-sent") {
@@ -11381,6 +11383,19 @@ function createAtlasUiCore(deps) {
     },
     getState() {
       return { ...state, binding: state.binding ? { ...state.binding } : null };
+    },
+    pauseAutomation() {
+      generationRevision += 1;
+      generationLifecycle.reset();
+      stoppedGeneration = true;
+      lastPrepareTask = null;
+      lastMutationTask = null;
+      sqlRetryRequest = null;
+      retryRollbackFloor = null;
+      swipeIdForNextCommit = null;
+      if (commitFlight) releaseCommit(commitFlight);
+      clearTimers();
+      setState({ pendingTurn: null, rearmTurn: null, retryableCommit: null, turnPhase: "idle" });
     },
     setPanelOpen(open) {
       setState({ panelOpen: open });
